@@ -28,9 +28,9 @@ gen-go:
         --go-grpc_opt=module=github.com/ai-nhancement/Anvil/sidecar \
         proto/anvil/v1/sidecar.proto
 
-# Generate Rust protobuf bindings via cargo build (triggers build.rs)
+# Generate Rust protobuf bindings via cargo build (requires protoc; commits src/gen/anvil.v1.rs)
 gen-rust:
-    cargo build -p anvil-sidecar-client --quiet
+    ANVIL_REGEN_PROTO=1 cargo build -p anvil-sidecar-client --quiet
 
 # Generate all protobuf bindings (Go + Rust)
 gen: gen-go gen-rust

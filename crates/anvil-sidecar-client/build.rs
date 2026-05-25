@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&src_gen_dir)?;
         tonic_build::configure()
             .build_server(false)
-            .build_client(false)
+            .build_client(true)
             .out_dir(&src_gen_dir)
             .compile_protos(
                 &[proto_root.join("anvil/v1/sidecar.proto")],

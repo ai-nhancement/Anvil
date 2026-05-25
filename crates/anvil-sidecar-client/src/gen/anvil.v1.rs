@@ -346,3 +346,209 @@ impl ErrorClass {
         }
     }
 }
+
+// ── gRPC client stub ─────────────────────────────────────────────────────────
+
+pub mod sidecar_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value
+    )]
+    use tonic::codegen::*;
+
+    #[derive(Debug, Clone)]
+    pub struct SidecarClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+
+    impl SidecarClient<tonic::transport::Channel> {
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+
+    impl<T> SidecarClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::BoxBody>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> SidecarClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::BoxBody>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::BoxBody>,
+            >>::Error: Into<StdError> + Send + Sync,
+        {
+            SidecarClient::new(InterceptedService::new(inner, interceptor))
+        }
+
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+
+        pub async fn handshake(
+            &mut self,
+            request: impl tonic::IntoRequest<super::HandshakeRequest>,
+        ) -> std::result::Result<tonic::Response<super::HandshakeResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/anvil.v1.Sidecar/Handshake");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("anvil.v1.Sidecar", "Handshake"));
+            self.inner.unary(req, path, codec).await
+        }
+
+        pub async fn invoke(
+            &mut self,
+            request: impl tonic::IntoRequest<super::InvokeRequest>,
+        ) -> std::result::Result<tonic::Response<super::InvokeResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/anvil.v1.Sidecar/Invoke");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("anvil.v1.Sidecar", "Invoke"));
+            self.inner.unary(req, path, codec).await
+        }
+
+        pub async fn invoke_streaming(
+            &mut self,
+            request: impl tonic::IntoRequest<super::InvokeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::InvokeStreamEvent>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/anvil.v1.Sidecar/InvokeStreaming");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("anvil.v1.Sidecar", "InvokeStreaming"));
+            self.inner.server_streaming(req, path, codec).await
+        }
+
+        pub async fn cancel(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CancelRequest>,
+        ) -> std::result::Result<tonic::Response<super::CancelResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/anvil.v1.Sidecar/Cancel");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("anvil.v1.Sidecar", "Cancel"));
+            self.inner.unary(req, path, codec).await
+        }
+
+        pub async fn health(
+            &mut self,
+            request: impl tonic::IntoRequest<super::HealthRequest>,
+        ) -> std::result::Result<tonic::Response<super::HealthResponse>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/anvil.v1.Sidecar/Health");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("anvil.v1.Sidecar", "Health"));
+            self.inner.unary(req, path, codec).await
+        }
+
+        pub async fn reload_config(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ReloadConfigRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ReloadConfigResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path =
+                http::uri::PathAndQuery::from_static("/anvil.v1.Sidecar/ReloadConfig");
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("anvil.v1.Sidecar", "ReloadConfig"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}

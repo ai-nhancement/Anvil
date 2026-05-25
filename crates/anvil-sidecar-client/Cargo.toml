@@ -10,6 +10,7 @@ description = "Anvil gRPC client for the model-adapter sidecar"
 tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+uuid = { version = "1", features = ["v7"] }
 
 [build-dependencies]
 tonic-build = "0.12"

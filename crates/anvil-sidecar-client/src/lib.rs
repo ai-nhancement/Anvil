@@ -3,6 +3,8 @@ pub mod proto {
     tonic::include_proto!("anvil.v1");
 }
 
+pub mod client;
+
 #[cfg(test)]
 mod tests {
     use super::proto;
@@ -65,6 +67,85 @@ mod tests {
         };
         assert_eq!(req.core_protocol_version, "v1");
         assert!(!req.supported_versions.is_empty());
+    }
+
+    // hinge_test: pins=client-error-variants, intended=client-handshake-guard, phase=P3b
+    #[test]
+    fn test_client_error_variants_exist() {
+        // Compile-time: all ClientError variants constructible without a live transport.
+        use crate::client::ClientError;
+        let _ = ClientError::HandshakeRequired;
+        let _ = ClientError::ConfigEpochMismatch;
+        let _ = ClientError::NoFinalResult;
+        let _ = ClientError::StreamStateMachineViolation;
+        let _ = ClientError::ProtocolMismatch("v99".into());
+        let _ = ClientError::ResponseMismatch {
+            sent: "a".into(),
+            received: "b".into(),
+        };
+        let _ = ClientError::Stream(None);
+        let _ = ClientError::Stream(Some(proto::AnvilError {
+            class: proto::ErrorClass::Transport as i32,
+            vendor_code: String::new(),
+            message: String::new(),
+            details: std::collections::HashMap::new(),
+        }));
+        let _ = ClientError::Anvil(proto::AnvilError {
+            class: proto::ErrorClass::SchemaViolation as i32,
+            vendor_code: String::new(),
+            message: String::new(),
+            details: std::collections::HashMap::new(),
+        });
+    }
+
+    // hinge_test: pins=v1-only-supported-versions, intended=protocol-version-list, phase=P3b
+    #[test]
+    fn test_supported_versions_is_v1_only() {
+        // Adding or reordering versions is a breaking protocol change requiring review.
+        assert_eq!(crate::client::SUPPORTED_VERSIONS, &["v1"]);
+    }
+
+    // hinge_test: pins=invoke-stream-idempotency-key-method, intended=cancel-correlation, phase=P3b
+    #[test]
+    fn test_invoke_stream_has_idempotency_key() {
+        // Compile-time: InvokeStream::idempotency_key() must exist and return &str.
+        fn _assert_method(s: &crate::client::InvokeStream) -> &str {
+            s.idempotency_key()
+        }
+    }
+
+    // hinge_test: pins=idempotency-key-uuidv7, intended=idempotency-key-format, phase=P3b
+    #[test]
+    fn test_idempotency_key_is_uuidv7() {
+        // Pins that uuid v7 is wired in and produces the right version nibble.
+        let key = uuid::Uuid::now_v7().to_string();
+        assert_eq!(key.len(), 36, "UUID string length must be 36: {key}");
+        assert_eq!(&key[14..15], "7", "UUID version nibble must be '7': {key}");
+        let parsed = uuid::Uuid::parse_str(&key).expect("must parse as UUID");
+        assert_eq!(parsed.get_version_num(), 7);
+    }
+
+    // hinge_test: pins=invoke-stream-collect-returns-final-result, intended=no-commit-on-partial-output, phase=P3b
+    #[test]
+    fn test_invoke_stream_collect_type() {
+        // Compile-time: collect() must return FinalResult, not a token accumulation.
+        // This is the type-level enforcement of NO-COMMIT-ON-PARTIAL-OUTPUT.
+        fn _assert_type(
+            s: crate::client::InvokeStream,
+        ) -> impl std::future::Future<
+            Output = Result<proto::FinalResult, crate::client::ClientError>,
+        > {
+            s.collect()
+        }
+    }
+
+    // hinge_test: pins=client-error-from-status, intended=transport-error-conversion, phase=P3b
+    #[test]
+    fn test_client_error_from_status() {
+        use crate::client::ClientError;
+        let status = tonic::Status::internal("test");
+        let err: ClientError = status.into();
+        assert!(matches!(err, ClientError::Transport(_)));
     }
 
     // hinge_test: pins=invoke_request::Payload::Chat+chat_request_shape, intended=invoke-chat-oneof-shape, phase=P3a

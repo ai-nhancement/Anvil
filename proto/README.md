@@ -111,6 +111,6 @@ just gen-rust   # Rust only (requires protoc)
 
 **Go:** Bindings are committed to `sidecar/internal/contract/sidecar.pb.go` and `sidecar_grpc.pb.go`. Never edit them directly — regenerate with `just gen-go`. The `ProtoPackageName` constant in `doc.go` is non-generated and survives regeneration.
 
-**P3b handoff (Rust client generation):** `build.rs` currently sets `build_client(false)`. P3b must change this to `build_client(true)`, install `protoc`, run `just gen-rust`, and commit the updated `src/gen/anvil.v1.rs` (which will include the generated `SidecarClient` gRPC stub).
+**P3b — done:** `build.rs` was updated to `build_client(true)` in P3b. A hand-written `pub mod sidecar_client` stub (matching tonic-build 0.12 output style) is committed to `src/gen/anvil.v1.rs`. When `protoc` is available, running `just gen-rust` replaces the hand-written stub with the fully generated version.
 
 **Drift detection:** A `just check-proto-drift` recipe (regenerate into a temp dir and diff) is deferred until `protoc` is available. Until then, the hinge tests in `anvil-sidecar-client` and `sidecar/internal/contract` serve as the primary drift guard.

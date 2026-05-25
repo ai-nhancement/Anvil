@@ -10,5 +10,9 @@ description = "Anvil workflow CLI"
 name = "anvil"
 path = "src/main.rs"
 
+[dependencies]
+anvil-core = { path = "../anvil-core" }
+clap = { version = "4", features = ["derive"] }
+
 [lints]
 workspace = true

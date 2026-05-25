@@ -1,17 +1,218 @@
+use std::path::{Path, PathBuf};
+
+use anvil_core::{
+    choices::LockState,
+    config::{check_plan_stage_gate, load_config, save_config},
+    project,
+};
+use clap::{Parser, Subcommand};
+
 pub(crate) const BINARY_NAME: &str = "anvil";
 
+#[derive(Parser)]
+#[command(name = "anvil", version, about = "Anvil workflow CLI")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Initialize a new Anvil project at the given path.
+    Init {
+        /// Path to the new project directory.
+        path: PathBuf,
+    },
+    /// Inspect or modify project configuration.
+    #[command(subcommand)]
+    Config(ConfigCmd),
+    /// Gate checks for workflow stage transitions.
+    #[command(subcommand)]
+    Gate(GateCmd),
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Display current project configuration and Required-Choice lock status.
+    Show {
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Set a configuration value (key in dotted form, e.g. `sidecar.idle_timeout_secs`).
+    Set {
+        key: String,
+        value: String,
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum GateCmd {
+    /// Check whether all Required Choices are locked; required before entering Plan stage.
+    CheckPlan {
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", BINARY_NAME, env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
+    let cli = Cli::parse();
+    let result = run(cli);
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
-    eprintln!(
-        "{} {}: no subcommand (try --version)",
-        BINARY_NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    std::process::exit(1);
+}
+
+fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
+    match cli.command {
+        Command::Init { path } => cmd_init(&path),
+        Command::Config(cmd) => match cmd {
+            ConfigCmd::Show { project } => cmd_config_show(&project),
+            ConfigCmd::Set {
+                key,
+                value,
+                project,
+            } => cmd_config_set(&project, &key, &value),
+        },
+        Command::Gate(cmd) => match cmd {
+            GateCmd::CheckPlan { project } => cmd_gate_check_plan(&project),
+        },
+    }
+}
+
+fn cmd_init(path: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    match project::init(path)? {
+        project::InitResult::Initialized { root, dirs_created } => {
+            println!("Initialized Anvil project at {}", root.display());
+            println!("  Created {dirs_created} directories + anvil.toml");
+            println!(
+                "  Run `anvil config show --project {}` to inspect choices.",
+                root.display()
+            );
+        }
+        project::InitResult::AlreadyInitialized { root } => {
+            println!("Project already initialized at {}", root.display());
+            cmd_config_show(&root)?;
+        }
+    }
+    Ok(())
+}
+
+fn cmd_config_show(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    let config = load_config(root)?;
+
+    println!("Required Choices ({} total):", config.choices.len());
+    for (key, choice) in &config.choices {
+        let lock_label = match choice.lock_state {
+            LockState::Final => "final",
+            LockState::Provisional => "provisional",
+            LockState::Unlocked => "UNLOCKED",
+        };
+        println!("  {key} [{lock_label}]: {}", choice.value);
+        if choice.lock_state == LockState::Provisional {
+            if let Some(h) = &choice.hypothesis {
+                println!("    hypothesis: {h}");
+            }
+            if let Some(rt) = &choice.revision_trigger {
+                println!("    revision_trigger: {rt}");
+            }
+        }
+    }
+
+    println!();
+    println!("Sidecar:");
+    println!("  idle_timeout_secs: {}", config.sidecar.idle_timeout_secs);
+    match &config.sidecar.binary_path {
+        Some(p) => println!("  binary_path: {}", p.display()),
+        None => println!("  binary_path: (from $PATH)"),
+    }
+
+    if config.provider_connections.is_empty() {
+        println!();
+        println!("Provider connections: (none — run `anvil setup` to configure)");
+    } else {
+        println!();
+        println!("Provider connections:");
+        for (name, conn) in &config.provider_connections {
+            println!("  {name}: {:?}", conn.provider_type);
+        }
+    }
+
+    if config.model_bindings.is_empty() {
+        println!();
+        println!("Model bindings: (none — run `anvil setup` to configure)");
+    } else {
+        println!();
+        println!("Model bindings:");
+        for binding in &config.model_bindings {
+            println!(
+                "  {} — {} via {}",
+                binding.name, binding.model_identity, binding.provider_connection
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_config_set(
+    root: &Path,
+    key: &str,
+    value: &str,
+) -> Result<(), anvil_core::error::AnvilError> {
+    let mut config = load_config(root)?;
+
+    match key {
+        "sidecar.idle_timeout_secs" => {
+            let secs: u32 =
+                value
+                    .parse()
+                    .map_err(|_| anvil_core::error::AnvilError::InvalidConfigValue {
+                        key: key.to_owned(),
+                        reason: format!("expected a non-negative integer, got '{value}'"),
+                    })?;
+            config.sidecar.idle_timeout_secs = secs;
+        }
+        "sidecar.binary_path" => {
+            config.sidecar.binary_path = Some(PathBuf::from(value));
+        }
+        _ => {
+            return Err(anvil_core::error::AnvilError::UnknownConfigKey(
+                key.to_owned(),
+            ));
+        }
+    }
+
+    save_config(root, &config)?;
+    println!("Set {key} = {value}");
+    Ok(())
+}
+
+fn cmd_gate_check_plan(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    let config = load_config(root)?;
+    let unlocked = check_plan_stage_gate(&config);
+    if unlocked.is_empty() {
+        println!("Gate check passed: all Required Choices are locked.");
+        println!("Plan stage is unblocked.");
+    } else {
+        eprintln!(
+            "Gate check failed: {} Required Choice(s) are unlocked:",
+            unlocked.len()
+        );
+        for key in &unlocked {
+            eprintln!("  - {key}");
+        }
+        eprintln!();
+        eprintln!("Lock all choices before entering Plan stage.");
+        eprintln!("Use `{BINARY_NAME} config set <key> <value>` to update values.");
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

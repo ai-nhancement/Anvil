@@ -389,7 +389,7 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
 - **Deliverable.** A user can initialize a project, set/view configuration, and the gate check blocks Plan stage if Choices are unlocked.
 - **Acceptance criteria.**
   1. `anvil init my-project` creates the per-project directory layout.
-  2. Required-Choices schema covers all 16 Choices from the Charter + this Plan (including the two "v1.1 prep" provisional locks and the now-locked sidecar lifecycle).
+  2. Required-Choices schema covers all 17 Choices from the Charter + this Plan (including the two "v1.1 prep" provisional locks, the now-locked sidecar lifecycle, and `runtime_alert_response_policies` added in a later plan revision).
   3. `anvil config show` displays lock status.
   4. Provisional Locks require non-empty hypothesis and revision_trigger fields.
   5. Pre-Plan-stage gate check exits non-zero with clear listing of unlocked Choices.
@@ -397,7 +397,7 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
   7. `anvil init` on an already-initialized project prints current status and exits zero without modifying state.
 - **Dependencies.** P0.
 - **Hinge-test list.**
-  - `test_required_choices_count` — pins 16 (updated from 15 to include sidecar lifecycle).
+  - `test_required_choices_count` — pins 17 (updated from 16; `runtime_alert_response_policies` added in later revision).
   - `test_project_layout_directories` — pins per-project directory names.
 - **Evaluation-metric impact.** Deferred-decision resolution rate: adds 2 hinge tests; Provisional Lock mechanism enables Choice tracking. Human minutes per shipped phase: config inspection commands reduce friction in later phases.
 - **Estimated rounds-to-convergence.** 2.

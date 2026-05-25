@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package anvil.v1;
+
+option go_package = "github.com/ai-nhancement/Anvil/sidecar/internal/contract;contract";
+
+// Sidecar is the model-adapter service that bridges the Vault to vendor APIs.
+// This is the P0 placeholder; the full service definition ships in P3a.
+service Sidecar {
+  // Ping is a P0 bootstrap stub. Replaced by the full service contract in P3a.
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {}
+
+message PingResponse {
+  string pong = 1;
+}

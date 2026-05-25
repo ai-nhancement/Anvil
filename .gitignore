@@ -1,0 +1,23 @@
+# Rust
+/target/
+
+# Go
+sidecar/vendor/
+*.exe
+*.test
+
+# Anvil runtime
+.anvil/run/
+.anvil/logs/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Local dev tool state
+.claude/
+.grok/

@@ -1,0 +1,10 @@
+[package]
+name = "anvil-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Anvil evaluation metrics and alert engine"
+
+[lints]
+workspace = true

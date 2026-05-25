@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust build + test + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Format check (Rust)
+        run: cargo fmt --all -- --check
+
+      - name: cargo audit (dependency vulnerability scan)
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit
+
+  go:
+    name: Go build + test + lint
+    runs-on: ubuntu-latest
+    env:
+      GOPROXY: https://proxy.golang.org,direct
+      GONOSUMDB: "off"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache proto plugin binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin
+          key: go-proto-plugins-protoc-gen-go-v1.36.11-grpc-v1.6.2
+
+      - name: Install proto plugins
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Generate proto bindings
+        run: just gen-go
+
+      - name: Build
+        working-directory: sidecar
+        run: go build ./...
+
+      - name: Test
+        working-directory: sidecar
+        run: go test ./...
+
+      - name: Format check (Go)
+        working-directory: sidecar
+        run: test -z "$(gofmt -l .)"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: sidecar
+          version: v2.12.2
+
+      - name: govulncheck (dependency vulnerability scan)
+        working-directory: sidecar
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+          govulncheck ./...
+
+  dco:
+    name: DCO check
+    runs-on: ubuntu-latest
+    # Enforces standard Signed-off-by (DCO) on all commits.
+    # AI-Assisted-By: and Derived-From: trailer validation (per CONTRIBUTING.md)
+    # is not yet automated. Add a trailer-grep step here before P3/P5 when
+    # substantive contributions first land; see CONTRIBUTING.md for threshold rules.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: DCO
+        uses: dco-org/dco-check@v1
+
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

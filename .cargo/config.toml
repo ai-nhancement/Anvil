@@ -1,0 +1,3 @@
+[build]
+# Deny all warnings at build time, enforcing the clippy "deny warnings" policy.
+rustflags = ["-D", "warnings"]

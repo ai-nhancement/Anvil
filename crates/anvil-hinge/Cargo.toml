@@ -1,0 +1,10 @@
+[package]
+name = "anvil-hinge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Anvil hinge-test framework"
+
+[lints]
+workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "anvil-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Anvil provenance and dependency graph"
+
+[lints]
+workspace = true

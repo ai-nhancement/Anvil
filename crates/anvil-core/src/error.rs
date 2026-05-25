@@ -26,6 +26,34 @@ pub enum AnvilError {
     #[error("invalid value for '{key}': {reason}")]
     InvalidConfigValue { key: String, reason: String },
 
+    #[error("record already exists: {id}")]
+    RecordAlreadyExists { id: String },
+
+    #[error("record not found: {id}")]
+    RecordNotFound { id: String },
+
+    #[error("audit index corrupted at {path}: {reason}")]
+    IndexCorrupted { path: PathBuf, reason: String },
+
+    #[error("invalid record type: '{0}'")]
+    InvalidRecordType(String),
+
+    #[error("invalid cross-reference key '{0}' — expected format: path:section:version (no colons in fields)")]
+    InvalidCrossRefKey(String),
+
+    #[error("invalid record id '{0}' — ids must not contain path separators or control characters")]
+    InvalidRecordId(String),
+
+    #[error("utf-8 violation in record '{id}': {source}")]
+    RecordUtf8Error {
+        id: String,
+        #[source]
+        source: std::str::Utf8Error,
+    },
+
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

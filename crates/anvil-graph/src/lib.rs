@@ -1,1 +1,4 @@
-// anvil-graph: provenance + dependency graph. Full implementation in P2.
+pub mod graph;
+
+pub use anvil_audit::CrossRefKey;
+pub use graph::ProvenanceGraph;

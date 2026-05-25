@@ -12,7 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 anvil-core = { path = "../anvil-core" }
+anvil-audit = { path = "../anvil-audit" }
+anvil-graph = { path = "../anvil-graph" }
 clap = { version = "4", features = ["derive"] }
+serde_json = "1"
 
 [lints]
 workspace = true

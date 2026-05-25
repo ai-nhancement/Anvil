@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 
+use anvil_audit::{AuditStore, RecordType};
 use anvil_core::{
     choices::LockState,
     config::{check_plan_stage_gate, load_config, save_config},
     project,
 };
+use anvil_graph::ProvenanceGraph;
 use clap::{Parser, Subcommand};
 
 pub(crate) const BINARY_NAME: &str = "anvil";
@@ -29,6 +31,9 @@ enum Command {
     /// Gate checks for workflow stage transitions.
     #[command(subcommand)]
     Gate(GateCmd),
+    /// Audit store operations.
+    #[command(subcommand)]
+    Audit(AuditCmd),
 }
 
 #[derive(Subcommand)]
@@ -59,6 +64,37 @@ enum GateCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// List all records of a given type (kebab-case, e.g. `gate-approval`).
+    List {
+        record_type: String,
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Show the full JSON of a record by ID.
+    Show {
+        id: String,
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Check that all indexed records are physically present on disk.
+    Integrity {
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Show which records back a cross-reference key (format: `path:section:version`).
+    Provenance {
+        cross_ref_key: String,
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     let result = run(cli);
@@ -81,6 +117,18 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
         },
         Command::Gate(cmd) => match cmd {
             GateCmd::CheckPlan { project } => cmd_gate_check_plan(&project),
+        },
+        Command::Audit(cmd) => match cmd {
+            AuditCmd::List {
+                record_type,
+                project,
+            } => cmd_audit_list(&project, &record_type),
+            AuditCmd::Show { id, project } => cmd_audit_show(&project, &id),
+            AuditCmd::Integrity { project } => cmd_audit_integrity(&project),
+            AuditCmd::Provenance {
+                cross_ref_key,
+                project,
+            } => cmd_audit_provenance(&project, &cross_ref_key),
         },
     }
 }
@@ -211,6 +259,83 @@ fn cmd_gate_check_plan(root: &Path) -> Result<(), anvil_core::error::AnvilError>
         eprintln!("Lock all choices before entering Plan stage.");
         eprintln!("Use `{BINARY_NAME} config set <key> <value>` to update values.");
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_audit_list(
+    root: &Path,
+    record_type_str: &str,
+) -> Result<(), anvil_core::error::AnvilError> {
+    let rt = RecordType::from_dir_name(record_type_str)
+        .or_else(|| RecordType::from_type_name(record_type_str))
+        .ok_or_else(|| {
+            anvil_core::error::AnvilError::InvalidRecordType(record_type_str.to_owned())
+        })?;
+    let store = AuditStore::open(root)?;
+    let entries = store.list(rt)?;
+    if entries.is_empty() {
+        println!("No {} records found.", rt.as_str());
+    } else {
+        println!("{} record(s) of type {}:", entries.len(), rt.as_str());
+        for entry in &entries {
+            println!("  {}", entry.id);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_audit_show(root: &Path, id: &str) -> Result<(), anvil_core::error::AnvilError> {
+    let store = AuditStore::open(root)?;
+    let value = store.get(id)?;
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn cmd_audit_integrity(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    let store = AuditStore::open(root)?;
+    let report = store.check_integrity()?;
+    match report.status {
+        anvil_audit::IntegrityStatus::Pass => {
+            println!("Integrity check passed: all indexed records are present on disk.");
+        }
+        anvil_audit::IntegrityStatus::Warn => {
+            println!("Integrity check: warnings detected.");
+            for v in &report.violations {
+                println!("  WARN  {} — {}", v.path, v.reason);
+            }
+        }
+        anvil_audit::IntegrityStatus::BlockShip => {
+            eprintln!(
+                "Integrity check FAILED: {} record(s) missing from disk:",
+                report.violations.len()
+            );
+            for v in &report.violations {
+                eprintln!("  MISSING  {} (id: {})", v.path, v.id);
+            }
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_audit_provenance(
+    root: &Path,
+    cross_ref_key: &str,
+) -> Result<(), anvil_core::error::AnvilError> {
+    let key = anvil_audit::CrossRefKey::parse(cross_ref_key).ok_or_else(|| {
+        anvil_core::error::AnvilError::InvalidCrossRefKey(cross_ref_key.to_owned())
+    })?;
+    let store = AuditStore::open(root)?;
+    let graph = ProvenanceGraph::build(&store)?;
+    let backing = graph.records_for_key(&key);
+    if backing.is_empty() {
+        println!("No records back '{cross_ref_key}'.");
+    } else {
+        println!("{} record(s) back '{cross_ref_key}':", backing.len());
+        for id in backing {
+            println!("  {id}");
+        }
     }
     Ok(())
 }

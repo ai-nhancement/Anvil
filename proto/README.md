@@ -25,11 +25,13 @@ This directory contains the versioned protobuf contracts between the Vault (Rust
 
 ## Contract invariants
 
-**Connect-time:** `Handshake` must be the first RPC on every connection. The sidecar rejects all other RPCs until Handshake succeeds.
+**Connect-time:** `Handshake` must be the first RPC on every connection. The sidecar rejects all other RPCs (except `Health`) until Handshake succeeds. `Health` is exempt from this requirement to support liveness and readiness probes before any client session is established.
 
 **No-commit-on-partial-output:** `InvokeStreaming` may emit `Token` events for live terminal display. Only the `FinalResult` event is authoritative for commit purposes. On any `Error` event mid-stream, the Vault must discard all accumulated stream state — there is no best-effort commit.
 
 **Config-epoch:** `vault_config_epoch` (SHA-256 of the Vault's provider config) is compared against `sidecar_config_epoch` at every Handshake. A mismatch triggers `ReloadConfig` or a sidecar restart.
+
+**Config format:** The provider config passed in `ReloadConfigRequest.new_provider_config` is **JSON** (not TOML). The `sidecar_config_epoch` and `vault_config_epoch` are both computed as the lowercase hex SHA-256 of the raw JSON bytes as written to disk. Both sides must hash the identical byte sequence — whitespace and key ordering differences produce different epochs. See `internal/config/config.go:ParseBytes` for the canonical computation.
 
 ## Version negotiation
 

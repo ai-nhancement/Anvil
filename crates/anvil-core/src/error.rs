@@ -21,7 +21,8 @@ pub enum AnvilError {
     NotInitialized(PathBuf),
 
     #[error(
-        "unknown config key '{0}' — valid keys: sidecar.idle_timeout_secs, sidecar.binary_path"
+        "unknown config key '{0}' — valid keys: sidecar.idle_timeout_secs, sidecar.binary_path, \
+         reviewer_pool, single_clean_pass_override"
     )]
     UnknownConfigKey(String),
 
@@ -107,4 +108,13 @@ pub enum AnvilError {
 
     #[error("reviewer pool is empty — add at least one reviewer binding to anvil.toml")]
     ReviewerPoolEmpty,
+
+    #[error("no ReviewerFindingPacket found with packet_id '{0}'")]
+    PacketNotFound(String),
+
+    #[error("finding '{finding_id}' not found in packet '{packet_id}'")]
+    FindingNotFound {
+        packet_id: String,
+        finding_id: String,
+    },
 }

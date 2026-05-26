@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::error::AnvilError;
-use crate::pipeline::{CharterPacket, CurationAction, DispositionLabel, VerifiedFinding};
+use crate::pipeline::{
+    AdvisoryDispositionType, CharterPacket, CurationAction, DispositionLabel, VerifiedFinding,
+};
 
 // ── Charter rendering ──────────────────────────────────────────────────────────
 
@@ -111,9 +113,14 @@ pub struct DispositionInput<'a> {
     pub bottom_line: &'a str,
     /// `CurationAction` per `finding_id`.
     pub curation_actions: &'a BTreeMap<String, CurationAction>,
+    /// Advisory disposition type and annotation text per advisory `finding_id` (P6).
+    /// Used to render explicit labels (`Accept-Advisory`, `Drop-Advisory: <reason>`, etc.)
+    /// instead of `—` for advisory findings.
+    pub advisory_dispositions: &'a BTreeMap<String, (AdvisoryDispositionType, Option<String>)>,
 }
 
 /// Renders a full Disposition document per the Artifact Specifications template.
+#[allow(clippy::too_many_lines)]
 ///
 /// All 9 sections are always present:
 /// 1. Header block
@@ -169,17 +176,38 @@ pub fn render_disposition_doc(input: &DispositionInput<'_>) -> String {
     for vf in input.verified_findings {
         let sev = vf.finding.severity.as_str();
         let claim = escape_md_table(&vf.finding.claim);
-        let action = input
-            .curation_actions
-            .get(&vf.finding.id)
-            .map_or("keep", CurationAction::as_str);
-        let label = if action == "drop" {
-            "Dropped".to_owned()
+        let label = if vf.finding.advisory {
+            match input.advisory_dispositions.get(&vf.finding.id) {
+                Some((AdvisoryDispositionType::AcceptAdvisory, _)) => "Accept-Advisory".to_owned(),
+                Some((AdvisoryDispositionType::DropAdvisory, note)) => {
+                    if let Some(n) = note {
+                        format!("Drop-Advisory: {}", escape_md_table(n))
+                    } else {
+                        "Drop-Advisory".to_owned()
+                    }
+                }
+                Some((AdvisoryDispositionType::DeferAdvisory, note)) => {
+                    if let Some(n) = note {
+                        format!("Defer-Advisory: {}", escape_md_table(n))
+                    } else {
+                        "Defer-Advisory".to_owned()
+                    }
+                }
+                None => "—".to_owned(),
+            }
         } else {
-            input
-                .disposition_map
+            let action = input
+                .curation_actions
                 .get(&vf.finding.id)
-                .map_or_else(|| "—".to_owned(), |l| l.as_str().to_owned())
+                .map_or("keep", CurationAction::as_str);
+            if action == "drop" {
+                "Dropped".to_owned()
+            } else {
+                input
+                    .disposition_map
+                    .get(&vf.finding.id)
+                    .map_or_else(|| "—".to_owned(), |l| l.as_str().to_owned())
+            }
         };
         writeln!(out, "| {} | {sev} | {claim} | {label} |", vf.finding.id).ok();
     }
@@ -315,6 +343,7 @@ mod tests {
         vfs: &'a [VerifiedFinding],
         dmap: &'a BTreeMap<String, DispositionLabel>,
         cmap: &'a BTreeMap<String, CurationAction>,
+        adv: &'a BTreeMap<String, (AdvisoryDispositionType, Option<String>)>,
     ) -> DispositionInput<'a> {
         DispositionInput {
             artifact_name: "charter",
@@ -330,6 +359,7 @@ mod tests {
             reproducibility_commands: "",
             bottom_line: "All findings resolved.",
             curation_actions: cmap,
+            advisory_dispositions: adv,
         }
     }
 
@@ -345,8 +375,9 @@ mod tests {
         dmap.insert("F1".to_owned(), DispositionLabel::Fixed);
         let mut cmap = BTreeMap::new();
         cmap.insert("F1".to_owned(), CurationAction::Keep);
+        let adv = BTreeMap::new();
 
-        let doc = render_disposition_doc(&make_test_input(&[vf], &dmap, &cmap));
+        let doc = render_disposition_doc(&make_test_input(&[vf], &dmap, &cmap, &adv));
 
         assert!(
             doc.contains("## Verification of R1 Claims"),
@@ -387,13 +418,14 @@ mod tests {
         dmap.insert("F1".to_owned(), DispositionLabel::Fixed);
         let mut cmap = BTreeMap::new();
         cmap.insert("F1".to_owned(), CurationAction::Keep);
+        let adv = BTreeMap::new();
 
         let vfs = [vf];
         let input = DispositionInput {
             round_number: 2,
             narrative_summary: "Round 2 changes.",
             corrections: "Prior narrative had a typo.",
-            ..make_test_input(&vfs, &dmap, &cmap)
+            ..make_test_input(&vfs, &dmap, &cmap, &adv)
         };
         let doc = render_disposition_doc(&input);
         assert!(

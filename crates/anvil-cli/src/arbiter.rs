@@ -16,7 +16,7 @@ use anvil_core::{config::load_config, error::AnvilError, pipeline::check_advisor
 /// Runs `anvil arbiter declare-convergence <artifact> --reason "<text>"`.
 ///
 /// Creates a `ConvergenceDeclaration` audit record for the given artifact.
-/// Exits non-zero if `reasoning` is empty.
+/// All counts (rounds, advisory findings, arbiter-decided) are scoped to the artifact.
 ///
 /// # Errors
 ///
@@ -34,16 +34,37 @@ pub fn run_declare_convergence(
 
     let store = AuditStore::open(project_root)?;
 
-    // Count rounds completed for this artifact.
-    let rfp_entries = store.list(RecordType::ReviewerFindingPacket)?;
-    let round_count = u32::try_from(rfp_entries.len()).unwrap_or(u32::MAX);
+    // Collect RFPs for this artifact only (F6).
+    let all_rfp_entries = store.list(RecordType::ReviewerFindingPacket)?;
+    let artifact_rfps = filter_rfps_by_artifact(&store, &all_rfp_entries, artifact);
+    let round_count = u32::try_from(artifact_rfps.len()).unwrap_or(u32::MAX);
 
-    // Count open advisory findings (findings marked advisory without explicit advisory disposition).
-    let advisory_finding_count = count_open_advisory_findings(&store, &rfp_entries)?;
+    // Count open advisory findings scoped to this artifact.
+    let advisory_finding_count = count_open_advisory_findings(&store, &artifact_rfps)?;
 
-    // Count arbiter-decided findings.
+    // Count arbiter-decided findings scoped to this artifact (F6).
+    let artifact_packet_ids: std::collections::HashSet<String> = artifact_rfps
+        .iter()
+        .map(|rfp| rfp.packet.packet_id.clone())
+        .collect();
     let arbiter_entries = store.list(RecordType::ArbiterFindingResolution)?;
-    let arbiter_decided_count = u32::try_from(arbiter_entries.len()).unwrap_or(u32::MAX);
+    let arbiter_decided_count = u32::try_from(
+        arbiter_entries
+            .iter()
+            .filter(|e| {
+                store
+                    .get(&e.id)
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<ArbiterFindingResolution>(v).ok())
+                    .is_some_and(|r| {
+                        r.finding_id
+                            .split_once(':')
+                            .is_some_and(|(pkt, _)| artifact_packet_ids.contains(pkt))
+                    })
+            })
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
 
     let cross_ref = CrossRefKey::new(artifact, "§root", &format!("R{round_count}")).to_key_string();
     let record = ConvergenceDeclaration::new(
@@ -57,7 +78,7 @@ pub fn run_declare_convergence(
     store.append(&record)?;
 
     println!("✓ Convergence declared for '{artifact}'.");
-    println!("  Round count:           {round_count}");
+    println!("  Round count:            {round_count}");
     println!("  Open advisory findings: {advisory_finding_count}");
     println!("  Arbiter-decided:        {arbiter_decided_count}");
     println!("  Record ID:              {}", record.id);
@@ -69,12 +90,13 @@ pub fn run_declare_convergence(
 /// Runs `anvil arbiter resolve-finding <finding-id> --reason "<text>"`.
 ///
 /// `finding_id` must be in composite form `"<packet_id>:<finding_id>"`.
+/// Validates that the referenced packet and finding exist before creating the record.
 /// Creates an `ArbiterFindingResolution` record; that finding is excluded from
 /// the full-pool clean blocking set on subsequent termination checks.
 ///
 /// # Errors
 ///
-/// Returns [`AnvilError::EmptyReasoning`] if reasoning is empty.
+/// Returns [`AnvilError::EmptyReasoning`] if reasoning is empty, or audit-store errors.
 pub fn run_resolve_finding(
     project_root: &Path,
     finding_id: &str,
@@ -88,6 +110,20 @@ pub fn run_resolve_finding(
         });
     }
 
+    // Parse composite ID: "<packet_id>:<finding_id>" (F5).
+    let colon_pos = finding_id.find(':').ok_or_else(|| {
+        AnvilError::Io(std::io::Error::other(
+            "finding_id must be in composite form '<packet_id>:<finding_id>'",
+        ))
+    })?;
+    let packet_id_part = &finding_id[..colon_pos];
+    let finding_id_part = &finding_id[colon_pos + 1..];
+    if packet_id_part.is_empty() || finding_id_part.is_empty() {
+        return Err(AnvilError::Io(std::io::Error::other(
+            "finding_id must be in composite form '<packet_id>:<finding_id>'",
+        )));
+    }
+
     let config = load_config(project_root)?;
     let arbiter_id = config
         .model_bindings
@@ -95,6 +131,31 @@ pub fn run_resolve_finding(
         .map_or_else(|| "coordinator".to_owned(), |b| b.name.clone());
 
     let store = AuditStore::open(project_root)?;
+
+    // Verify the referenced packet and finding exist (F5).
+    let rfp_entries = store.list(RecordType::ReviewerFindingPacket)?;
+    let packet = rfp_entries
+        .iter()
+        .find_map(|e| {
+            store
+                .get(&e.id)
+                .ok()
+                .and_then(|v| serde_json::from_value::<ReviewerFindingPacket>(v).ok())
+                .filter(|rfp| rfp.packet.packet_id == packet_id_part)
+        })
+        .ok_or_else(|| AnvilError::PacketNotFound(packet_id_part.to_owned()))?;
+    if !packet
+        .packet
+        .findings
+        .iter()
+        .any(|f| f.id == finding_id_part)
+    {
+        return Err(AnvilError::FindingNotFound {
+            packet_id: packet_id_part.to_owned(),
+            finding_id: finding_id_part.to_owned(),
+        });
+    }
+
     let record = ArbiterFindingResolution::new(
         finding_id.to_owned(),
         arbiter_id,
@@ -111,23 +172,35 @@ pub fn run_resolve_finding(
     Ok(())
 }
 
-// ── Helper ────────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
-/// Counts advisory findings in the latest `ReviewerFindingPacket` that lack an
-/// explicit advisory disposition in the most recent `CuratedFindingsRecord`.
+/// Returns all `ReviewerFindingPacket` records whose `artifact_ref` starts with `artifact`.
+pub(crate) fn filter_rfps_by_artifact(
+    store: &AuditStore,
+    all_entries: &[IndexEntry],
+    artifact: &str,
+) -> Vec<ReviewerFindingPacket> {
+    all_entries
+        .iter()
+        .filter_map(|e| {
+            store
+                .get(&e.id)
+                .ok()
+                .and_then(|v| serde_json::from_value::<ReviewerFindingPacket>(v).ok())
+                .filter(|rfp| rfp.packet.artifact_ref.starts_with(artifact))
+        })
+        .collect()
+}
+
+/// Counts advisory findings in the latest artifact-scoped RFP without curated advisory
+/// dispositions.
 fn count_open_advisory_findings(
     store: &AuditStore,
-    rfp_entries: &[IndexEntry],
+    artifact_rfps: &[ReviewerFindingPacket],
 ) -> Result<u32, AnvilError> {
-    if rfp_entries.is_empty() {
+    let Some(rfp) = artifact_rfps.last() else {
         return Ok(0);
-    }
-    let rfp: ReviewerFindingPacket =
-        serde_json::from_value(store.get(&rfp_entries.last().unwrap().id)?).map_err(|e| {
-            AnvilError::ModelResponseBadJson {
-                reason: format!("ReviewerFindingPacket corrupt: {e}"),
-            }
-        })?;
+    };
 
     // Load latest curated dispositions if available.
     let curated_entries = store.list(RecordType::CuratedFindings)?;
@@ -167,8 +240,6 @@ mod tests {
     #[test]
     fn test_declare_convergence_rejects_empty_reason() {
         let (tmp, _store) = init_store();
-        // Also need anvil.toml for load_config in resolve_finding; for declare-convergence
-        // we only need an AuditStore, so we call the inner logic directly.
         let result = run_declare_convergence(tmp.path(), "charter.md", "");
         assert!(result.is_err(), "empty reasoning must be rejected");
         let msg = result.unwrap_err().to_string();
@@ -181,13 +252,52 @@ mod tests {
     #[test]
     fn test_resolve_finding_rejects_empty_reason() {
         let (tmp, _store) = init_store();
-        // We need a minimal anvil.toml so load_config doesn't fail.
         let config_toml = r"
 [choices]
 ";
         std::fs::write(tmp.path().join("anvil.toml"), config_toml).unwrap();
         let result = run_resolve_finding(tmp.path(), "pkt-abc:F1", "", "", "");
         assert!(result.is_err(), "empty reasoning must be rejected");
+    }
+
+    #[test]
+    fn test_resolve_finding_rejects_malformed_id() {
+        let (tmp, _store) = init_store();
+        let config_toml = r"
+[choices]
+";
+        std::fs::write(tmp.path().join("anvil.toml"), config_toml).unwrap();
+        // No colon separator.
+        let result = run_resolve_finding(tmp.path(), "nocolon", "some reason", "", "");
+        assert!(result.is_err(), "malformed ID must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("composite form"),
+            "error should mention composite form: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_finding_rejects_unknown_packet() {
+        let (tmp, _store) = init_store();
+        let config_toml = r"
+[choices]
+";
+        std::fs::write(tmp.path().join("anvil.toml"), config_toml).unwrap();
+        // Valid composite form but packet does not exist in the store.
+        let result = run_resolve_finding(
+            tmp.path(),
+            "00000000-0000-0000-0000-000000000000:F1",
+            "some reason",
+            "",
+            "",
+        );
+        assert!(result.is_err(), "unknown packet must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("packet_id"),
+            "error should mention packet_id: {msg}"
+        );
     }
 
     #[test]

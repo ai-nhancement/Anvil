@@ -3,10 +3,14 @@
 //! - `anvil charter findings` — interactive curation, render disposition doc + hardening history
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anvil_audit::{
-    records::{CuratedFindingsRecord, ReviewerFindingPacket, RotationLog, VerifierResult},
+    records::{
+        ArbiterFindingResolution, CuratedFindingsRecord, ReviewerFindingPacket, RotationLog,
+        VerifierResult,
+    },
     AuditStore, CrossRefKey, RecordType,
 };
 use anvil_core::{
@@ -22,6 +26,7 @@ use anvil_core::{
 };
 use anvil_sidecar_client::proto::{self, invoke_request::Payload};
 use dialoguer::{Input, Select};
+use sha2::Digest as _;
 
 use crate::session::{
     connect_and_handshake, ensure_sidecar_running, find_model_binding, retrieve_api_key,
@@ -99,12 +104,14 @@ pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
     let reviewer_binding_name = rotation_select(&pool, round_number)
         .ok_or(AnvilError::ReviewerPoolEmpty)?
         .to_owned();
-    let prev_reviewer = if round_number > 1 {
-        rotation_select(&pool, round_number - 1)
-            .unwrap_or(&reviewer_binding_name)
-            .to_owned()
+    let prev_reviewer: Option<String> = if round_number > 1 {
+        Some(
+            rotation_select(&pool, round_number - 1)
+                .unwrap_or(&reviewer_binding_name)
+                .to_owned(),
+        )
     } else {
-        reviewer_binding_name.clone()
+        None
     };
 
     let binding = find_model_binding(&config, &reviewer_binding_name)?;
@@ -131,15 +138,52 @@ pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
         )));
     }
 
+    // Compute SHA-256 of charter content for artifact-state tracking (F2).
+    let charter_hash = {
+        let digest = sha2::Sha256::digest(charter_content.as_bytes());
+        let mut hex = String::with_capacity(64);
+        for b in &digest {
+            write!(hex, "{b:02x}").unwrap();
+        }
+        hex
+    };
+
+    // Load Arbiter-Decided findings to brief the reviewer (F7).
+    let arbiter_entries = store.list(RecordType::ArbiterFindingResolution)?;
+    let mut arbiter_briefing = String::new();
+    for entry in &arbiter_entries {
+        if let Ok(val) = store.get(&entry.id) {
+            if let Ok(record) = serde_json::from_value::<ArbiterFindingResolution>(val) {
+                writeln!(
+                    arbiter_briefing,
+                    "- Finding {}: {}. Reasoning: {}",
+                    record.finding_id, record.chosen_direction_summary, record.reasoning
+                )
+                .ok();
+            }
+        }
+    }
+
     println!("Invoking reviewer '{reviewer_binding_name}' for charter R{round_number}…");
 
     // Connect to sidecar and invoke.
     let port = ensure_sidecar_running(project_root, &config)?;
     let mut client = connect_and_handshake(port, &config)?;
 
-    let user_message = format!(
-        "Please review the following Charter document (round {round_number}):\n\n{charter_content}"
-    );
+    let user_message = if arbiter_briefing.is_empty() {
+        format!(
+            "Please review the following Charter document (round {round_number}):\n\n\
+             {charter_content}"
+        )
+    } else {
+        format!(
+            "Please review the following Charter document (round {round_number}).\n\n\
+             The following findings have been Arbiter-Decided. Raising the same finding \
+             direction does not change the ship-gate status:\n\n\
+             {arbiter_briefing}\n\
+             Charter document:\n\n{charter_content}"
+        )
+    };
 
     let response = with_tokio(invoke_reviewer(
         &mut client,
@@ -172,8 +216,9 @@ pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
         reviewer_model_identity,
         partial.findings,
     );
+    packet.artifact_hash = Some(charter_hash);
 
-    // Apply severity tiering: P2/P3 become advisory in rounds 6+.
+    // Apply severity tiering: P3 always advisory; P2 advisory in rounds 6+.
     apply_severity_tiering(&mut packet, round_number);
 
     let finding_count = packet.findings.len();
@@ -347,6 +392,7 @@ struct CurationResult {
     actions: BTreeMap<String, CurationAction>,
     disposition_map: BTreeMap<String, DispositionLabel>,
     dispositions: Vec<CurationDisposition>,
+    advisory_dispositions: BTreeMap<String, (AdvisoryDispositionType, Option<String>)>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -354,6 +400,8 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
     let mut actions: BTreeMap<String, CurationAction> = BTreeMap::new();
     let mut disposition_map: BTreeMap<String, DispositionLabel> = BTreeMap::new();
     let mut dispositions: Vec<CurationDisposition> = Vec::new();
+    let mut advisory_dispositions: BTreeMap<String, (AdvisoryDispositionType, Option<String>)> =
+        BTreeMap::new();
 
     for vf in verified_findings {
         let f = &vf.finding;
@@ -389,17 +437,22 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
                 _ => AdvisoryDispositionType::AcceptAdvisory,
             };
 
-            let prompt = match adv_type {
-                AdvisoryDispositionType::DropAdvisory => "  Reason (required)",
-                AdvisoryDispositionType::DeferAdvisory => "  Target phase (required)",
-                AdvisoryDispositionType::AcceptAdvisory => "  Note (optional)",
+            // Drop-Advisory requires reason; Defer-Advisory requires target phase (F1).
+            let note: String = match adv_type {
+                AdvisoryDispositionType::AcceptAdvisory => Input::new()
+                    .with_prompt("  Note (optional)")
+                    .allow_empty(true)
+                    .interact_text()
+                    .map_err(|_| AnvilError::SetupCancelled)?,
+                AdvisoryDispositionType::DropAdvisory => Input::new()
+                    .with_prompt("  Reason (required)")
+                    .interact_text()
+                    .map_err(|_| AnvilError::SetupCancelled)?,
+                AdvisoryDispositionType::DeferAdvisory => Input::new()
+                    .with_prompt("  Target phase (required)")
+                    .interact_text()
+                    .map_err(|_| AnvilError::SetupCancelled)?,
             };
-
-            let note: String = Input::new()
-                .with_prompt(prompt)
-                .allow_empty(true)
-                .interact_text()
-                .map_err(|_| AnvilError::SetupCancelled)?;
 
             let annotation = if note.is_empty() { None } else { Some(note) };
             let action = match adv_type {
@@ -463,6 +516,9 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
         }
 
         actions.insert(f.id.clone(), action.clone());
+        if let Some(ref adv) = advisory_disposition {
+            advisory_dispositions.insert(f.id.clone(), (adv.clone(), annotation.clone()));
+        }
         dispositions.push(CurationDisposition {
             finding_id: f.id.clone(),
             action,
@@ -478,6 +534,7 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
         actions,
         disposition_map,
         dispositions,
+        advisory_dispositions,
     })
 }
 
@@ -547,6 +604,7 @@ pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
         actions: curation_actions,
         disposition_map,
         dispositions,
+        advisory_dispositions,
     } = curate_findings(verified_findings)?;
 
     let NarrativeInputs {
@@ -556,6 +614,26 @@ pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
         reproducibility,
         bottom_line,
     } = collect_narrative()?;
+
+    // Advisory gate check BEFORE any file writes (F4).
+    let missing_advisory: Vec<String> = check_advisory_gate(&dispositions, &rfp.packet.findings);
+    if !missing_advisory.is_empty() {
+        eprintln!(
+            "error: advisory gate check failed — {} advisory finding(s) lack explicit or \
+             complete disposition:",
+            missing_advisory.len()
+        );
+        for id in &missing_advisory {
+            eprintln!("  {id}");
+        }
+        eprintln!(
+            "Re-run `anvil charter findings` and provide Accept-Advisory, or \
+             Drop-Advisory/Defer-Advisory with non-empty reason/target for each advisory finding."
+        );
+        return Err(AnvilError::Io(std::io::Error::other(
+            "advisory gate check failed — one or more advisory findings lack complete disposition",
+        )));
+    }
 
     // Render disposition document.
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -573,6 +651,7 @@ pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
         reproducibility_commands: &reproducibility,
         bottom_line: &bottom_line,
         curation_actions: &curation_actions,
+        advisory_dispositions: &advisory_dispositions,
     };
     let doc = render_disposition_doc(&disp_input);
 
@@ -598,25 +677,6 @@ pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
         &today,
         &history_summary,
     )?;
-
-    // Advisory gate check: all advisory findings must have an explicit advisory disposition.
-    let missing_advisory: Vec<String> = check_advisory_gate(&dispositions, &rfp.packet.findings);
-    if !missing_advisory.is_empty() {
-        eprintln!(
-            "error: advisory gate check failed — {} advisory finding(s) lack explicit disposition:",
-            missing_advisory.len()
-        );
-        for id in &missing_advisory {
-            eprintln!("  {id}");
-        }
-        eprintln!(
-            "Re-run `anvil charter findings` and provide Accept-Advisory, Drop-Advisory, or \
-             Defer-Advisory for each advisory finding."
-        );
-        return Err(AnvilError::Io(std::io::Error::other(
-            "advisory gate check failed — one or more advisory findings lack explicit disposition",
-        )));
-    }
 
     // Persist CuratedFindingsRecord.
     let curated_record = CuratedFindingsRecord::new(

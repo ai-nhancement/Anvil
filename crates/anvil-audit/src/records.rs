@@ -246,7 +246,9 @@ pub struct RotationLog {
     pub id: String,
     pub created_at: DateTime<Utc>,
     pub cross_references: Vec<String>,
-    pub rotated_from: String,
+    /// The previous reviewer binding name, or `None` for the first review round.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotated_from: Option<String>,
     pub rotated_to: String,
     pub reason: String,
     /// The review round that triggered this rotation.
@@ -256,7 +258,7 @@ pub struct RotationLog {
 impl RotationLog {
     #[must_use]
     pub fn new(
-        rotated_from: String,
+        rotated_from: Option<String>,
         rotated_to: String,
         reason: String,
         round_number: u32,

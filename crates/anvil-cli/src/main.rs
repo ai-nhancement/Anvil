@@ -67,6 +67,9 @@ enum Command {
         /// Project directory (defaults to current directory).
         #[arg(long, default_value = ".")]
         project: PathBuf,
+        /// Artifact to scope status counts to (default: charter.md).
+        #[arg(long, default_value = "charter.md")]
+        artifact: String,
     },
 }
 
@@ -267,7 +270,7 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
                 &contradiction_context,
             ),
         },
-        Command::Status { project } => status::run_status(&project),
+        Command::Status { project, artifact } => status::run_status(&project, &artifact),
     }
 }
 
@@ -343,6 +346,24 @@ fn cmd_config_show(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
         }
     }
 
+    println!();
+    if config.reviewer_pool.is_empty() {
+        println!("Reviewer pool: (empty — defaults to [reviewer-1])");
+    } else {
+        println!("Reviewer pool:");
+        for (i, name) in config.reviewer_pool.iter().enumerate() {
+            println!("  [{i}] {name}");
+        }
+    }
+    println!(
+        "Single-clean-pass override: {}",
+        if config.single_clean_pass_override {
+            "ON"
+        } else {
+            "off"
+        }
+    );
+
     Ok(())
 }
 
@@ -366,6 +387,25 @@ fn cmd_config_set(
         }
         "sidecar.binary_path" => {
             config.sidecar.binary_path = Some(PathBuf::from(value));
+        }
+        "reviewer_pool" => {
+            config.reviewer_pool = if value.trim().is_empty() {
+                Vec::new()
+            } else {
+                value.split(',').map(|s| s.trim().to_owned()).collect()
+            };
+        }
+        "single_clean_pass_override" => {
+            config.single_clean_pass_override = match value {
+                "true" | "1" | "on" => true,
+                "false" | "0" | "off" => false,
+                _ => {
+                    return Err(anvil_core::error::AnvilError::InvalidConfigValue {
+                        key: key.to_owned(),
+                        reason: format!("expected true/false, got '{value}'"),
+                    });
+                }
+            };
         }
         _ => {
             return Err(anvil_core::error::AnvilError::UnknownConfigKey(

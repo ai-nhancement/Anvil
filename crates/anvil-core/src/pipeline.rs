@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Severity tier assigned by the reviewer (per Artifact Specifications Standard Vocabularies).
 /// P1 blocks ship in all rounds; P2 blocks in rounds 1–5; P3 is advisory in all rounds.
+/// (Advisory flags are set by `apply_severity_tiering`, not by the reviewer model.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum FindingSeverity {
     P1,
@@ -123,6 +124,10 @@ pub struct FindingsPacket {
     pub reviewer_model_identity: String,
     pub produced_at: DateTime<Utc>,
     pub findings: Vec<Finding>,
+    /// SHA-256 hex digest of the reviewed artifact content at the time of review (P6 R2).
+    /// Used by the full-pool clean check to verify all reviewers reviewed the same state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewer_meta: Option<ReviewerMeta>,
 }
@@ -145,6 +150,7 @@ impl FindingsPacket {
             reviewer_model_identity,
             produced_at: Utc::now(),
             findings,
+            artifact_hash: None,
             reviewer_meta: None,
         }
     }
@@ -369,25 +375,30 @@ impl DispositionLabel {
 
 // ── Severity tiering (P6) ─────────────────────────────────────────────────────
 
-/// Marks P2/P3 findings as advisory when `round_count > ADVISORY_THRESHOLD_ROUND`.
+/// Marks findings as advisory per the Artifact Specifications severity vocabulary:
+/// - P3 is advisory in **all** rounds.
+/// - P2 is advisory in rounds 6+ (after `ADVISORY_THRESHOLD_ROUND`).
+/// - P1 is never advisory.
 ///
 /// Called immediately after the model response is parsed, before the packet is stored.
-/// P1 findings are never advisory. The `advisory` flag is set by the system, not the
-/// reviewer model, so models never see or control this field.
+/// The `advisory` flag is set by the system, not the reviewer model.
 pub fn apply_severity_tiering(packet: &mut FindingsPacket, round_count: u32) {
-    if crate::rotation::is_advisory_round(round_count) {
-        for finding in &mut packet.findings {
-            if matches!(finding.severity, FindingSeverity::P2 | FindingSeverity::P3) {
-                finding.advisory = true;
-            }
+    let is_advisory_round = crate::rotation::is_advisory_round(round_count);
+    for finding in &mut packet.findings {
+        match finding.severity {
+            FindingSeverity::P3 => finding.advisory = true,
+            FindingSeverity::P2 if is_advisory_round => finding.advisory = true,
+            _ => {}
         }
     }
 }
 
-/// Returns the IDs of advisory findings that lack an explicit `advisory_disposition`.
+/// Returns the IDs of advisory findings that fail the advisory gate:
+/// - missing an `advisory_disposition`, OR
+/// - `DropAdvisory` / `DeferAdvisory` with an empty annotation (reason / target phase required).
 ///
 /// Used as a pre-commit gate in `anvil charter findings`: if the returned list is
-/// non-empty, the coordinator must provide dispositions before the record is stored.
+/// non-empty, the coordinator must provide complete dispositions before the record is stored.
 #[must_use]
 pub fn check_advisory_gate(
     dispositions: &[CurationDisposition],
@@ -397,13 +408,23 @@ pub fn check_advisory_gate(
         .iter()
         .filter(|f| f.advisory)
         .filter_map(|f| {
-            let disposed = dispositions
-                .iter()
-                .any(|d| d.finding_id == f.id && d.advisory_disposition.is_some());
-            if disposed {
-                None
-            } else {
-                Some(f.id.clone())
+            let d = dispositions.iter().find(|d| d.finding_id == f.id);
+            match d {
+                None => Some(f.id.clone()),
+                Some(d) => match &d.advisory_disposition {
+                    None => Some(f.id.clone()),
+                    Some(
+                        AdvisoryDispositionType::DropAdvisory
+                        | AdvisoryDispositionType::DeferAdvisory,
+                    ) => {
+                        if d.annotation.as_deref().unwrap_or("").trim().is_empty() {
+                            Some(f.id.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    Some(AdvisoryDispositionType::AcceptAdvisory) => None,
+                },
             }
         })
         .collect()
@@ -596,6 +617,7 @@ mod tests {
             reviewer_model_identity: "claude-sonnet-4-6".to_owned(),
             produced_at: Utc::now(),
             findings: vec![],
+            artifact_hash: None,
             reviewer_meta: None,
         };
         assert_eq!(packet.round_number, 1);
@@ -913,9 +935,15 @@ mod tests {
         assert_eq!(p3.validate(), Err("success_criteria".to_owned()));
     }
 
+    // hinge_test: pins=severity_tiering_p3_always_advisory, intended=advisory-semantics, phase=P6
     #[test]
-    fn test_apply_severity_tiering_marks_p2_p3_advisory_at_round_6() {
-        use super::{apply_severity_tiering, check_advisory_gate};
+    #[allow(clippy::too_many_lines)]
+    fn test_apply_severity_tiering_p3_always_advisory_p2_after_round_5() {
+        // Pins: P3 is advisory in ALL rounds (Artifact Spec §Standard Vocabularies).
+        //       P2 is advisory only in rounds 6+ (after ADVISORY_THRESHOLD_ROUND).
+        //       P1 is never advisory.
+        // Flipping requires updating ARTIFACT_SPECIFICATIONS.md + this test together.
+        use super::{apply_severity_tiering, check_advisory_gate, AdvisoryDispositionType};
 
         let make_finding = |id: &str, sev: FindingSeverity| Finding {
             id: id.to_owned(),
@@ -935,8 +963,8 @@ mod tests {
         };
 
         let mut packet = FindingsPacket::new(
-            "charter.md:§root:R6".to_owned(),
-            6,
+            "charter.md:R1".to_owned(),
+            1,
             "reviewer-1".to_owned(),
             "model-v1".to_owned(),
             vec![
@@ -946,7 +974,7 @@ mod tests {
             ],
         );
 
-        // Rounds 1–5: no advisory marking.
+        // Round 5 (≤ ADVISORY_THRESHOLD_ROUND): P3 advisory, P2 still blocking, P1 never advisory.
         apply_severity_tiering(&mut packet, 5);
         assert!(!packet.findings[0].advisory, "P1 must not become advisory");
         assert!(
@@ -954,11 +982,14 @@ mod tests {
             "P2 at round 5 must not be advisory"
         );
         assert!(
-            !packet.findings[2].advisory,
-            "P3 at round 5 must not be advisory"
+            packet.findings[2].advisory,
+            "P3 must be advisory in all rounds including round 5"
         );
 
-        // Round 6+: P2/P3 become advisory, P1 stays blocking.
+        // Reset to test round 6 transition cleanly.
+        packet.findings[2].advisory = false;
+
+        // Round 6 (> ADVISORY_THRESHOLD_ROUND): P2 and P3 both advisory, P1 still blocking.
         apply_severity_tiering(&mut packet, 6);
         assert!(
             !packet.findings[0].advisory,
@@ -973,15 +1004,69 @@ mod tests {
             "P3 at round 6 must be advisory"
         );
 
-        // Advisory gate: findings with advisory=true need an advisory_disposition.
+        // Gate flags both F2 and F3 (advisory, no disposition).
         let missing = check_advisory_gate(&[], &packet.findings);
         assert_eq!(missing, vec!["F2", "F3"], "gate should flag F2 and F3");
 
-        // P1 is non-advisory so gate should not flag it even with no disposition.
-        let missing_p1_only = check_advisory_gate(&[], &[packet.findings[0].clone()]);
+        // Gate passes when both have AcceptAdvisory dispositions.
+        let dispositions = vec![
+            CurationDisposition {
+                finding_id: "F2".to_owned(),
+                action: CurationAction::Keep,
+                edited_finding: None,
+                annotation: None,
+                advisory_disposition: Some(AdvisoryDispositionType::AcceptAdvisory),
+            },
+            CurationDisposition {
+                finding_id: "F3".to_owned(),
+                action: CurationAction::Keep,
+                edited_finding: None,
+                annotation: None,
+                advisory_disposition: Some(AdvisoryDispositionType::AcceptAdvisory),
+            },
+        ];
+        let missing_after_accept = check_advisory_gate(&dispositions, &packet.findings);
         assert!(
-            missing_p1_only.is_empty(),
-            "non-advisory P1 should not appear in gate failures"
+            missing_after_accept.is_empty(),
+            "AcceptAdvisory should satisfy the gate"
+        );
+
+        // Gate fails Drop/Defer with empty annotation.
+        let dispositions_empty_drop = vec![CurationDisposition {
+            finding_id: "F2".to_owned(),
+            action: CurationAction::Drop,
+            edited_finding: None,
+            annotation: None,
+            advisory_disposition: Some(AdvisoryDispositionType::DropAdvisory),
+        }];
+        let missing_empty_drop =
+            check_advisory_gate(&dispositions_empty_drop, &[packet.findings[1].clone()]);
+        assert_eq!(
+            missing_empty_drop,
+            vec!["F2"],
+            "DropAdvisory with empty annotation must fail the gate"
+        );
+
+        // Gate passes Drop/Defer with non-empty annotation.
+        let dispositions_filled_drop = vec![CurationDisposition {
+            finding_id: "F2".to_owned(),
+            action: CurationAction::Drop,
+            edited_finding: None,
+            annotation: Some("not applicable in this context".to_owned()),
+            advisory_disposition: Some(AdvisoryDispositionType::DropAdvisory),
+        }];
+        let missing_filled_drop =
+            check_advisory_gate(&dispositions_filled_drop, &[packet.findings[1].clone()]);
+        assert!(
+            missing_filled_drop.is_empty(),
+            "DropAdvisory with non-empty annotation must pass the gate"
+        );
+
+        // P1 is non-advisory: gate never flags it.
+        let missing_p1 = check_advisory_gate(&[], &[packet.findings[0].clone()]);
+        assert!(
+            missing_p1.is_empty(),
+            "non-advisory P1 must not appear in gate failures"
         );
     }
 

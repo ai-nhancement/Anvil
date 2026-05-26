@@ -752,6 +752,18 @@ fn commit(state: &WizardState) -> Result<(), AnvilError> {
         );
     }
     config.model_bindings.clone_from(&state.model_bindings);
+
+    // Populate reviewer_pool from bindings whose names start with "reviewer-" (F3).
+    let reviewer_pool: Vec<String> = state
+        .model_bindings
+        .iter()
+        .filter(|b| b.name.starts_with("reviewer-"))
+        .map(|b| b.name.clone())
+        .collect();
+    if !reviewer_pool.is_empty() {
+        config.reviewer_pool = reviewer_pool;
+    }
+
     save_config(root, &config)?;
 
     // 4. Write audit records.

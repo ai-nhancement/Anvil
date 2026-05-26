@@ -305,7 +305,10 @@ impl_audit_record!(GateApproval, RecordType::GateApproval);
 impl_audit_record!(ConvergenceDeclaration, RecordType::ConvergenceDeclaration);
 impl_audit_record!(ProvisionalLock, RecordType::ProvisionalLock);
 impl_audit_record!(RollbackEvent, RecordType::RollbackEvent);
-impl_audit_record!(ArbiterFindingResolution, RecordType::ArbiterFindingResolution);
+impl_audit_record!(
+    ArbiterFindingResolution,
+    RecordType::ArbiterFindingResolution
+);
 impl_audit_record!(SidecarReload, RecordType::SidecarReload);
 
 // ── Constructors ──────────────────────────────────────────────────────────────
@@ -351,6 +354,32 @@ impl HingeFlip {
             hinge_test_name,
             old_value,
             new_value,
+        }
+    }
+}
+
+impl ProvisionalLock {
+    #[must_use]
+    pub fn new(choice_key: String, hypothesis: String, cross_references: Vec<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            choice_key,
+            hypothesis,
+        }
+    }
+}
+
+impl SidecarReload {
+    #[must_use]
+    pub fn new(config_epoch: String, reason: String, cross_references: Vec<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            config_epoch,
+            reason,
         }
     }
 }

@@ -70,6 +70,21 @@ impl SidecarConfig {
     }
 }
 
+/// How the runtime credential (API key or token) for a provider connection is sourced.
+///
+/// API keys are NEVER stored in `anvil.toml`. This enum records how to retrieve them
+/// at invocation time (from the OS keychain or from a named environment variable).
+/// The keychain entry name follows the pattern `"anvil:provider-{connection_name}"`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum CredentialRef {
+    /// Key is stored in the OS keychain (Windows Credential Manager / macOS Keychain / Linux Secret Service).
+    #[default]
+    Keychain,
+    /// Key must be supplied via the named environment variable at runtime.
+    EnvVar { var_name: String },
+}
+
 /// A named provider connection entry in `anvil.toml`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProviderConnection {
@@ -77,17 +92,29 @@ pub struct ProviderConnection {
     /// Optional custom endpoint override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// How the API key / credential is sourced at runtime.
+    /// Keys are never stored in anvil.toml.
+    #[serde(default)]
+    pub credential_ref: CredentialRef,
 }
 
 /// Supported provider types for model access.
+///
+/// Serialized strings match the Go sidecar's `ProviderType` constants so that
+/// the Vault-generated provider config JSON is accepted directly by the sidecar.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum ProviderType {
+    #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "openai")]
     OpenAi,
+    #[serde(rename = "google_ai_studio")]
     Google,
+    #[serde(rename = "aws_bedrock")]
     AwsBedrock,
+    #[serde(rename = "azure_openai")]
     AzureOpenAi,
+    #[serde(rename = "google_vertex_ai")]
     GoogleVertexAi,
     #[serde(untagged)]
     Other(String),

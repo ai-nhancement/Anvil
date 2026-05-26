@@ -32,7 +32,10 @@ pub enum ClientError {
     /// The stream terminated with a stream-level `Error` event.
     Stream(Option<proto::AnvilError>),
     /// An idempotency key in the response does not match the one sent.
-    ResponseMismatch { sent: String, received: String },
+    ResponseMismatch {
+        sent: String,
+        received: String,
+    },
     /// The sidecar emitted an event after `FinalResult`, violating the stream state machine.
     StreamStateMachineViolation,
     /// The stream closed without emitting a `FinalResult` or `Error` — adapter bug.
@@ -46,7 +49,10 @@ impl std::fmt::Display for ClientError {
                 write!(f, "handshake() must be called before any other RPC")
             }
             ClientError::ConfigEpochMismatch => {
-                write!(f, "config-epoch mismatch; call reload_config() before invoke()")
+                write!(
+                    f,
+                    "config-epoch mismatch; call reload_config() before invoke()"
+                )
             }
             ClientError::ProtocolMismatch(v) => {
                 write!(f, "sidecar negotiated unsupported version: {v:?}")
@@ -55,10 +61,16 @@ impl std::fmt::Display for ClientError {
             ClientError::Anvil(e) => write!(f, "anvil error ({:?}): {}", e.class, e.message),
             ClientError::Stream(e) => write!(f, "stream error: {e:?}"),
             ClientError::ResponseMismatch { sent, received } => {
-                write!(f, "idempotency key mismatch: sent {sent:?}, received {received:?}")
+                write!(
+                    f,
+                    "idempotency key mismatch: sent {sent:?}, received {received:?}"
+                )
             }
             ClientError::StreamStateMachineViolation => {
-                write!(f, "sidecar emitted an event after FinalResult — adapter bug")
+                write!(
+                    f,
+                    "sidecar emitted an event after FinalResult — adapter bug"
+                )
             }
             ClientError::NoFinalResult => {
                 write!(f, "stream closed without a FinalResult or Error event")
@@ -99,7 +111,10 @@ impl AnvilSidecarClient {
         D::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
         let inner = SidecarClient::connect(dst).await?;
-        Ok(Self { inner, state: ConnectionState::Disconnected })
+        Ok(Self {
+            inner,
+            state: ConnectionState::Disconnected,
+        })
     }
 
     /// Returns `true` if `handshake()` succeeded and config epochs match.
@@ -123,8 +138,7 @@ impl AnvilSidecarClient {
         &mut self,
         vault_config_epoch: String,
     ) -> Result<proto::HandshakeResponse, ClientError> {
-        let supported: Vec<String> =
-            SUPPORTED_VERSIONS.iter().map(|s| (*s).to_owned()).collect();
+        let supported: Vec<String> = SUPPORTED_VERSIONS.iter().map(|s| (*s).to_owned()).collect();
         let req = proto::HandshakeRequest {
             core_protocol_version: "v1".into(),
             supported_versions: supported.clone(),
@@ -135,7 +149,9 @@ impl AnvilSidecarClient {
         // Reject any negotiated version we do not support.
         if !supported.contains(&resp.negotiated_version) {
             self.state = ConnectionState::Disconnected;
-            return Err(ClientError::ProtocolMismatch(resp.negotiated_version.clone()));
+            return Err(ClientError::ProtocolMismatch(
+                resp.negotiated_version.clone(),
+            ));
         }
 
         self.state = if resp.sidecar_config_epoch == vault_config_epoch {
@@ -189,7 +205,10 @@ impl AnvilSidecarClient {
         let key = new_idempotency_key();
         request.idempotency_key = key.clone();
         let stream = self.inner.invoke_streaming(request).await?.into_inner();
-        Ok(InvokeStream { inner: stream, idempotency_key: key })
+        Ok(InvokeStream {
+            inner: stream,
+            idempotency_key: key,
+        })
     }
 
     pub async fn cancel(
@@ -206,7 +225,25 @@ impl AnvilSidecarClient {
         if self.state == ConnectionState::Disconnected {
             return Err(ClientError::HandshakeRequired);
         }
-        Ok(self.inner.health(proto::HealthRequest {}).await?.into_inner())
+        Ok(self
+            .inner
+            .health(proto::HealthRequest {})
+            .await?
+            .into_inner())
+    }
+
+    /// Probe liveness without requiring a prior handshake.
+    ///
+    /// The Go sidecar exempts `Health` from the Handshake-first requirement.
+    /// This method bypasses the client-side state check so that callers can
+    /// verify the sidecar is alive before establishing a session (e.g. in
+    /// `anvil setup` Step 5 connectivity tests and `anvil sidecar status`).
+    pub async fn probe_health(&mut self) -> Result<proto::HealthResponse, ClientError> {
+        Ok(self
+            .inner
+            .health(proto::HealthRequest {})
+            .await?
+            .into_inner())
     }
 
     /// Atomically swaps provider config on the sidecar.

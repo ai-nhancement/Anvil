@@ -1,7 +1,7 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anvil_core::error::AnvilError;
 
@@ -16,11 +16,7 @@ use crate::records::{AuditRecord, RecordType, ALL_RECORD_TYPES};
 /// `..` (catches both the literal `..` and embedded sequences like `foo..bar`),
 /// path separators (`/`, `\`), null bytes, and colons.
 fn validate_record_id(id: &str) -> Result<(), AnvilError> {
-    if id.is_empty()
-        || id == "."
-        || id.contains("..")
-        || id.contains(['/', '\\', '\0', ':'])
-    {
+    if id.is_empty() || id == "." || id.contains("..") || id.contains(['/', '\\', '\0', ':']) {
         return Err(AnvilError::InvalidRecordId(id.to_owned()));
     }
     Ok(())
@@ -423,7 +419,9 @@ mod tests {
         let (_tmp, store) = init_test_store();
         for bad_id in &["", "../escape", "nested/path", "colon:id", "back\\slash"] {
             let record = make_gate_approval(bad_id);
-            let err = store.append(&record).expect_err(&format!("should reject id: {bad_id:?}"));
+            let err = store
+                .append(&record)
+                .expect_err(&format!("should reject id: {bad_id:?}"));
             assert!(
                 matches!(err, AnvilError::InvalidRecordId(_)),
                 "expected InvalidRecordId for {bad_id:?}, got: {err}"

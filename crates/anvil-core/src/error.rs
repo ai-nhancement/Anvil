@@ -20,7 +20,9 @@ pub enum AnvilError {
     #[error("no anvil.toml found in {0} — run `anvil init` first")]
     NotInitialized(PathBuf),
 
-    #[error("unknown config key '{0}' — valid keys: sidecar.idle_timeout_secs, sidecar.binary_path")]
+    #[error(
+        "unknown config key '{0}' — valid keys: sidecar.idle_timeout_secs, sidecar.binary_path"
+    )]
     UnknownConfigKey(String),
 
     #[error("invalid value for '{key}': {reason}")]
@@ -41,7 +43,9 @@ pub enum AnvilError {
     #[error("invalid cross-reference key '{0}' — expected format: path:section:version (no colons in fields)")]
     InvalidCrossRefKey(String),
 
-    #[error("invalid record id '{0}' — ids must not contain path separators or control characters")]
+    #[error(
+        "invalid record id '{0}' — ids must not contain path separators or control characters"
+    )]
     InvalidRecordId(String),
 
     #[error("utf-8 violation in record '{id}': {source}")]
@@ -50,6 +54,23 @@ pub enum AnvilError {
         #[source]
         source: std::str::Utf8Error,
     },
+
+    #[error("adversarial diversity policy violated: {0}")]
+    DiversityViolation(String),
+
+    #[error(
+        "anvil-sidecar binary not found — set sidecar.binary_path in anvil.toml or add it to $PATH"
+    )]
+    SidecarNotFound,
+
+    #[error("timed out waiting for sidecar to become ready (checked .anvil/run/sidecar.port)")]
+    SidecarStartTimeout,
+
+    #[error("setup cancelled")]
+    SetupCancelled,
+
+    #[error("OS keychain unavailable: {0}")]
+    KeychainUnavailable(String),
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),

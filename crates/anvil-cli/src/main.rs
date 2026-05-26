@@ -1,3 +1,5 @@
+mod setup;
+
 use std::path::{Path, PathBuf};
 
 use anvil_audit::{AuditStore, RecordType};
@@ -34,6 +36,31 @@ enum Command {
     /// Audit store operations.
     #[command(subcommand)]
     Audit(AuditCmd),
+    /// Run the interactive setup wizard (provider connections, model bindings, credentials).
+    Setup {
+        /// Project directory (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Sidecar daemon management.
+    #[command(subcommand)]
+    Sidecar(SidecarCmd),
+}
+
+#[derive(Subcommand)]
+enum SidecarCmd {
+    /// Show the running sidecar daemon status for this project.
+    Status {
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Stop the running sidecar daemon for this project.
+    Stop {
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -129,6 +156,11 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
                 cross_ref_key,
                 project,
             } => cmd_audit_provenance(&project, &cross_ref_key),
+        },
+        Command::Setup { path } => cmd_setup(&path),
+        Command::Sidecar(cmd) => match cmd {
+            SidecarCmd::Status { project } => cmd_sidecar_status(&project),
+            SidecarCmd::Stop { project } => cmd_sidecar_stop(&project),
         },
     }
 }
@@ -263,10 +295,7 @@ fn cmd_gate_check_plan(root: &Path) -> Result<(), anvil_core::error::AnvilError>
     Ok(())
 }
 
-fn cmd_audit_list(
-    root: &Path,
-    record_type_str: &str,
-) -> Result<(), anvil_core::error::AnvilError> {
+fn cmd_audit_list(root: &Path, record_type_str: &str) -> Result<(), anvil_core::error::AnvilError> {
     let rt = RecordType::from_dir_name(record_type_str)
         .or_else(|| RecordType::from_type_name(record_type_str))
         .ok_or_else(|| {
@@ -338,6 +367,96 @@ fn cmd_audit_provenance(
         }
     }
     Ok(())
+}
+
+fn cmd_setup(path: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    setup::run_wizard(path)
+}
+
+fn cmd_sidecar_status(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    let pid_path = root.join(".anvil/run/sidecar.pid");
+    let port_path = root.join(".anvil/run/sidecar.port");
+
+    if !pid_path.exists() {
+        println!(
+            "Sidecar: not running (no PID file at {}).",
+            pid_path.display()
+        );
+        return Ok(());
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_path)?;
+    let pid: u32 = pid_str.trim().parse().unwrap_or(0);
+
+    let port = port_path
+        .exists()
+        .then(|| std::fs::read_to_string(&port_path).ok())
+        .flatten()
+        .and_then(|s| s.trim().parse::<u16>().ok());
+
+    if anvil_core::sidecar::is_process_alive(pid) {
+        print!("Sidecar: running (PID {pid}");
+        if let Some(p) = port {
+            print!(", port {p}");
+            // Probe the Health RPC to confirm the process is actually a sidecar.
+            let healthy = probe_health_sync(p);
+            print!(", health: {}", if healthy { "OK" } else { "UNREACHABLE" });
+        }
+        println!(")");
+        println!("  PID file: {}", pid_path.display());
+    } else {
+        println!("Sidecar: stale PID file (PID {pid} is not running).");
+        println!("  Run `anvil sidecar stop` to clean up stale files.");
+    }
+
+    Ok(())
+}
+
+fn cmd_sidecar_stop(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    let pid_path = root.join(".anvil/run/sidecar.pid");
+    let port_path = root.join(".anvil/run/sidecar.port");
+
+    if !pid_path.exists() {
+        println!("Sidecar: not running.");
+        return Ok(());
+    }
+
+    let pid_str = std::fs::read_to_string(&pid_path)?;
+    let pid: u32 = pid_str.trim().parse().unwrap_or(0);
+
+    if pid == 0 {
+        // Invalid PID file — clean up stale files.
+        let _ = std::fs::remove_file(&pid_path);
+        let _ = std::fs::remove_file(&port_path);
+        println!("Cleaned up invalid PID file.");
+        return Ok(());
+    }
+
+    if anvil_core::sidecar::is_process_alive(pid) {
+        anvil_core::sidecar::kill_process(pid);
+        println!("Stop signal sent to sidecar (PID {pid}).");
+        // Brief settle time before cleaning up runtime files.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    } else {
+        println!("Sidecar process (PID {pid}) is not running — cleaning up stale files.");
+    }
+
+    let _ = std::fs::remove_file(&pid_path);
+    let _ = std::fs::remove_file(&port_path);
+    println!("Runtime files removed.");
+    Ok(())
+}
+
+/// Probe the sidecar Health RPC synchronously. Returns `false` on any failure.
+fn probe_health_sync(port: u16) -> bool {
+    use anvil_sidecar_client::client::AnvilSidecarClient;
+    setup::with_tokio(async move {
+        let addr = format!("http://127.0.0.1:{port}");
+        match AnvilSidecarClient::connect(addr).await {
+            Ok(mut c) => c.probe_health().await.is_ok(),
+            Err(_) => false,
+        }
+    })
 }
 
 #[cfg(test)]

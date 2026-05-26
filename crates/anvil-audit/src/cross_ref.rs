@@ -25,7 +25,10 @@ impl CrossRefKey {
     /// Serializes to the canonical `<artifact-path>:<section-id>:<version>` wire form.
     #[must_use]
     pub fn to_key_string(&self) -> String {
-        format!("{}:{}:{}", self.artifact_path, self.section_id, self.version)
+        format!(
+            "{}:{}:{}",
+            self.artifact_path, self.section_id, self.version
+        )
     }
 
     /// Parses from the canonical wire form.
@@ -62,16 +65,16 @@ mod tests {
         let key = CrossRefKey::new("charter.md", "§introduction", "v1");
         assert_eq!(key.to_key_string(), "charter.md:§introduction:v1");
 
-        let parsed = CrossRefKey::parse("charter.md:§introduction:v1")
-            .expect("should parse valid key");
+        let parsed =
+            CrossRefKey::parse("charter.md:§introduction:v1").expect("should parse valid key");
         assert_eq!(parsed.artifact_path, "charter.md");
         assert_eq!(parsed.section_id, "§introduction");
         assert_eq!(parsed.version, "v1");
         assert_eq!(parsed, key);
 
         // Round-trip stability
-        let round_tripped = CrossRefKey::parse(&key.to_key_string())
-            .expect("round-trip should succeed");
+        let round_tripped =
+            CrossRefKey::parse(&key.to_key_string()).expect("round-trip should succeed");
         assert_eq!(round_tripped, key);
     }
 

@@ -132,9 +132,8 @@ mod tests {
         // This is the type-level enforcement of NO-COMMIT-ON-PARTIAL-OUTPUT.
         fn _assert_type(
             s: crate::client::InvokeStream,
-        ) -> impl std::future::Future<
-            Output = Result<proto::FinalResult, crate::client::ClientError>,
-        > {
+        ) -> impl std::future::Future<Output = Result<proto::FinalResult, crate::client::ClientError>>
+        {
             s.collect()
         }
     }

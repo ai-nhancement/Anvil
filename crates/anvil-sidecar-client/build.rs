@@ -19,14 +19,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build_server(false)
             .build_client(true)
             .out_dir(&src_gen_dir)
-            .compile_protos(
-                &[proto_root.join("anvil/v1/sidecar.proto")],
-                &[&proto_root],
-            )?;
+            .compile_protos(&[proto_root.join("anvil/v1/sidecar.proto")], &[&proto_root])?;
     }
 
     let content = std::fs::read(&src_gen_file).map_err(|e| {
-        format!("src/gen/anvil.v1.rs is missing ({e}). Run `just gen-rust` with protoc to regenerate.")
+        format!(
+            "src/gen/anvil.v1.rs is missing ({e}). Run `just gen-rust` with protoc to regenerate."
+        )
     })?;
     std::fs::write(out_dir.join("anvil.v1.rs"), content)?;
     Ok(())

@@ -206,8 +206,8 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::AnvilError::ProvisionalMissingField { ref field, .. }
-                    if *field == "hypothesis"
+                crate::error::AnvilError::ProvisionalMissingField { field, .. }
+                    if field == "hypothesis"
             ),
             "expected ProvisionalMissingField for hypothesis, got: {err}"
         );
@@ -225,8 +225,8 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::AnvilError::ProvisionalMissingField { ref field, .. }
-                    if *field == "revision_trigger"
+                crate::error::AnvilError::ProvisionalMissingField { field, .. }
+                    if field == "revision_trigger"
             ),
             "expected ProvisionalMissingField for revision_trigger, got: {err}"
         );

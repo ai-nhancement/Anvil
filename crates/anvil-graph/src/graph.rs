@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use anvil_audit::store::AuditStore;
 use anvil_audit::records::ALL_RECORD_TYPES;
+use anvil_audit::store::AuditStore;
 use anvil_core::error::AnvilError;
 
 use crate::CrossRefKey;
@@ -43,14 +43,13 @@ impl ProvenanceGraph {
                             ),
                         })?;
                         for r in refs {
-                            let key_str =
-                                r.as_str().ok_or_else(|| AnvilError::IndexCorrupted {
-                                    path: std::path::PathBuf::from(&entry.file_path),
-                                    reason: format!(
-                                        "record '{}': cross_references contains a non-string element",
-                                        entry.id
-                                    ),
-                                })?;
+                            let key_str = r.as_str().ok_or_else(|| AnvilError::IndexCorrupted {
+                                path: std::path::PathBuf::from(&entry.file_path),
+                                reason: format!(
+                                    "record '{}': cross_references contains a non-string element",
+                                    entry.id
+                                ),
+                            })?;
                             edges
                                 .entry(key_str.to_owned())
                                 .or_default()
@@ -85,7 +84,7 @@ mod tests {
     use chrono::Utc;
     use tempfile::TempDir;
 
-    use anvil_audit::records::{ALL_RECORD_TYPES, GateApproval};
+    use anvil_audit::records::{GateApproval, ALL_RECORD_TYPES};
     use anvil_audit::store::AuditStore;
 
     use super::*;

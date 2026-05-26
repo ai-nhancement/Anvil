@@ -1,7 +1,7 @@
-//! Rendering functions for Charter Stage Pipeline artifacts (P5).
+//! Rendering functions for Charter and Plan Stage Pipeline artifacts (P5/P7).
 //!
-//! Produces `charter.md`, Disposition documents (`REVIEW_<artifact>_R<N>.md`),
-//! and hardening-history appends.
+//! Produces `charter.md`, Plan documents, Disposition documents
+//! (`REVIEW_<artifact>_R<N>.md`), and hardening-history appends.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -11,6 +11,7 @@ use crate::error::AnvilError;
 use crate::pipeline::{
     AdvisoryDispositionType, CharterPacket, CurationAction, DispositionLabel, VerifiedFinding,
 };
+use crate::plan::PlannerContract;
 
 // ── Charter rendering ──────────────────────────────────────────────────────────
 
@@ -304,6 +305,168 @@ pub fn append_charter_hardening_history(
     Ok(())
 }
 
+// ── Plan rendering (P7) ────────────────────────────────────────────────────────
+
+/// Renders a `PlannerContract` into a Plan document with all required sections.
+///
+/// Produces a structured markdown document matching the Plan Template in
+/// `ARTIFACT_SPECIFICATIONS.md`.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn render_plan_doc(contract: &PlannerContract, date: &str) -> String {
+    let mut out = String::new();
+
+    // Header
+    writeln!(
+        out,
+        "# Anvil Plan — v{}\n\n\
+         **Date:** {date}  \n\
+         **Status:** Draft  \n\
+         **Charter ref:** {}  \n\
+         **Planner-Contract compliance:** all nine required per-phase fields validated.\n",
+        contract.plan_version, contract.charter_ref
+    )
+    .ok();
+
+    // 1. Executive Summary
+    writeln!(out, "## Executive Summary\n").ok();
+    writeln!(
+        out,
+        "This Plan decomposes the project into {} phase(s), derived from the approved Charter.\n",
+        contract.phases.len()
+    )
+    .ok();
+
+    // 2. Phase Decomposition
+    writeln!(out, "## Phase Decomposition\n").ok();
+    for phase in &contract.phases {
+        writeln!(out, "### {} — {}\n", phase.phase_id, phase.name).ok();
+        writeln!(out, "- **Goal.** {}", phase.goal).ok();
+        writeln!(out, "- **Deliverable.** {}", phase.deliverable).ok();
+        writeln!(out, "- **Action list.**").ok();
+        for action in &phase.action_list {
+            writeln!(out, "  - {action}").ok();
+        }
+        writeln!(out, "- **Acceptance criteria.**").ok();
+        for (i, ac) in phase.acceptance_criteria.iter().enumerate() {
+            writeln!(out, "  {}. {ac}", i + 1).ok();
+        }
+        if phase.dependencies.is_empty() {
+            writeln!(out, "- **Dependencies.** (none)").ok();
+        } else {
+            writeln!(out, "- **Dependencies.** {}", phase.dependencies.join(", ")).ok();
+        }
+        if phase.hinge_tests.is_empty() {
+            writeln!(out, "- **Hinge-test list.** (none)").ok();
+        } else {
+            writeln!(out, "- **Hinge-test list.**").ok();
+            for ht in &phase.hinge_tests {
+                writeln!(out, "  - `{ht}`").ok();
+            }
+        }
+        writeln!(
+            out,
+            "- **Evaluation-metric impact.** {}\n",
+            phase.evaluation_metric_impact
+        )
+        .ok();
+        if let Some(r) = phase.estimated_rounds {
+            writeln!(out, "- **Estimated rounds-to-convergence.** {r}\n").ok();
+        }
+        writeln!(out, "---\n").ok();
+    }
+
+    // 3. Phase Dependency Graph
+    writeln!(out, "## Phase Dependency Graph\n").ok();
+    for phase in &contract.phases {
+        if phase.dependencies.is_empty() {
+            writeln!(out, "- `{}` (no deps)", phase.phase_id).ok();
+        } else {
+            writeln!(
+                out,
+                "- `{}` → depends on: {}",
+                phase.phase_id,
+                phase.dependencies.join(", ")
+            )
+            .ok();
+        }
+    }
+    writeln!(out).ok();
+
+    // 4. Deferred-Decision Registry
+    writeln!(out, "## Deferred-Decision Registry\n").ok();
+    let all_hinge_tests: Vec<(&str, &str)> = contract
+        .phases
+        .iter()
+        .flat_map(|p| {
+            p.hinge_tests
+                .iter()
+                .map(|ht| (ht.as_str(), p.phase_id.as_str()))
+        })
+        .collect();
+    if all_hinge_tests.is_empty() {
+        writeln!(out, "(none)\n").ok();
+    } else {
+        writeln!(out, "| Test | Phase |").ok();
+        writeln!(out, "|---|---|").ok();
+        for (ht, pid) in &all_hinge_tests {
+            writeln!(out, "| `{ht}` | {pid} |").ok();
+        }
+        writeln!(out).ok();
+    }
+
+    // 5. Plan-Level Acceptance Criteria
+    writeln!(out, "## Plan-Level Acceptance Criteria\n").ok();
+    for (i, phase) in contract.phases.iter().enumerate() {
+        writeln!(
+            out,
+            "{}. {} ({}) ships per its acceptance criteria.",
+            i + 1,
+            phase.name,
+            phase.phase_id
+        )
+        .ok();
+    }
+    writeln!(out).ok();
+
+    // 6. Bottom Line
+    writeln!(out, "## Bottom Line\n").ok();
+    writeln!(
+        out,
+        "Plan v{} covers {} phase(s). All phases validated against the Planner Contract.",
+        contract.plan_version,
+        contract.phases.len()
+    )
+    .ok();
+
+    out
+}
+
+/// Appends a round entry to `PLAN_HARDENING_HISTORY.md` in the project root (P7).
+///
+/// Creates the file if it does not exist.
+///
+/// # Errors
+///
+/// Returns [`AnvilError`] on I/O failure.
+pub fn append_plan_hardening_history(
+    project_root: &Path,
+    round_number: u32,
+    reviewer_id: &str,
+    date: &str,
+    summary: &str,
+) -> Result<(), AnvilError> {
+    use std::io::Write as IoWrite;
+    let path = project_root.join("PLAN_HARDENING_HISTORY.md");
+    let entry = format!("\n## R{round_number} — {date} (reviewer: {reviewer_id})\n\n{summary}\n");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)?;
+    file.write_all(entry.as_bytes())?;
+    Ok(())
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -467,6 +630,61 @@ mod tests {
         assert!(md.contains("## Success Criteria"));
         assert!(md.contains("- Build X"));
         assert!(md.contains("1. X ships"));
+    }
+
+    #[test]
+    fn test_render_plan_doc_required_sections() {
+        use crate::plan::{PlannerContract, PlannerPhase};
+        let phase = PlannerPhase {
+            phase_id: "P0".to_owned(),
+            name: "Bootstrap".to_owned(),
+            goal: "Initialize the workspace.".to_owned(),
+            action_list: vec!["Create dirs.".to_owned()],
+            deliverable: "Scaffold.".to_owned(),
+            acceptance_criteria: vec!["anvil init succeeds.".to_owned()],
+            dependencies: vec![],
+            hinge_tests: vec!["test_init_idempotent".to_owned()],
+            evaluation_metric_impact: "None.".to_owned(),
+            estimated_rounds: Some(1),
+        };
+        let contract = PlannerContract {
+            plan_version: "1.0.0".to_owned(),
+            charter_ref: "charter.md:v1".to_owned(),
+            phases: vec![phase],
+        };
+        let doc = render_plan_doc(&contract, "2026-05-26");
+        assert!(
+            doc.contains("## Executive Summary"),
+            "must have Executive Summary"
+        );
+        assert!(
+            doc.contains("## Phase Decomposition"),
+            "must have Phase Decomposition"
+        );
+        assert!(
+            doc.contains("## Phase Dependency Graph"),
+            "must have Phase Dependency Graph"
+        );
+        assert!(
+            doc.contains("## Plan-Level Acceptance Criteria"),
+            "must have Acceptance Criteria"
+        );
+        assert!(doc.contains("### P0 —"), "must include phase section");
+        assert!(doc.contains("Bootstrap"), "must include phase name");
+    }
+
+    #[test]
+    fn test_append_plan_hardening_history() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("PLAN_HARDENING_HISTORY.md"), b"").unwrap();
+
+        append_plan_hardening_history(root, 1, "reviewer-1", "2026-05-26", "Fixed P0 criteria.")
+            .expect("append should succeed");
+
+        let content = std::fs::read_to_string(root.join("PLAN_HARDENING_HISTORY.md")).unwrap();
+        assert!(content.contains("## R1 — 2026-05-26"));
+        assert!(content.contains("Fixed P0 criteria."));
     }
 
     #[test]

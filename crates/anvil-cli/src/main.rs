@@ -1,6 +1,8 @@
 mod arbiter;
 mod charter;
 mod discuss;
+mod graph;
+mod plan;
 mod session;
 mod setup;
 mod status;
@@ -62,6 +64,12 @@ enum Command {
     /// Arbiter commands: declare convergence and resolve findings (P6).
     #[command(subcommand)]
     Arbiter(ArbiterCmd),
+    /// Plan stage pipeline (invoke, review, findings, consolidate).
+    #[command(subcommand)]
+    Plan(PlanCmd),
+    /// Phase dependency graph queries.
+    #[command(subcommand)]
+    Graph(GraphCmd),
     /// Show project workflow status (rotation position, round count, advisory findings, pool clean check).
     Status {
         /// Project directory (defaults to current directory).
@@ -123,6 +131,55 @@ enum ArbiterCmd {
         /// Which other findings or rounds this contradicts or relates to.
         #[arg(long, default_value = "")]
         contradiction_context: String,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlanCmd {
+    /// Invoke the Planner model against the approved Charter; validate and write `ANVIL_PLAN.md`.
+    Invoke {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Invoke the reviewer model against `ANVIL_PLAN.md` and store findings.
+    Review {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Interactively curate Plan review findings and render the disposition document.
+    Findings {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Absorb hardening notes into the Plan, bump version, store provenance snapshot.
+    Consolidate {
+        /// Non-empty description of why this consolidation is being performed.
+        #[arg(long, default_value = "end-of-phase")]
+        trigger: String,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCmd {
+    /// Display all phases and their direct dependencies.
+    Show {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Show transitive dependents of a phase (phases affected by a change to it).
+    BlastRadius {
+        /// Phase ID to query (e.g. `P3`).
+        phase_id: String,
         /// Project directory (defaults to current directory).
         #[arg(long, default_value = ".")]
         project: PathBuf,
@@ -269,6 +326,20 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
                 &chosen_direction,
                 &contradiction_context,
             ),
+        },
+        Command::Plan(cmd) => match cmd {
+            PlanCmd::Invoke { project } => plan::run_plan_invoke(&project),
+            PlanCmd::Review { project } => plan::run_plan_review(&project),
+            PlanCmd::Findings { project } => plan::run_plan_findings(&project),
+            PlanCmd::Consolidate { trigger, project } => {
+                plan::run_plan_consolidate(&project, &trigger)
+            }
+        },
+        Command::Graph(cmd) => match cmd {
+            GraphCmd::Show { project } => graph::run_graph_show(&project),
+            GraphCmd::BlastRadius { phase_id, project } => {
+                graph::run_graph_blast_radius(&project, &phase_id)
+            }
         },
         Command::Status { project, artifact } => status::run_status(&project, &artifact),
     }

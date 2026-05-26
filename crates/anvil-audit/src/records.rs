@@ -24,6 +24,8 @@ pub enum RecordType {
     SidecarReload,
     /// Plan-extension (P5): curation decisions for a `ReviewerFindingPacket`.
     CuratedFindings,
+    /// Plan-extension (P7): version snapshot when Plan is consolidated.
+    PlanConsolidation,
 }
 
 impl RecordType {
@@ -45,6 +47,7 @@ impl RecordType {
             Self::ArbiterFindingResolution => "arbiter-finding-resolution",
             Self::SidecarReload => "sidecar-reload",
             Self::CuratedFindings => "curated-findings",
+            Self::PlanConsolidation => "plan-consolidation",
         }
     }
 
@@ -66,6 +69,7 @@ impl RecordType {
             Self::ArbiterFindingResolution => "ArbiterFindingResolution",
             Self::SidecarReload => "SidecarReload",
             Self::CuratedFindings => "CuratedFindings",
+            Self::PlanConsolidation => "PlanConsolidation",
         }
     }
 
@@ -87,6 +91,7 @@ impl RecordType {
             "ArbiterFindingResolution" => Some(Self::ArbiterFindingResolution),
             "SidecarReload" => Some(Self::SidecarReload),
             "CuratedFindings" => Some(Self::CuratedFindings),
+            "PlanConsolidation" => Some(Self::PlanConsolidation),
             _ => None,
         }
     }
@@ -109,13 +114,14 @@ impl RecordType {
             "arbiter-finding-resolution" => Some(Self::ArbiterFindingResolution),
             "sidecar-reload" => Some(Self::SidecarReload),
             "curated-findings" => Some(Self::CuratedFindings),
+            "plan-consolidation" => Some(Self::PlanConsolidation),
             _ => None,
         }
     }
 }
 
-/// All 14 record types (11 Charter-required + 3 Plan-extensions).
-pub const ALL_RECORD_TYPES: [RecordType; 14] = [
+/// All 15 record types (11 Charter-required + 4 Plan-extensions).
+pub const ALL_RECORD_TYPES: [RecordType; 15] = [
     RecordType::ReviewerFindingPacket,
     RecordType::VerifierResult,
     RecordType::RotationLog,
@@ -130,6 +136,7 @@ pub const ALL_RECORD_TYPES: [RecordType; 14] = [
     RecordType::ArbiterFindingResolution,
     RecordType::SidecarReload,
     RecordType::CuratedFindings,
+    RecordType::PlanConsolidation,
 ];
 
 /// The 11 Charter-required record type names (pascal-case, matching `RecordType::as_str()`).
@@ -460,6 +467,27 @@ impl CuratedFindingsRecord {
     }
 }
 
+/// Audit record written when the Plan is consolidated (P7).
+///
+/// Stores the full prior Plan text as `prior_plan_snapshot` so the previous
+/// version remains queryable via `anvil audit show <id>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanConsolidationRecord {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub cross_references: Vec<String>,
+    /// Semver string of the Plan version before consolidation (e.g. `"1.0.0"`).
+    pub plan_version_from: String,
+    /// Semver string of the Plan version after consolidation (e.g. `"1.1.0"`).
+    pub plan_version_to: String,
+    /// Human-readable trigger event (e.g. `"end-of-P7"`).
+    pub trigger: String,
+    /// Review round numbers whose hardening notes were absorbed.
+    pub hardening_rounds_absorbed: Vec<u32>,
+    /// Full text of the Plan file before this consolidation.
+    pub prior_plan_snapshot: String,
+}
+
 // ── AuditRecord impls ─────────────────────────────────────────────────────────
 
 macro_rules! impl_audit_record {
@@ -495,6 +523,7 @@ impl_audit_record!(
 );
 impl_audit_record!(SidecarReload, RecordType::SidecarReload);
 impl_audit_record!(CuratedFindingsRecord, RecordType::CuratedFindings);
+impl_audit_record!(PlanConsolidationRecord, RecordType::PlanConsolidation);
 
 // ── Constructors ──────────────────────────────────────────────────────────────
 
@@ -565,6 +594,33 @@ impl SidecarReload {
             cross_references,
             config_epoch,
             reason,
+        }
+    }
+}
+
+impl PlanConsolidationRecord {
+    /// Creates a new consolidation record.
+    ///
+    /// `prior_plan_snapshot` is the full text of the Plan before consolidation,
+    /// making the prior version queryable via the audit store (P7 AC5).
+    #[must_use]
+    pub fn new(
+        plan_version_from: String,
+        plan_version_to: String,
+        trigger: String,
+        hardening_rounds_absorbed: Vec<u32>,
+        prior_plan_snapshot: String,
+        cross_references: Vec<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            plan_version_from,
+            plan_version_to,
+            trigger,
+            hardening_rounds_absorbed,
+            prior_plan_snapshot,
         }
     }
 }

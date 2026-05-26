@@ -14,6 +14,12 @@ pub enum AnvilError {
     #[error("provisional choice '{key}' is missing required field '{field}'")]
     ProvisionalMissingField { key: String, field: &'static str },
 
+    #[error("phase '{phase_id}' is missing required field '{field}'")]
+    PhaseMissingField {
+        phase_id: String,
+        field: &'static str,
+    },
+
     #[error("charter file '{0}' is empty — a valid charter is required")]
     EmptyCharter(PathBuf),
 

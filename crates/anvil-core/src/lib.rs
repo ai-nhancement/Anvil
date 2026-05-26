@@ -4,6 +4,7 @@ pub mod config;
 pub mod diversity;
 pub mod error;
 pub mod pipeline;
+pub mod plan;
 pub mod project;
 pub mod render;
 pub mod rotation;

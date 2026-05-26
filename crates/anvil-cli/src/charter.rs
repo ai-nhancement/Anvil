@@ -19,7 +19,7 @@ use anvil_core::{
     pipeline::{
         apply_severity_tiering, check_advisory_gate, extract_findings_packet_json, verify_findings,
         AdvisoryDispositionType, CurationAction, CurationDisposition, DispositionLabel, Finding,
-        FindingsPacket, VerifiedFinding,
+        FindingsPacket, VerifiedFinding, REVIEWER_SYSTEM_PROMPT,
     },
     render::{append_charter_hardening_history, render_disposition_doc, DispositionInput},
     rotation::rotation_select,
@@ -32,50 +32,6 @@ use crate::session::{
     connect_and_handshake, ensure_sidecar_running, find_model_binding, retrieve_api_key,
 };
 use crate::setup::{with_tokio, ROLE_REVIEWER_1};
-
-// ── Reviewer system prompt ─────────────────────────────────────────────────────
-
-const REVIEWER_SYSTEM_PROMPT: &str = "\
-You are a rigorous architecture and document reviewer. Your job is to carefully \
-review the provided artifact and produce a structured Findings Packet.
-
-For each finding, identify:
-- A unique id (\"F1\", \"F2\", etc.)
-- Severity: P1 (critical — contradiction, broken invariant, factual error), \
-  P2 (material — clarity, missing edge case, under-specified contract), \
-  or P3 (style/cosmetic)
-- Location: the artifact path, and optionally a section_id, symbol_name, or a short \
-  verbatim quote from the artifact that supports the finding
-- Claim: one-sentence statement of the issue
-- Evidence: the exact text or code from the artifact that supports your claim
-- Recommendation: proposed resolution or direction
-
-Produce the Findings Packet as JSON wrapped in <findings_packet>...</findings_packet> tags.
-
-Format:
-<findings_packet>
-{
-  \"reviewer_id\": \"reviewer-1\",
-  \"reviewer_model_identity\": \"<your model identity>\",
-  \"findings\": [
-    {
-      \"id\": \"F1\",
-      \"severity\": \"P1\",
-      \"location\": {
-        \"artifact_path\": \"charter.md\",
-        \"section_id\": \"Goals\",
-        \"quote\": \"verbatim snippet from the artifact\"
-      },
-      \"claim\": \"One-sentence description of the issue.\",
-      \"evidence\": \"The artifact says X, which contradicts Y.\",
-      \"recommendation\": \"Change X to Z.\"
-    }
-  ]
-}
-</findings_packet>
-
-Be thorough. Flag contradictions, unclear language, missing required elements, \
-incomplete scope definitions, and alignment issues.";
 
 // ── anvil charter review ───────────────────────────────────────────────────────
 

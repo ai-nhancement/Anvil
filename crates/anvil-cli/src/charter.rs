@@ -446,10 +446,12 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
                     .map_err(|_| AnvilError::SetupCancelled)?,
                 AdvisoryDispositionType::DropAdvisory => Input::new()
                     .with_prompt("  Reason (required)")
+                    .allow_empty(false)
                     .interact_text()
                     .map_err(|_| AnvilError::SetupCancelled)?,
                 AdvisoryDispositionType::DeferAdvisory => Input::new()
                     .with_prompt("  Target phase (required)")
+                    .allow_empty(false)
                     .interact_text()
                     .map_err(|_| AnvilError::SetupCancelled)?,
             };
@@ -918,5 +920,74 @@ mod tests {
             result_provided, provided,
             "non-empty identity must be preserved"
         );
+    }
+
+    #[test]
+    fn test_advisory_gate_rejects_drop_advisory_with_empty_annotation() {
+        // Exercises the gate logic that run_charter_findings calls before any file writes (F1/F4).
+        // A Drop-Advisory or Defer-Advisory disposition without a non-empty annotation must
+        // be rejected by check_advisory_gate, returning the finding ID in the failure list.
+        use anvil_core::pipeline::{
+            check_advisory_gate, AdvisoryDispositionType, CurationAction, CurationDisposition,
+            Finding, FindingSeverity, LocationAnchor,
+        };
+
+        let finding = Finding {
+            id: "F-adv".to_owned(),
+            severity: FindingSeverity::P3,
+            location: LocationAnchor {
+                artifact_path: "charter.md".to_owned(),
+                section_id: None,
+                line_range: None,
+                symbol_name: None,
+                quote: None,
+            },
+            claim: "test advisory".to_owned(),
+            evidence: "evidence".to_owned(),
+            recommendation: "fix it".to_owned(),
+            metadata: None,
+            advisory: true,
+        };
+
+        // Drop-Advisory with empty annotation must be rejected.
+        let drop_empty = CurationDisposition {
+            finding_id: "F-adv".to_owned(),
+            action: CurationAction::Drop,
+            edited_finding: None,
+            annotation: None,
+            advisory_disposition: Some(AdvisoryDispositionType::DropAdvisory),
+        };
+        let blocked = check_advisory_gate(&[drop_empty], std::slice::from_ref(&finding));
+        assert_eq!(
+            blocked,
+            vec!["F-adv".to_owned()],
+            "Drop-Advisory with no annotation must fail gate"
+        );
+
+        // Defer-Advisory with whitespace-only annotation must be rejected.
+        let defer_whitespace = CurationDisposition {
+            finding_id: "F-adv".to_owned(),
+            action: CurationAction::Keep,
+            edited_finding: None,
+            annotation: Some("   ".to_owned()),
+            advisory_disposition: Some(AdvisoryDispositionType::DeferAdvisory),
+        };
+        let blocked2 = check_advisory_gate(&[defer_whitespace], std::slice::from_ref(&finding));
+        assert_eq!(
+            blocked2,
+            vec!["F-adv".to_owned()],
+            "Defer-Advisory with whitespace-only annotation must fail gate"
+        );
+
+        // Accept-Advisory requires no annotation — gate must pass.
+        let accept = CurationDisposition {
+            finding_id: "F-adv".to_owned(),
+            action: CurationAction::Keep,
+            edited_finding: None,
+            annotation: None,
+            advisory_disposition: Some(AdvisoryDispositionType::AcceptAdvisory),
+        };
+        let blocked3 = check_advisory_gate(&[accept], &[finding]);
+        assert!(blocked3.is_empty(), "Accept-Advisory must pass gate");
     }
 }

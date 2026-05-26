@@ -107,6 +107,22 @@ pub fn run_status(project_root: &Path, artifact: &str) -> Result<(), AnvilError>
         config.single_clean_pass_override,
     );
 
+    // Reviewers whose latest RFP lacks artifact_hash (pre-R2) cannot be same-state verified.
+    let hash_unknown: Vec<&str> = if current_hash.is_some() {
+        pool.iter()
+            .filter_map(|name| {
+                artifact_rfps
+                    .iter()
+                    .filter(|rfp| &rfp.packet.reviewer_id == name)
+                    .max_by_key(|rfp| rfp.created_at)
+                    .filter(|rfp| rfp.packet.artifact_hash.is_none())
+                    .map(|_| name.as_str())
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
     // ── Display ──────────────────────────────────────────────────────────────
 
     println!("Anvil Project Status — artifact: {artifact}");
@@ -156,6 +172,16 @@ pub fn run_status(project_root: &Path, artifact: &str) -> Result<(), AnvilError>
         for reviewer in &pool_result.not_clean {
             println!("  pending: {reviewer}");
         }
+    }
+
+    if !hash_unknown.is_empty() {
+        println!();
+        println!(
+            "Note: {} reviewer packet(s) predate artifact-hash tracking (pre-R2); \
+             same-state verification skipped for: {}",
+            hash_unknown.len(),
+            hash_unknown.join(", ")
+        );
     }
 
     Ok(())

@@ -292,11 +292,72 @@ mod tests {
             "",
             "",
         );
-        assert!(result.is_err(), "unknown packet must be rejected");
-        let msg = result.unwrap_err().to_string();
+        let err = result.expect_err("unknown packet must be rejected");
         assert!(
-            msg.contains("packet_id"),
-            "error should mention packet_id: {msg}"
+            matches!(err, AnvilError::PacketNotFound(ref id) if id == "00000000-0000-0000-0000-000000000000"),
+            "expected PacketNotFound with correct id, got: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("00000000-0000-0000-0000-000000000000"),
+            "error message must contain the packet_id: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_finding_rejects_unknown_finding() {
+        use anvil_audit::records::ReviewerFindingPacket;
+        use anvil_core::pipeline::{Finding, FindingSeverity, FindingsPacket, LocationAnchor};
+
+        let (tmp, store) = init_store();
+        let config_toml = r"
+[choices]
+";
+        std::fs::write(tmp.path().join("anvil.toml"), config_toml).unwrap();
+
+        // Build a real RFP with finding "F1" and store it.
+        let finding = Finding {
+            id: "F1".to_owned(),
+            severity: FindingSeverity::P2,
+            location: LocationAnchor {
+                artifact_path: "charter.md".to_owned(),
+                section_id: None,
+                line_range: None,
+                symbol_name: None,
+                quote: None,
+            },
+            claim: "test".to_owned(),
+            evidence: "test".to_owned(),
+            recommendation: "test".to_owned(),
+            metadata: None,
+            advisory: false,
+        };
+        let packet = FindingsPacket::new(
+            "charter.md:R1".to_owned(),
+            1,
+            "reviewer-1".to_owned(),
+            "model-v1".to_owned(),
+            vec![finding],
+        );
+        let packet_id = packet.packet_id.clone();
+        let rfp = ReviewerFindingPacket::from_packet("charter-R1".to_owned(), packet, vec![]);
+        store.append(&rfp).expect("append RFP");
+
+        // Reference the real packet but a non-existent finding ID.
+        let composite = format!("{packet_id}:NONEXISTENT");
+        let result = run_resolve_finding(tmp.path(), &composite, "some reason", "", "");
+        let err = result.expect_err("unknown finding must be rejected");
+        assert!(
+            matches!(
+                &err,
+                AnvilError::FindingNotFound { packet_id: pid, finding_id: fid }
+                    if pid == &packet_id && fid == "NONEXISTENT"
+            ),
+            "expected FindingNotFound with correct ids, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("NONEXISTENT"),
+            "error message must contain the finding_id: {err}"
         );
     }
 

@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// All 13 audit record types (11 Charter-required + 2 Plan-extensions).
+use anvil_core::pipeline::{CurationDisposition, FindingsPacket, VerifiedFinding};
+
+/// All 14 audit record types (11 Charter-required + 3 Plan-extensions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordType {
@@ -20,6 +22,8 @@ pub enum RecordType {
     ArbiterFindingResolution,
     /// Plan-extension (P3b): config-epoch reload events.
     SidecarReload,
+    /// Plan-extension (P5): curation decisions for a `ReviewerFindingPacket`.
+    CuratedFindings,
 }
 
 impl RecordType {
@@ -40,6 +44,7 @@ impl RecordType {
             Self::RollbackEvent => "rollback-event",
             Self::ArbiterFindingResolution => "arbiter-finding-resolution",
             Self::SidecarReload => "sidecar-reload",
+            Self::CuratedFindings => "curated-findings",
         }
     }
 
@@ -60,6 +65,7 @@ impl RecordType {
             Self::RollbackEvent => "RollbackEvent",
             Self::ArbiterFindingResolution => "ArbiterFindingResolution",
             Self::SidecarReload => "SidecarReload",
+            Self::CuratedFindings => "CuratedFindings",
         }
     }
 
@@ -80,6 +86,7 @@ impl RecordType {
             "RollbackEvent" => Some(Self::RollbackEvent),
             "ArbiterFindingResolution" => Some(Self::ArbiterFindingResolution),
             "SidecarReload" => Some(Self::SidecarReload),
+            "CuratedFindings" => Some(Self::CuratedFindings),
             _ => None,
         }
     }
@@ -101,13 +108,14 @@ impl RecordType {
             "rollback-event" => Some(Self::RollbackEvent),
             "arbiter-finding-resolution" => Some(Self::ArbiterFindingResolution),
             "sidecar-reload" => Some(Self::SidecarReload),
+            "curated-findings" => Some(Self::CuratedFindings),
             _ => None,
         }
     }
 }
 
-/// All 13 record types (Charter-required + Plan-extensions).
-pub const ALL_RECORD_TYPES: [RecordType; 13] = [
+/// All 14 record types (11 Charter-required + 3 Plan-extensions).
+pub const ALL_RECORD_TYPES: [RecordType; 14] = [
     RecordType::ReviewerFindingPacket,
     RecordType::VerifierResult,
     RecordType::RotationLog,
@@ -121,6 +129,7 @@ pub const ALL_RECORD_TYPES: [RecordType; 13] = [
     RecordType::RollbackEvent,
     RecordType::ArbiterFindingResolution,
     RecordType::SidecarReload,
+    RecordType::CuratedFindings,
 ];
 
 /// The 11 Charter-required record type names (pascal-case, matching `RecordType::as_str()`).
@@ -152,9 +161,9 @@ pub trait AuditRecord: serde::Serialize {
 
 // ── Record structs ────────────────────────────────────────────────────────────
 // Each struct contains common fields (id, created_at, cross_references) plus
-// type-specific fields. Type-specific fields will be extended in the phases
-// that produce the corresponding workflow artifacts (P5–P8).
+// type-specific fields.
 
+/// Audit record wrapping a full `FindingsPacket` from a review round.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewerFindingPacket {
     pub id: String,
@@ -163,8 +172,33 @@ pub struct ReviewerFindingPacket {
     pub phase_id: String,
     pub reviewer_id: String,
     pub finding_count: u32,
+    /// Full findings packet (P5+).
+    pub packet: FindingsPacket,
 }
 
+impl ReviewerFindingPacket {
+    /// Constructs a new record wrapping the given `FindingsPacket`.
+    #[must_use]
+    pub fn from_packet(
+        phase_id: String,
+        packet: FindingsPacket,
+        cross_references: Vec<String>,
+    ) -> Self {
+        let finding_count = u32::try_from(packet.findings.len()).unwrap_or(u32::MAX);
+        let reviewer_id = packet.reviewer_id.clone();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            phase_id,
+            reviewer_id,
+            finding_count,
+            packet,
+        }
+    }
+}
+
+/// Audit record for the Finding Verifier's pass over a `ReviewerFindingPacket`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifierResult {
     pub id: String,
@@ -173,6 +207,38 @@ pub struct VerifierResult {
     pub phase_id: String,
     pub verifier_id: String,
     pub passed: bool,
+    /// `FindingsPacket.packet_id` this result was computed for. Used by curation to
+    /// verify that the latest `VerifierResult` corresponds to the latest `ReviewerFindingPacket`.
+    pub source_packet_id: String,
+    /// Per-finding verified results (P5+).
+    pub verified_findings: Vec<VerifiedFinding>,
+}
+
+impl VerifierResult {
+    /// Constructs a new verifier result record.
+    #[must_use]
+    pub fn from_verified(
+        phase_id: String,
+        verifier_id: String,
+        source_packet_id: String,
+        verified_findings: Vec<VerifiedFinding>,
+        cross_references: Vec<String>,
+    ) -> Self {
+        use anvil_core::pipeline::VerificationOutcome;
+        let passed = verified_findings
+            .iter()
+            .all(|vf| vf.outcome != VerificationOutcome::Refuted);
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            phase_id,
+            verifier_id,
+            passed,
+            source_packet_id,
+            verified_findings,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +342,39 @@ pub struct SidecarReload {
     pub reason: String,
 }
 
+/// Audit record for the Coordinator's curation of a `ReviewerFindingPacket` (P5+).
+///
+/// Written as a sibling to the original packet; never modifies the original.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CuratedFindingsRecord {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub cross_references: Vec<String>,
+    /// References the `ReviewerFindingPacket.packet.packet_id`.
+    pub packet_id: String,
+    pub curated_by: String,
+    pub dispositions: Vec<CurationDisposition>,
+}
+
+impl CuratedFindingsRecord {
+    #[must_use]
+    pub fn new(
+        packet_id: String,
+        curated_by: String,
+        dispositions: Vec<CurationDisposition>,
+        cross_references: Vec<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            packet_id,
+            curated_by,
+            dispositions,
+        }
+    }
+}
+
 // ── AuditRecord impls ─────────────────────────────────────────────────────────
 
 macro_rules! impl_audit_record {
@@ -310,6 +409,7 @@ impl_audit_record!(
     RecordType::ArbiterFindingResolution
 );
 impl_audit_record!(SidecarReload, RecordType::SidecarReload);
+impl_audit_record!(CuratedFindingsRecord, RecordType::CuratedFindings);
 
 // ── Constructors ──────────────────────────────────────────────────────────────
 
@@ -420,5 +520,50 @@ mod tests {
         assert!(RecordType::from_dir_name("").is_none());
         assert!(RecordType::from_dir_name("GateApproval").is_none()); // PascalCase is not accepted
         assert!(RecordType::from_dir_name("unknown-type").is_none());
+    }
+
+    // hinge_test: pins=curated_findings_record_exists, intended=curation-audit-persistence, phase=P5
+    #[test]
+    fn test_curation_audit_record_required() {
+        // Pins: CuratedFindingsRecord implements AuditRecord and persists as RecordType::CuratedFindings.
+        // Flipping requires updating the record type, the audit-store directory, and this test together.
+        use chrono::Utc;
+        let cross_ref = crate::CrossRefKey::new("charter.md", "§root", "R1").to_key_string();
+        let record = CuratedFindingsRecord {
+            id: "test-curation-id".to_owned(),
+            created_at: Utc::now(),
+            cross_references: vec![cross_ref.clone()],
+            packet_id: "test-packet-id".to_owned(),
+            curated_by: "coordinator".to_owned(),
+            dispositions: vec![],
+        };
+        assert_eq!(record.record_type(), RecordType::CuratedFindings);
+        assert_eq!(RecordType::CuratedFindings.dir_name(), "curated-findings");
+        // Full JSON round-trip
+        let json = serde_json::to_string(&record).expect("serialize");
+        let parsed: CuratedFindingsRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.packet_id, "test-packet-id");
+        assert_eq!(parsed.curated_by, "coordinator");
+        assert!(parsed.dispositions.is_empty());
+        // Cross-reference must be a valid three-part key
+        assert!(crate::CrossRefKey::parse(&parsed.cross_references[0]).is_some());
+    }
+
+    #[test]
+    fn test_verifier_result_source_packet_id_stored() {
+        use chrono::Utc;
+        let vr = VerifierResult {
+            id: "test-vr-id".to_owned(),
+            created_at: Utc::now(),
+            cross_references: vec![],
+            phase_id: "charter-R1".to_owned(),
+            verifier_id: "local-verifier-v1".to_owned(),
+            passed: true,
+            source_packet_id: "pkt-abc".to_owned(),
+            verified_findings: vec![],
+        };
+        let json = serde_json::to_string(&vr).expect("serialize");
+        let parsed: VerifierResult = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.source_packet_id, "pkt-abc");
     }
 }

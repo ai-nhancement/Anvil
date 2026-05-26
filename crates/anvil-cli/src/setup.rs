@@ -39,7 +39,7 @@ const DEFAULT_MODEL_OPENAI: &str = "gpt-4o-mini";
 const DEFAULT_MODEL_GOOGLE: &str = "gemini-1.5-flash";
 
 /// Keyring service name (Windows Credential Manager / macOS Keychain).
-const KEYRING_SERVICE: &str = "anvil";
+pub(crate) const KEYRING_SERVICE: &str = "anvil";
 
 // ── Role names ────────────────────────────────────────────────────────────────
 
@@ -853,7 +853,7 @@ fn detect_credential_mode() -> CredentialMode {
     }
 }
 
-fn keychain_entry_name(conn_name: &str) -> String {
+pub(crate) fn keychain_entry_name(conn_name: &str) -> String {
     format!("provider-{conn_name}")
 }
 
@@ -908,7 +908,7 @@ fn sidecar_config_json(connections: &[WizardConnection]) -> String {
     .expect("sidecar config serialization must not fail")
 }
 
-fn provider_type_sidecar_str(pt: &ProviderType) -> &'static str {
+pub(crate) fn provider_type_sidecar_str(pt: &ProviderType) -> &'static str {
     match pt {
         ProviderType::Anthropic => "anthropic",
         ProviderType::OpenAi => "openai",
@@ -920,7 +920,7 @@ fn provider_type_sidecar_str(pt: &ProviderType) -> &'static str {
     }
 }
 
-fn sidecar_config_epoch(json: &str) -> String {
+pub(crate) fn sidecar_config_epoch(json: &str) -> String {
     use std::fmt::Write as _;
     let digest = sha2::Sha256::digest(json.as_bytes());
     let mut hex = String::with_capacity(64);

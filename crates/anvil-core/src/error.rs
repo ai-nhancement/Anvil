@@ -72,6 +72,30 @@ pub enum AnvilError {
     #[error("OS keychain unavailable: {0}")]
     KeychainUnavailable(String),
 
+    #[error("sidecar not connected — call `anvil sidecar start` first")]
+    SidecarNotConnected,
+
+    #[error("charter packet missing required field: {0}")]
+    CharterPacketInvalid(String),
+
+    #[error("no {0} model binding configured — run `anvil setup` to configure model roles")]
+    ModelBindingMissing(String),
+
+    #[error("no provider connection '{0}' found in anvil.toml")]
+    ProviderConnectionMissing(String),
+
+    #[error("credential retrieval failed for connection '{name}': {reason}")]
+    CredentialError { name: String, reason: String },
+
+    #[error("model response did not contain a valid {0} packet")]
+    ModelResponseMissingPacket(String),
+
+    #[error("model response packet is invalid JSON: {reason}")]
+    ModelResponseBadJson { reason: String },
+
+    #[error("no reviewer finding packet found for artifact '{0}'")]
+    NoFindingsPacket(String),
+
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 

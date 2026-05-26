@@ -7,5 +7,8 @@ pub mod store;
 
 pub use cross_ref::CrossRefKey;
 pub use integrity::{IntegrityReport, IntegrityStatus, IntegrityViolation};
-pub use records::{AuditRecord, RecordType, ALL_RECORD_TYPES, CHARTER_REQUIRED_TYPES};
+pub use records::{
+    AuditRecord, CuratedFindingsRecord, RecordType, ReviewerFindingPacket, VerifierResult,
+    ALL_RECORD_TYPES, CHARTER_REQUIRED_TYPES,
+};
 pub use store::AuditStore;

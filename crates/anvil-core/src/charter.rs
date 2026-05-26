@@ -1,3 +1,8 @@
+//! Charter file utilities.
+//!
+//! [`CharterPacket`] and related types live in [`crate::pipeline`] (P5).
+//! This module handles the file-level `charter.md` operations.
+
 use std::path::Path;
 
 use sha2::{Digest, Sha256};

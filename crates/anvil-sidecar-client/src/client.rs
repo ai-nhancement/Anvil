@@ -291,6 +291,51 @@ impl InvokeStream {
         &self.idempotency_key
     }
 
+    /// Drains the stream to its terminal event, calling `on_token` for each `Token` event.
+    ///
+    /// Identical contract to `collect()` — only `FinalResult` is returned. Token text is
+    /// passed to `on_token` for live terminal display; this does not affect the commit path
+    /// (NO-COMMIT-ON-PARTIAL-OUTPUT invariant is preserved).
+    pub async fn drain_displaying<F>(
+        mut self,
+        mut on_token: F,
+    ) -> Result<proto::FinalResult, ClientError>
+    where
+        F: FnMut(&str),
+    {
+        loop {
+            match self.inner.message().await? {
+                None => return Err(ClientError::NoFinalResult),
+                Some(event) => {
+                    if !event.idempotency_key.is_empty()
+                        && event.idempotency_key != self.idempotency_key
+                    {
+                        return Err(ClientError::ResponseMismatch {
+                            sent: self.idempotency_key,
+                            received: event.idempotency_key,
+                        });
+                    }
+                    match event.event {
+                        Some(proto::invoke_stream_event::Event::FinalResult(r)) => {
+                            return match self.inner.message().await? {
+                                None => Ok(r),
+                                Some(_) => Err(ClientError::StreamStateMachineViolation),
+                            };
+                        }
+                        Some(proto::invoke_stream_event::Event::Error(e)) => {
+                            return Err(ClientError::Stream(e.error));
+                        }
+                        Some(proto::invoke_stream_event::Event::Token(t)) => {
+                            on_token(&t.text);
+                        }
+                        Some(proto::invoke_stream_event::Event::Heartbeat(_)) => {}
+                        None => return Err(ClientError::NoFinalResult),
+                    }
+                }
+            }
+        }
+    }
+
     /// Drains the stream to its terminal event and verifies clean closure.
     ///
     /// Returns `Ok(FinalResult)` when a `FinalResult` event arrives and is followed by

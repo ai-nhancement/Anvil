@@ -1,3 +1,6 @@
+mod charter;
+mod discuss;
+mod session;
 mod setup;
 
 use std::path::{Path, PathBuf};
@@ -45,6 +48,15 @@ enum Command {
     /// Sidecar daemon management.
     #[command(subcommand)]
     Sidecar(SidecarCmd),
+    /// Interactive Interlocutor discussion — produces charter.md.
+    Discuss {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Charter stage pipeline (review, findings curation).
+    #[command(subcommand)]
+    Charter(CharterCmd),
 }
 
 #[derive(Subcommand)]
@@ -58,6 +70,28 @@ enum SidecarCmd {
     /// Stop the running sidecar daemon for this project.
     Stop {
         /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Start the sidecar daemon for this project (no-op if already running).
+    Start {
+        /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum CharterCmd {
+    /// Invoke the reviewer model against charter.md and store the findings packet.
+    Review {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Interactively curate verified findings and render the disposition document.
+    Findings {
+        /// Project directory (defaults to current directory).
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -161,6 +195,12 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
         Command::Sidecar(cmd) => match cmd {
             SidecarCmd::Status { project } => cmd_sidecar_status(&project),
             SidecarCmd::Stop { project } => cmd_sidecar_stop(&project),
+            SidecarCmd::Start { project } => cmd_sidecar_start(&project),
+        },
+        Command::Discuss { project } => discuss::run_discuss(&project),
+        Command::Charter(cmd) => match cmd {
+            CharterCmd::Review { project } => charter::run_charter_review(&project),
+            CharterCmd::Findings { project } => charter::run_charter_findings(&project),
         },
     }
 }
@@ -444,6 +484,14 @@ fn cmd_sidecar_stop(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
     let _ = std::fs::remove_file(&pid_path);
     let _ = std::fs::remove_file(&port_path);
     println!("Runtime files removed.");
+    Ok(())
+}
+
+fn cmd_sidecar_start(root: &Path) -> Result<(), anvil_core::error::AnvilError> {
+    let config = anvil_core::config::load_config(root)?;
+    let port = session::ensure_sidecar_running(root, &config)?;
+    println!("Sidecar running on port {port}.");
+    println!("  Run `anvil sidecar status` to inspect.");
     Ok(())
 }
 

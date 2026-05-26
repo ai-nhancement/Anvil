@@ -90,12 +90,14 @@ dependencies = [
  "anvil-core",
  "anvil-graph",
  "anvil-sidecar-client",
+ "chrono",
  "clap",
  "dialoguer",
  "keyring",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "toml",
  "uuid",
@@ -105,11 +107,14 @@ dependencies = [
 name = "anvil-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "toml",
+ "uuid",
 ]
 
 [[package]]

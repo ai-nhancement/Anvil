@@ -21,6 +21,7 @@ pub const LAYOUT_DIRS: &[&str] = &[
     "audit-store/rollback-event",
     "audit-store/arbiter-finding-resolution",
     "audit-store/sidecar-reload",
+    "audit-store/curated-findings",
     ".anvil",
     ".anvil/run",
     ".anvil/logs",
@@ -89,12 +90,12 @@ pub fn init(root: &Path) -> Result<InitResult, AnvilError> {
 mod tests {
     use super::*;
 
-    // hinge_test: pins=18, intended=project-layout-directories, phase=P2
+    // hinge_test: pins=19, intended=project-layout-directories, phase=P5
     #[test]
     fn test_project_layout_directories() {
-        // Pins: the per-project directory layout has exactly these 18 entries.
-        // Updated from 16 (P1) to 18 (P2): added audit-store/arbiter-finding-resolution
-        // and audit-store/sidecar-reload for the two Plan-extension record types.
+        // Pins: the per-project directory layout has exactly these 19 entries.
+        // Updated from 18 (P2) to 19 (P5): added audit-store/curated-findings
+        // for the P5 CuratedFindings plan-extension record type.
         // Changing a directory name or adding/removing a directory requires updating
         // LAYOUT_DIRS and this test together; it is a breaking change for existing projects.
         let expected: &[&str] = &[
@@ -113,6 +114,7 @@ mod tests {
             "audit-store/rollback-event",
             "audit-store/arbiter-finding-resolution",
             "audit-store/sidecar-reload",
+            "audit-store/curated-findings",
             ".anvil",
             ".anvil/run",
             ".anvil/logs",

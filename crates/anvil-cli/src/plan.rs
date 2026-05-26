@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::session::{
+    connect_and_handshake, ensure_sidecar_running, find_model_binding, retrieve_api_key,
+};
+use crate::setup::{with_tokio, ROLE_REVIEWER_1};
 use anvil_audit::{
     records::{
         ArbiterFindingResolution, CuratedFindingsRecord, PlanConsolidationRecord,
@@ -30,12 +34,6 @@ use anvil_core::{
     rotation::rotation_select,
 };
 use dialoguer::{Input, Select};
-use sha2::Digest as _;
-
-use crate::session::{
-    connect_and_handshake, ensure_sidecar_running, find_model_binding, retrieve_api_key,
-};
-use crate::setup::{with_tokio, ROLE_REVIEWER_1};
 
 const PLANNER_SYSTEM_PROMPT: &str = "\
 You are a rigorous project Planner. Given the approved Charter and locked Required Choices, \
@@ -125,14 +123,7 @@ pub fn run_plan_invoke(project_root: &Path) -> Result<(), AnvilError> {
 
     // If the declaration recorded an artifact hash, verify the current charter matches.
     if let Some(ref approved_hash) = charter_decl.artifact_hash {
-        let current_hash = {
-            let digest = sha2::Sha256::digest(charter_content.as_bytes());
-            let mut hex = String::with_capacity(64);
-            for b in &digest {
-                write!(hex, "{b:02x}").unwrap();
-            }
-            hex
-        };
+        let current_hash = crate::utils::sha256_hex(charter_content.as_bytes());
         if &current_hash != approved_hash {
             return Err(AnvilError::Io(std::io::Error::other(
                 "charter.md has been modified since the convergence declaration — \
@@ -288,14 +279,7 @@ pub fn run_plan_review(project_root: &Path) -> Result<(), AnvilError> {
         ))));
     }
 
-    let plan_hash = {
-        let digest = sha2::Sha256::digest(plan_content.as_bytes());
-        let mut hex = String::with_capacity(64);
-        for b in &digest {
-            write!(hex, "{b:02x}").unwrap();
-        }
-        hex
-    };
+    let plan_hash = crate::utils::sha256_hex(plan_content.as_bytes());
 
     // Load Arbiter-Decided findings for the plan artifact.
     let arbiter_entries = store.list(RecordType::ArbiterFindingResolution)?;
@@ -1113,14 +1097,7 @@ mod tests {
         std::fs::write(tmp.path().join("anvil.toml"), "[choices]\n").unwrap();
 
         let charter_content_a = "# Charter v1\n\nOriginal approved content.\n";
-        let hash_a = {
-            let digest = sha2::Sha256::digest(charter_content_a.as_bytes());
-            let mut hex = String::with_capacity(64);
-            for b in &digest {
-                write!(hex, "{b:02x}").unwrap();
-            }
-            hex
-        };
+        let hash_a = crate::utils::sha256_hex(charter_content_a.as_bytes());
 
         // Create declaration recording the hash of charter state A.
         let decl = anvil_audit::records::ConvergenceDeclaration::new(

@@ -6,6 +6,7 @@ mod plan;
 mod session;
 mod setup;
 mod status;
+mod utils;
 
 use std::path::{Path, PathBuf};
 

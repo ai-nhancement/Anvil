@@ -2,7 +2,6 @@
 //! - `anvil arbiter declare-convergence <artifact> --reason "<text>"`
 //! - `anvil arbiter resolve-finding <finding-id> --reason "<text>"`
 
-use std::fmt::Write as _;
 use std::path::Path;
 
 use anvil_audit::{
@@ -11,7 +10,6 @@ use anvil_audit::{
     AuditStore, CrossRefKey, RecordType,
 };
 use anvil_core::{config::load_config, error::AnvilError, pipeline::check_advisory_gate};
-use sha2::Digest as _;
 
 // ── anvil arbiter declare-convergence ────────────────────────────────────────
 
@@ -71,14 +69,7 @@ pub fn run_declare_convergence(
     // Compute the artifact file hash so the plan-invoke gate can detect post-declaration edits.
     let artifact_hash = std::fs::read(project_root.join(artifact))
         .ok()
-        .map(|bytes| {
-            let digest = sha2::Sha256::digest(&bytes);
-            let mut hex = String::with_capacity(64);
-            for b in &digest {
-                write!(hex, "{b:02x}").unwrap();
-            }
-            hex
-        });
+        .map(|bytes| crate::utils::sha256_hex(&bytes));
 
     let cross_ref = CrossRefKey::new(artifact, "§root", &format!("R{round_count}")).to_key_string();
     let record = ConvergenceDeclaration::new(

@@ -223,6 +223,14 @@ enum PhaseCmd {
         #[arg(long, default_value = ".")]
         project: std::path::PathBuf,
     },
+    /// Interactively curate phase review findings and render the disposition document.
+    Findings {
+        /// Phase ID to curate findings for (e.g. `P8`).
+        id: String,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -389,6 +397,7 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
             }
             PhaseCmd::Review { id, project } => phase::run_phase_review(&project, &id),
             PhaseCmd::Ship { id, project } => phase::run_phase_ship(&project, &id),
+            PhaseCmd::Findings { id, project } => phase::run_phase_findings(&project, &id),
         },
         Command::Graph(cmd) => match cmd {
             GraphCmd::Show { project } => graph::run_graph_show(&project),

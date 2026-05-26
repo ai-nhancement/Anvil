@@ -95,7 +95,11 @@ pub fn validate_planner_contract(contract: &PlannerContract) -> Vec<AnvilError> 
 
 // ── Extraction ────────────────────────────────────────────────────────────────
 
-/// Extracts the content between `<planner_contract>` and `</planner_contract>` tags.
+/// Extracts the raw JSON string between `<planner_contract>` and `</planner_contract>` tags.
+///
+/// This performs structural extraction only — it does not parse or validate.
+/// Callers that want a fully validated `PlannerContract` should use
+/// [`parse_planner_contract`] instead.
 #[must_use]
 pub fn extract_planner_contract_json(response: &str) -> Option<&str> {
     let open = "<planner_contract>";
@@ -103,6 +107,28 @@ pub fn extract_planner_contract_json(response: &str) -> Option<&str> {
     let start = response.find(open)? + open.len();
     let end = response[start..].find(close)?;
     Some(response[start..start + end].trim())
+}
+
+/// Parses and validates a Planner Contract from a JSON string.
+///
+/// Combines `serde_json` deserialization with `validate_planner_contract` so the
+/// caller receives a precise field-level error when the model output is structurally
+/// valid JSON but missing required phase fields.
+///
+/// # Errors
+///
+/// Returns [`AnvilError::ModelResponseBadJson`] on JSON parse failure, or
+/// [`AnvilError::PhaseMissingField`] (first error) when validation finds missing fields.
+pub fn parse_planner_contract(json: &str) -> Result<PlannerContract, AnvilError> {
+    let contract: PlannerContract =
+        serde_json::from_str(json).map_err(|e| AnvilError::ModelResponseBadJson {
+            reason: e.to_string(),
+        })?;
+    let errors = validate_planner_contract(&contract);
+    if let Some(first) = errors.into_iter().next() {
+        return Err(first);
+    }
+    Ok(contract)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -206,5 +232,38 @@ Thanks.
             Some("{\"plan_version\": \"1.0.0\"}")
         );
         assert!(extract_planner_contract_json("no tags here").is_none());
+    }
+
+    #[test]
+    fn test_parse_planner_contract_valid() {
+        let phase = make_phase("P0");
+        let contract = make_contract(vec![phase]);
+        let json = serde_json::to_string(&contract).unwrap();
+        let result = parse_planner_contract(&json);
+        assert!(result.is_ok(), "valid contract must parse without error");
+        assert_eq!(result.unwrap().phases.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_planner_contract_bad_json() {
+        let result = parse_planner_contract("not valid json");
+        assert!(
+            matches!(result, Err(AnvilError::ModelResponseBadJson { .. })),
+            "bad JSON must produce ModelResponseBadJson"
+        );
+    }
+
+    #[test]
+    fn test_parse_planner_contract_missing_field() {
+        // Valid JSON, but phase has empty goal — must produce PhaseMissingField.
+        let mut phase = make_phase("P0");
+        phase.goal = String::new();
+        let contract = make_contract(vec![phase]);
+        let json = serde_json::to_string(&contract).unwrap();
+        let result = parse_planner_contract(&json);
+        assert!(
+            matches!(result, Err(AnvilError::PhaseMissingField { field, .. }) if field == "goal"),
+            "missing goal must produce PhaseMissingField(goal), got: {result:?}"
+        );
     }
 }

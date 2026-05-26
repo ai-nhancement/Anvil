@@ -23,7 +23,7 @@ use anvil_core::{
         AdvisoryDispositionType, CurationAction, CurationDisposition, DispositionLabel, Finding,
         FindingsPacket, VerifiedFinding, REVIEWER_SYSTEM_PROMPT,
     },
-    plan::{extract_planner_contract_json, validate_planner_contract, PlannerContract},
+    plan::extract_planner_contract_json,
     render::{
         append_plan_hardening_history, render_disposition_doc, render_plan_doc, DispositionInput,
     },
@@ -94,9 +94,10 @@ pub fn run_plan_invoke(project_root: &Path) -> Result<(), AnvilError> {
     let config = load_config(project_root)?;
     let store = AuditStore::open(project_root)?;
 
-    // Gate: Charter must be approved (ConvergenceDeclaration exists for charter.md).
+    // Gate: Charter must be approved — use the most recent ConvergenceDeclaration for
+    // charter.md (last entry in the append-only store is the latest).
     let conv_entries = store.list(RecordType::ConvergenceDeclaration)?;
-    let charter_approved = conv_entries.iter().any(|e| {
+    let charter_approved = conv_entries.iter().rev().any(|e| {
         store
             .get(&e.id)
             .ok()
@@ -165,29 +166,16 @@ pub fn run_plan_invoke(project_root: &Path) -> Result<(), AnvilError> {
         &api_key,
     ))?;
 
-    // Extract and parse contract.
+    // Extract and parse contract — parse_planner_contract gives a precise field-level error.
     let contract_json = extract_planner_contract_json(&response)
         .ok_or_else(|| AnvilError::ModelResponseMissingPacket("planner_contract".to_owned()))?;
 
-    let contract: PlannerContract =
-        serde_json::from_str(contract_json).map_err(|e| AnvilError::ModelResponseBadJson {
-            reason: e.to_string(),
-        })?;
-
-    // Validate all nine required fields.
-    let errors = validate_planner_contract(&contract);
-    if !errors.is_empty() {
-        eprintln!(
-            "error: Planner Contract validation failed — {} error(s):",
-            errors.len()
-        );
-        for e in &errors {
-            eprintln!("  {e}");
-        }
-        return Err(AnvilError::Io(std::io::Error::other(
+    let contract = anvil_core::plan::parse_planner_contract(contract_json).map_err(|e| {
+        eprintln!("error: Planner Contract invalid: {e}");
+        AnvilError::Io(std::io::Error::other(
             "Planner Contract validation failed — fix the phase fields and re-invoke",
-        )));
-    }
+        ))
+    })?;
 
     println!("  Contract valid: {} phase(s).", contract.phases.len());
 
@@ -1067,6 +1055,36 @@ mod tests {
         assert!(
             msg.contains("not in approved state"),
             "error must mention approved state: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_plan_invoke_charter_gate_passes_with_declaration() {
+        // Gate must pass when a ConvergenceDeclaration for charter.md exists.
+        // (Fails at the next step — missing charter.md — not at the gate.)
+        let (tmp, store) = init_store();
+        std::fs::write(tmp.path().join("anvil.toml"), "[choices]\n").unwrap();
+
+        let decl = anvil_audit::records::ConvergenceDeclaration::new(
+            "charter.md".to_owned(),
+            3,
+            "all P1s resolved".to_owned(),
+            0,
+            0,
+            vec![],
+        );
+        store.append(&decl).expect("store declaration");
+
+        let result = run_plan_invoke(tmp.path());
+        // Gate passed — fails at missing charter.md, not at the approved-state check.
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            !msg.contains("not in approved state"),
+            "gate must have passed; error should be about missing charter.md, got: {msg}"
+        );
+        assert!(
+            msg.contains("charter.md"),
+            "error must be about missing charter.md: {msg}"
         );
     }
 }

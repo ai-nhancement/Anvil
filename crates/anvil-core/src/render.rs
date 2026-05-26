@@ -312,11 +312,9 @@ pub fn append_charter_hardening_history(
 /// Produces a structured markdown document matching the Plan Template in
 /// `ARTIFACT_SPECIFICATIONS.md`.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn render_plan_doc(contract: &PlannerContract, date: &str) -> String {
     let mut out = String::new();
 
-    // Header
     writeln!(
         out,
         "# Anvil Plan — v{}\n\n\
@@ -328,7 +326,6 @@ pub fn render_plan_doc(contract: &PlannerContract, date: &str) -> String {
     )
     .ok();
 
-    // 1. Executive Summary
     writeln!(out, "## Executive Summary\n").ok();
     writeln!(
         out,
@@ -337,48 +334,79 @@ pub fn render_plan_doc(contract: &PlannerContract, date: &str) -> String {
     )
     .ok();
 
-    // 2. Phase Decomposition
     writeln!(out, "## Phase Decomposition\n").ok();
     for phase in &contract.phases {
-        writeln!(out, "### {} — {}\n", phase.phase_id, phase.name).ok();
-        writeln!(out, "- **Goal.** {}", phase.goal).ok();
-        writeln!(out, "- **Deliverable.** {}", phase.deliverable).ok();
-        writeln!(out, "- **Action list.**").ok();
-        for action in &phase.action_list {
-            writeln!(out, "  - {action}").ok();
-        }
-        writeln!(out, "- **Acceptance criteria.**").ok();
-        for (i, ac) in phase.acceptance_criteria.iter().enumerate() {
-            writeln!(out, "  {}. {ac}", i + 1).ok();
-        }
-        if phase.dependencies.is_empty() {
-            writeln!(out, "- **Dependencies.** (none)").ok();
-        } else {
-            writeln!(out, "- **Dependencies.** {}", phase.dependencies.join(", ")).ok();
-        }
-        if phase.hinge_tests.is_empty() {
-            writeln!(out, "- **Hinge-test list.** (none)").ok();
-        } else {
-            writeln!(out, "- **Hinge-test list.**").ok();
-            for ht in &phase.hinge_tests {
-                writeln!(out, "  - `{ht}`").ok();
-            }
-        }
-        writeln!(
-            out,
-            "- **Evaluation-metric impact.** {}\n",
-            phase.evaluation_metric_impact
-        )
-        .ok();
-        if let Some(r) = phase.estimated_rounds {
-            writeln!(out, "- **Estimated rounds-to-convergence.** {r}\n").ok();
-        }
-        writeln!(out, "---\n").ok();
+        render_phase_section(&mut out, phase);
     }
 
-    // 3. Phase Dependency Graph
+    render_phase_dep_graph_section(&mut out, &contract.phases);
+    render_deferred_decision_section(&mut out, &contract.phases);
+
+    writeln!(out, "## Plan-Level Acceptance Criteria\n").ok();
+    for (i, phase) in contract.phases.iter().enumerate() {
+        writeln!(
+            out,
+            "{}. {} ({}) ships per its acceptance criteria.",
+            i + 1,
+            phase.name,
+            phase.phase_id
+        )
+        .ok();
+    }
+    writeln!(out).ok();
+
+    writeln!(out, "## Bottom Line\n").ok();
+    writeln!(
+        out,
+        "Plan v{} covers {} phase(s). All phases validated against the Planner Contract.",
+        contract.plan_version,
+        contract.phases.len()
+    )
+    .ok();
+
+    out
+}
+
+fn render_phase_section(out: &mut String, phase: &crate::plan::PlannerPhase) {
+    writeln!(out, "### {} — {}\n", phase.phase_id, phase.name).ok();
+    writeln!(out, "- **Goal.** {}", phase.goal).ok();
+    writeln!(out, "- **Deliverable.** {}", phase.deliverable).ok();
+    writeln!(out, "- **Action list.**").ok();
+    for action in &phase.action_list {
+        writeln!(out, "  - {action}").ok();
+    }
+    writeln!(out, "- **Acceptance criteria.**").ok();
+    for (i, ac) in phase.acceptance_criteria.iter().enumerate() {
+        writeln!(out, "  {}. {ac}", i + 1).ok();
+    }
+    if phase.dependencies.is_empty() {
+        writeln!(out, "- **Dependencies.** (none)").ok();
+    } else {
+        writeln!(out, "- **Dependencies.** {}", phase.dependencies.join(", ")).ok();
+    }
+    if phase.hinge_tests.is_empty() {
+        writeln!(out, "- **Hinge-test list.** (none)").ok();
+    } else {
+        writeln!(out, "- **Hinge-test list.**").ok();
+        for ht in &phase.hinge_tests {
+            writeln!(out, "  - `{ht}`").ok();
+        }
+    }
+    writeln!(
+        out,
+        "- **Evaluation-metric impact.** {}\n",
+        phase.evaluation_metric_impact
+    )
+    .ok();
+    if let Some(r) = phase.estimated_rounds {
+        writeln!(out, "- **Estimated rounds-to-convergence.** {r}\n").ok();
+    }
+    writeln!(out, "---\n").ok();
+}
+
+fn render_phase_dep_graph_section(out: &mut String, phases: &[crate::plan::PlannerPhase]) {
     writeln!(out, "## Phase Dependency Graph\n").ok();
-    for phase in &contract.phases {
+    for phase in phases {
         if phase.dependencies.is_empty() {
             writeln!(out, "- `{}` (no deps)", phase.phase_id).ok();
         } else {
@@ -392,11 +420,11 @@ pub fn render_plan_doc(contract: &PlannerContract, date: &str) -> String {
         }
     }
     writeln!(out).ok();
+}
 
-    // 4. Deferred-Decision Registry
+fn render_deferred_decision_section(out: &mut String, phases: &[crate::plan::PlannerPhase]) {
     writeln!(out, "## Deferred-Decision Registry\n").ok();
-    let all_hinge_tests: Vec<(&str, &str)> = contract
-        .phases
+    let all_hinge_tests: Vec<(&str, &str)> = phases
         .iter()
         .flat_map(|p| {
             p.hinge_tests
@@ -414,32 +442,6 @@ pub fn render_plan_doc(contract: &PlannerContract, date: &str) -> String {
         }
         writeln!(out).ok();
     }
-
-    // 5. Plan-Level Acceptance Criteria
-    writeln!(out, "## Plan-Level Acceptance Criteria\n").ok();
-    for (i, phase) in contract.phases.iter().enumerate() {
-        writeln!(
-            out,
-            "{}. {} ({}) ships per its acceptance criteria.",
-            i + 1,
-            phase.name,
-            phase.phase_id
-        )
-        .ok();
-    }
-    writeln!(out).ok();
-
-    // 6. Bottom Line
-    writeln!(out, "## Bottom Line\n").ok();
-    writeln!(
-        out,
-        "Plan v{} covers {} phase(s). All phases validated against the Planner Contract.",
-        contract.plan_version,
-        contract.phases.len()
-    )
-    .ok();
-
-    out
 }
 
 /// Appends a round entry to `PLAN_HARDENING_HISTORY.md` in the project root (P7).

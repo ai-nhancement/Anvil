@@ -17,6 +17,8 @@ pub struct PhaseDepGraph {
     deps: HashMap<String, Vec<String>>,
     /// `phase_id` → direct dependent phase IDs (reverse edges: "required by").
     rdeps: HashMap<String, Vec<String>>,
+    /// Dependency IDs referenced in phase declarations but absent from the phase set.
+    dangling: Vec<String>,
 }
 
 impl PhaseDepGraph {
@@ -25,18 +27,34 @@ impl PhaseDepGraph {
     /// All phase IDs declared in the contract are registered, even those with
     /// no dependencies, so `dependencies` and `dependents` return empty vecs
     /// for leaf phases rather than `None`.
+    ///
+    /// Dependency IDs that reference a phase not present in the contract are
+    /// recorded as "dangling" and accessible via [`Self::dangling_deps`].
     #[must_use]
     pub fn build_from_contract(contract: &PlannerContract) -> Self {
         let mut deps: HashMap<String, Vec<String>> = HashMap::new();
         let mut rdeps: HashMap<String, Vec<String>> = HashMap::new();
+
+        let known_phases: HashSet<&str> = contract
+            .phases
+            .iter()
+            .map(|p| p.phase_id.as_str())
+            .collect();
 
         for phase in &contract.phases {
             deps.entry(phase.phase_id.clone()).or_default();
             rdeps.entry(phase.phase_id.clone()).or_default();
         }
 
+        let mut dangling: Vec<String> = Vec::new();
+        let mut dangling_seen: HashSet<String> = HashSet::new();
+
         for phase in &contract.phases {
             for dep in &phase.dependencies {
+                // Still wire the edge so queries degrade gracefully.
+                if !known_phases.contains(dep.as_str()) && dangling_seen.insert(dep.clone()) {
+                    dangling.push(dep.clone());
+                }
                 deps.entry(phase.phase_id.clone())
                     .or_default()
                     .push(dep.clone());
@@ -47,7 +65,19 @@ impl PhaseDepGraph {
             }
         }
 
-        Self { deps, rdeps }
+        Self {
+            deps,
+            rdeps,
+            dangling,
+        }
+    }
+
+    /// Returns dependency IDs referenced in phase declarations but absent from the phase set.
+    ///
+    /// A non-empty slice indicates a malformed Planner Contract with typos or missing phases.
+    #[must_use]
+    pub fn dangling_deps(&self) -> &[String] {
+        &self.dangling
     }
 
     /// Returns all **transitive** dependencies of `phase_id` (phases it depends on,
@@ -205,5 +235,38 @@ mod tests {
         let g = make_graph(vec![phase("P0", &[])]);
         assert!(g.dependencies("P99").is_empty());
         assert!(g.blast_radius("P99").is_empty());
+    }
+
+    #[test]
+    fn test_phase_graph_dangling_dep_surfaced() {
+        // P1 references P_TYPO which is not in the contract — must be surfaced.
+        let g = make_graph(vec![phase("P0", &[]), phase("P1", &["P_TYPO"])]);
+        assert!(
+            g.dangling_deps().contains(&"P_TYPO".to_owned()),
+            "dangling dep P_TYPO must be reported"
+        );
+        // No dangling deps for a clean contract.
+        let clean = make_graph(vec![phase("P0", &[]), phase("P1", &["P0"])]);
+        assert!(
+            clean.dangling_deps().is_empty(),
+            "valid contract must have no dangling deps"
+        );
+    }
+
+    #[test]
+    fn test_phase_graph_dangling_dep_deduplicated() {
+        // Two phases both reference the same missing ID — only one entry in dangling.
+        let g = make_graph(vec![
+            phase("P0", &["P_MISSING"]),
+            phase("P1", &["P_MISSING"]),
+        ]);
+        assert_eq!(
+            g.dangling_deps()
+                .iter()
+                .filter(|d| d.as_str() == "P_MISSING")
+                .count(),
+            1,
+            "duplicate dangling reference must appear only once"
+        );
     }
 }

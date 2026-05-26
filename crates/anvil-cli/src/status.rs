@@ -190,6 +190,10 @@ pub fn run_status(project_root: &Path, artifact: &str) -> Result<(), AnvilError>
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Counts advisory findings in the latest artifact RFP without curated advisory dispositions.
+///
+/// Uses the latest `CuratedFindingsRecord` whose `packet_id` matches `rfp.packet.packet_id`
+/// so that curation records from other packets/artifacts cannot satisfy this packet's advisory
+/// findings.
 fn count_open_advisory(
     store: &AuditStore,
     artifact_rfps: &[ReviewerFindingPacket],
@@ -199,17 +203,20 @@ fn count_open_advisory(
     };
 
     let curated_entries = store.list(RecordType::CuratedFindings)?;
-    let dispositions = if let Some(last) = curated_entries.last() {
-        let curated: anvil_audit::records::CuratedFindingsRecord =
-            serde_json::from_value(store.get(&last.id)?).map_err(|e| {
-                AnvilError::ModelResponseBadJson {
-                    reason: format!("CuratedFindingsRecord corrupt: {e}"),
-                }
-            })?;
-        curated.dispositions
-    } else {
-        vec![]
-    };
+    let dispositions = curated_entries
+        .iter()
+        .rev()
+        .find_map(|e| {
+            store
+                .get(&e.id)
+                .ok()
+                .and_then(|v| {
+                    serde_json::from_value::<anvil_audit::records::CuratedFindingsRecord>(v).ok()
+                })
+                .filter(|c| c.packet_id == rfp.packet.packet_id)
+                .map(|c| c.dispositions)
+        })
+        .unwrap_or_default();
 
     let missing = check_advisory_gate(&dispositions, &rfp.packet.findings);
     Ok(u32::try_from(missing.len()).unwrap_or(u32::MAX))
@@ -494,6 +501,116 @@ mod tests {
         assert!(
             result.all_clean,
             "packet without hash must pass (backwards compat)"
+        );
+    }
+
+    #[test]
+    fn test_open_advisory_unrelated_packet_curation_does_not_satisfy() {
+        // Regression: a CuratedFindingsRecord for packet A must not be used to clear advisory
+        // findings in packet B, even when both packets contain an identically-named finding "F1".
+        use anvil_audit::records::CuratedFindingsRecord;
+        use anvil_core::pipeline::{AdvisoryDispositionType, CurationAction, CurationDisposition};
+
+        let (tmp, store) = init_store();
+        std::fs::write(tmp.path().join("anvil.toml"), "[choices]\n").unwrap();
+
+        // RFP-A: has advisory finding "F1", will be curated.
+        let rfp_a = make_rfp_with_finding("reviewer-1", true);
+        let packet_id_a = rfp_a.packet.packet_id.clone();
+        store.append(&rfp_a).expect("append rfp_a");
+
+        // RFP-B: also has advisory finding "F1", not curated.
+        let rfp_b = make_rfp_with_finding("reviewer-2", true);
+        store.append(&rfp_b).expect("append rfp_b");
+
+        // Store a curation record tied to packet A.
+        let disposition = CurationDisposition {
+            finding_id: "F1".to_owned(),
+            action: CurationAction::Keep,
+            edited_finding: None,
+            annotation: None,
+            advisory_disposition: Some(AdvisoryDispositionType::AcceptAdvisory),
+        };
+        let curated_a = CuratedFindingsRecord::new(
+            packet_id_a,
+            "curator".to_owned(),
+            vec![disposition],
+            vec![],
+        );
+        store.append(&curated_a).expect("append curated_a");
+
+        // count_open_advisory for rfp_b must ignore rfp_a's curation and return 1.
+        let count = count_open_advisory(&store, &[rfp_b]).expect("count");
+        assert_eq!(
+            count, 1,
+            "curation for a different packet must not clear advisory findings in rfp_b"
+        );
+    }
+
+    #[test]
+    fn test_open_advisory_different_artifact_curation_does_not_satisfy() {
+        // Regression: a CuratedFindingsRecord for a plan.md RFP must not clear advisory
+        // findings in a charter.md RFP, even when both contain finding "F1".
+        use anvil_audit::records::CuratedFindingsRecord;
+        use anvil_core::pipeline::{AdvisoryDispositionType, CurationAction, CurationDisposition};
+
+        let (tmp, store) = init_store();
+        std::fs::write(tmp.path().join("anvil.toml"), "[choices]\n").unwrap();
+
+        // charter RFP with advisory finding "F1".
+        let charter_rfp = make_rfp_with_finding("reviewer-1", true);
+        store.append(&charter_rfp).expect("append charter_rfp");
+
+        // plan RFP with advisory finding "F1" — a different packet.
+        let plan_finding = anvil_core::pipeline::Finding {
+            id: "F1".to_owned(),
+            severity: FindingSeverity::P3,
+            location: LocationAnchor {
+                artifact_path: "plan.md".to_owned(),
+                section_id: None,
+                line_range: None,
+                symbol_name: None,
+                quote: None,
+            },
+            claim: "plan advisory".to_owned(),
+            evidence: "evidence".to_owned(),
+            recommendation: "fix".to_owned(),
+            metadata: None,
+            advisory: true,
+        };
+        let plan_packet = FindingsPacket::new(
+            "plan.md:R1".to_owned(),
+            1,
+            "reviewer-1".to_owned(),
+            "model-v1".to_owned(),
+            vec![plan_finding],
+        );
+        let plan_packet_id = plan_packet.packet_id.clone();
+        let plan_rfp =
+            ReviewerFindingPacket::from_packet("plan-R1".to_owned(), plan_packet, vec![]);
+        store.append(&plan_rfp).expect("append plan_rfp");
+
+        // Store curation for the plan packet only.
+        let disposition = CurationDisposition {
+            finding_id: "F1".to_owned(),
+            action: CurationAction::Keep,
+            edited_finding: None,
+            annotation: None,
+            advisory_disposition: Some(AdvisoryDispositionType::AcceptAdvisory),
+        };
+        let curated_plan = CuratedFindingsRecord::new(
+            plan_packet_id,
+            "curator".to_owned(),
+            vec![disposition],
+            vec![],
+        );
+        store.append(&curated_plan).expect("append curated_plan");
+
+        // charter advisory count must still be 1 — plan curation cannot satisfy it.
+        let count = count_open_advisory(&store, &[charter_rfp]).expect("count");
+        assert_eq!(
+            count, 1,
+            "plan curation must not clear advisory finding in charter packet"
         );
     }
 }

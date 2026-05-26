@@ -194,6 +194,10 @@ pub(crate) fn filter_rfps_by_artifact(
 
 /// Counts advisory findings in the latest artifact-scoped RFP without curated advisory
 /// dispositions.
+///
+/// Uses the latest `CuratedFindingsRecord` whose `packet_id` matches `rfp.packet.packet_id`
+/// so that curation records from other packets/artifacts cannot satisfy this packet's advisory
+/// findings.
 fn count_open_advisory_findings(
     store: &AuditStore,
     artifact_rfps: &[ReviewerFindingPacket],
@@ -202,19 +206,21 @@ fn count_open_advisory_findings(
         return Ok(0);
     };
 
-    // Load latest curated dispositions if available.
     let curated_entries = store.list(RecordType::CuratedFindings)?;
-    let dispositions = if let Some(last) = curated_entries.last() {
-        let curated: anvil_audit::records::CuratedFindingsRecord =
-            serde_json::from_value(store.get(&last.id)?).map_err(|e| {
-                AnvilError::ModelResponseBadJson {
-                    reason: format!("CuratedFindingsRecord corrupt: {e}"),
-                }
-            })?;
-        curated.dispositions
-    } else {
-        vec![]
-    };
+    let dispositions = curated_entries
+        .iter()
+        .rev()
+        .find_map(|e| {
+            store
+                .get(&e.id)
+                .ok()
+                .and_then(|v| {
+                    serde_json::from_value::<anvil_audit::records::CuratedFindingsRecord>(v).ok()
+                })
+                .filter(|c| c.packet_id == rfp.packet.packet_id)
+                .map(|c| c.dispositions)
+        })
+        .unwrap_or_default();
 
     let missing = check_advisory_gate(&dispositions, &rfp.packet.findings);
     Ok(u32::try_from(missing.len()).unwrap_or(u32::MAX))

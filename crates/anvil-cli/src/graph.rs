@@ -9,9 +9,9 @@ use anvil_graph::PhaseDepGraph;
 
 // ── anvil graph show ───────────────────────────────────────────────────────────
 
-/// Runs `anvil graph show` — loads the Plan contract from the audit store (latest
-/// `PlanConsolidationRecord` or directly from `ANVIL_PLAN.md` JSON), builds the phase
-/// dependency graph, and prints each phase with its direct dependencies.
+/// Runs `anvil graph show` — loads the Plan contract from `.anvil/plan_contract.json`
+/// (written by `anvil plan invoke`), builds the phase dependency graph, and prints
+/// each phase with its direct dependencies.
 ///
 /// # Errors
 ///
@@ -19,6 +19,15 @@ use anvil_graph::PhaseDepGraph;
 pub fn run_graph_show(project_root: &Path) -> Result<(), AnvilError> {
     let contract = load_contract(project_root)?;
     let graph = PhaseDepGraph::build_from_contract(&contract);
+
+    let dangling = graph.dangling_deps();
+    if !dangling.is_empty() {
+        eprintln!(
+            "warning: {} dangling dependency reference(s) in contract (phase IDs not found): {}",
+            dangling.len(),
+            dangling.join(", ")
+        );
+    }
 
     println!("Phase Dependency Graph ({} phases):", contract.phases.len());
     println!();
@@ -51,6 +60,15 @@ pub fn run_graph_show(project_root: &Path) -> Result<(), AnvilError> {
 pub fn run_graph_blast_radius(project_root: &Path, phase_id: &str) -> Result<(), AnvilError> {
     let contract = load_contract(project_root)?;
     let graph = PhaseDepGraph::build_from_contract(&contract);
+
+    let dangling = graph.dangling_deps();
+    if !dangling.is_empty() {
+        eprintln!(
+            "warning: {} dangling dependency reference(s) in contract (phase IDs not found): {}",
+            dangling.len(),
+            dangling.join(", ")
+        );
+    }
 
     let affected = graph.blast_radius(phase_id);
 

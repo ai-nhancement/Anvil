@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use anvil_core::pipeline::{CurationDisposition, FindingsPacket, VerifiedFinding};
 
-/// All 14 audit record types (11 Charter-required + 3 Plan-extensions).
+/// All 15 audit record types (11 Charter-required + 4 Plan-extensions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordType {
@@ -342,6 +342,10 @@ pub struct ConvergenceDeclaration {
     pub advisory_finding_count: u32,
     /// Count of arbiter-decided findings at declaration time (P6).
     pub arbiter_decided_count: u32,
+    /// SHA-256 hex digest of the artifact file at declaration time (P7).
+    /// Present only when the file existed at `anvil arbiter declare-convergence` time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_hash: Option<String>,
 }
 
 impl ConvergenceDeclaration {
@@ -353,6 +357,7 @@ impl ConvergenceDeclaration {
         advisory_finding_count: u32,
         arbiter_decided_count: u32,
         cross_references: Vec<String>,
+        artifact_hash: Option<String>,
     ) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -363,6 +368,7 @@ impl ConvergenceDeclaration {
             reasoning,
             advisory_finding_count,
             arbiter_decided_count,
+            artifact_hash,
         }
     }
 }

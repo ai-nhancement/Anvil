@@ -78,13 +78,14 @@ Format:
 // ── anvil plan invoke ──────────────────────────────────────────────────────────
 
 /// Default plan file name within the project root.
-pub const DEFAULT_PLAN_FILE: &str = "ANVIL_PLAN.md";
+pub const DEFAULT_PLAN_FILE: &str = "plan.md";
 
 /// Runs `anvil plan invoke` — invokes the Planner model, validates the contract,
-/// renders the Plan document, and writes it to `ANVIL_PLAN.md`.
+/// renders the Plan document, and writes it to `plan.md`.
 ///
 /// Exits non-zero if no Charter `ConvergenceDeclaration` exists for `charter.md`
-/// (i.e., Charter has not been approved).
+/// (Charter not approved), or if `charter.md` contents differ from the hash recorded
+/// in the declaration (Charter modified after approval).
 ///
 /// # Errors
 ///
@@ -94,26 +95,26 @@ pub fn run_plan_invoke(project_root: &Path) -> Result<(), AnvilError> {
     let config = load_config(project_root)?;
     let store = AuditStore::open(project_root)?;
 
-    // Gate: Charter must be approved — use the most recent ConvergenceDeclaration for
+    // Gate: Charter must be approved — find the most recent ConvergenceDeclaration for
     // charter.md (last entry in the append-only store is the latest).
     let conv_entries = store.list(RecordType::ConvergenceDeclaration)?;
-    let charter_approved = conv_entries.iter().rev().any(|e| {
+    let charter_decl = conv_entries.iter().rev().find_map(|e| {
         store
             .get(&e.id)
             .ok()
             .and_then(|v| {
                 serde_json::from_value::<anvil_audit::records::ConvergenceDeclaration>(v).ok()
             })
-            .is_some_and(|r| r.phase_id == "charter.md")
+            .filter(|r| r.phase_id == "charter.md")
     });
-    if !charter_approved {
+    let Some(charter_decl) = charter_decl else {
         return Err(AnvilError::Io(std::io::Error::other(
             "Charter is not in approved state — declare convergence with \
              `anvil arbiter declare-convergence charter.md` before invoking the Planner",
         )));
-    }
+    };
 
-    // Read charter.md and choices for the Planner prompt.
+    // Read charter.md now — used for both the artifact-hash check and the Planner prompt.
     let charter_path = project_root.join("charter.md");
     let charter_content = std::fs::read_to_string(&charter_path).map_err(|e| {
         AnvilError::Io(std::io::Error::other(format!(
@@ -121,6 +122,24 @@ pub fn run_plan_invoke(project_root: &Path) -> Result<(), AnvilError> {
             charter_path.display()
         )))
     })?;
+
+    // If the declaration recorded an artifact hash, verify the current charter matches.
+    if let Some(ref approved_hash) = charter_decl.artifact_hash {
+        let current_hash = {
+            let digest = sha2::Sha256::digest(charter_content.as_bytes());
+            let mut hex = String::with_capacity(64);
+            for b in &digest {
+                write!(hex, "{b:02x}").unwrap();
+            }
+            hex
+        };
+        if &current_hash != approved_hash {
+            return Err(AnvilError::Io(std::io::Error::other(
+                "charter.md has been modified since the convergence declaration — \
+                 re-review and re-declare convergence before invoking the Planner",
+            )));
+        }
+    }
 
     let choices_summary: String = config
         .choices
@@ -172,9 +191,7 @@ pub fn run_plan_invoke(project_root: &Path) -> Result<(), AnvilError> {
 
     let contract = anvil_core::plan::parse_planner_contract(contract_json).map_err(|e| {
         eprintln!("error: Planner Contract invalid: {e}");
-        AnvilError::Io(std::io::Error::other(
-            "Planner Contract validation failed — fix the phase fields and re-invoke",
-        ))
+        e
     })?;
 
     println!("  Contract valid: {} phase(s).", contract.phases.len());
@@ -211,7 +228,7 @@ pub fn run_plan_invoke(project_root: &Path) -> Result<(), AnvilError> {
 /// Returns [`AnvilError`] on config, sidecar, model, or audit-store failure.
 #[allow(clippy::too_many_lines)]
 pub fn run_plan_review(project_root: &Path) -> Result<(), AnvilError> {
-    let plan_file = "ANVIL_PLAN.md";
+    let plan_file = DEFAULT_PLAN_FILE;
     let config = load_config(project_root)?;
 
     let pool: Vec<String> = if config.reviewer_pool.is_empty() {
@@ -266,9 +283,9 @@ pub fn run_plan_review(project_root: &Path) -> Result<(), AnvilError> {
         )))
     })?;
     if plan_content.trim().is_empty() {
-        return Err(AnvilError::Io(std::io::Error::other(
-            "ANVIL_PLAN.md is empty — run `anvil plan invoke` first",
-        )));
+        return Err(AnvilError::Io(std::io::Error::other(format!(
+            "{plan_file} is empty — run `anvil plan invoke` first"
+        ))));
     }
 
     let plan_hash = {
@@ -412,7 +429,7 @@ pub fn run_plan_review(project_root: &Path) -> Result<(), AnvilError> {
 /// Returns [`AnvilError`] on config, audit-store, curation, or I/O failure.
 #[allow(clippy::too_many_lines)]
 pub fn run_plan_findings(project_root: &Path) -> Result<(), AnvilError> {
-    let plan_file = "ANVIL_PLAN.md";
+    let plan_file = DEFAULT_PLAN_FILE;
     let store = AuditStore::open(project_root)?;
 
     // Load latest plan RFP + paired VR.
@@ -585,13 +602,8 @@ pub fn run_plan_consolidate(project_root: &Path, trigger: &str) -> Result<(), An
     // Build the consolidated plan: update version header and append a Hardening Notes section.
     let consolidated = consolidate_plan_content(&prior_plan, &version_to, &hardening_content);
 
-    // Write the new plan.
-    std::fs::write(&plan_path, consolidated.as_bytes())?;
-
-    // Clear the hardening history (entries absorbed).
-    std::fs::write(&history_path, b"")?;
-
-    // Store the PlanConsolidationRecord for provenance (prior version snapshot).
+    // Store the PlanConsolidationRecord for provenance BEFORE mutating files.
+    // If the audit store is unavailable, no file changes occur.
     let store = AuditStore::open(project_root)?;
     let cross_ref = CrossRefKey::new(DEFAULT_PLAN_FILE, "§root", &version_to).to_key_string();
     let record = PlanConsolidationRecord::new(
@@ -603,6 +615,12 @@ pub fn run_plan_consolidate(project_root: &Path, trigger: &str) -> Result<(), An
         vec![cross_ref],
     );
     store.append(&record)?;
+
+    // Provenance record is durable — now commit file mutations.
+    std::fs::write(&plan_path, consolidated.as_bytes())?;
+
+    // Clear the hardening history (entries absorbed).
+    std::fs::write(&history_path, b"")?;
 
     println!("✓ Plan consolidated: v{version_from} → v{version_to}");
     println!("  Trigger: {trigger}");
@@ -1072,6 +1090,7 @@ mod tests {
             0,
             0,
             vec![],
+            None,
         );
         store.append(&decl).expect("store declaration");
 
@@ -1085,6 +1104,49 @@ mod tests {
         assert!(
             msg.contains("charter.md"),
             "error must be about missing charter.md: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_plan_invoke_charter_gate_fails_with_modified_charter() {
+        let (tmp, store) = init_store();
+        std::fs::write(tmp.path().join("anvil.toml"), "[choices]\n").unwrap();
+
+        let charter_content_a = "# Charter v1\n\nOriginal approved content.\n";
+        let hash_a = {
+            let digest = sha2::Sha256::digest(charter_content_a.as_bytes());
+            let mut hex = String::with_capacity(64);
+            for b in &digest {
+                write!(hex, "{b:02x}").unwrap();
+            }
+            hex
+        };
+
+        // Create declaration recording the hash of charter state A.
+        let decl = anvil_audit::records::ConvergenceDeclaration::new(
+            "charter.md".to_owned(),
+            1,
+            "all findings resolved".to_owned(),
+            0,
+            0,
+            vec![],
+            Some(hash_a),
+        );
+        store.append(&decl).expect("store declaration");
+
+        // Write charter.md with DIFFERENT content (post-declaration edit).
+        std::fs::write(
+            tmp.path().join("charter.md"),
+            "# Charter v1\n\nMODIFIED content.\n",
+        )
+        .unwrap();
+
+        let result = run_plan_invoke(tmp.path());
+        assert!(result.is_err(), "modified charter must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("modified since the convergence declaration"),
+            "error must mention modification: {msg}"
         );
     }
 }

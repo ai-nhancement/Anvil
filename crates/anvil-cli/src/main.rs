@@ -1,7 +1,9 @@
+mod arbiter;
 mod charter;
 mod discuss;
 mod session;
 mod setup;
+mod status;
 
 use std::path::{Path, PathBuf};
 
@@ -57,6 +59,15 @@ enum Command {
     /// Charter stage pipeline (review, findings curation).
     #[command(subcommand)]
     Charter(CharterCmd),
+    /// Arbiter commands: declare convergence and resolve findings (P6).
+    #[command(subcommand)]
+    Arbiter(ArbiterCmd),
+    /// Show project workflow status (rotation position, round count, advisory findings, pool clean check).
+    Status {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -76,6 +87,40 @@ enum SidecarCmd {
     /// Start the sidecar daemon for this project (no-op if already running).
     Start {
         /// Project root directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum ArbiterCmd {
+    /// Declare convergence for an artifact (requires non-empty --reason).
+    DeclareConvergence {
+        /// Artifact identifier (e.g. `charter.md`).
+        artifact: String,
+        /// Non-empty reasoning for the convergence declaration.
+        #[arg(long)]
+        reason: String,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Resolve a specific finding as Arbiter-Decided (requires non-empty --reason).
+    ///
+    /// `finding-id` must be in composite form `<packet_id>:<finding_id>` (e.g. `uuid:F1`).
+    ResolveFinding {
+        /// Composite finding ID (`<packet_id>:<finding_id>`).
+        finding_id: String,
+        /// Non-empty reasoning for the arbiter resolution.
+        #[arg(long)]
+        reason: String,
+        /// Summary of the chosen direction.
+        #[arg(long, default_value = "")]
+        chosen_direction: String,
+        /// Which other findings or rounds this contradicts or relates to.
+        #[arg(long, default_value = "")]
+        contradiction_context: String,
+        /// Project directory (defaults to current directory).
         #[arg(long, default_value = ".")]
         project: PathBuf,
     },
@@ -202,6 +247,27 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
             CharterCmd::Review { project } => charter::run_charter_review(&project),
             CharterCmd::Findings { project } => charter::run_charter_findings(&project),
         },
+        Command::Arbiter(cmd) => match cmd {
+            ArbiterCmd::DeclareConvergence {
+                artifact,
+                reason,
+                project,
+            } => arbiter::run_declare_convergence(&project, &artifact, &reason),
+            ArbiterCmd::ResolveFinding {
+                finding_id,
+                reason,
+                chosen_direction,
+                contradiction_context,
+                project,
+            } => arbiter::run_resolve_finding(
+                &project,
+                &finding_id,
+                &reason,
+                &chosen_direction,
+                &contradiction_context,
+            ),
+        },
+        Command::Status { project } => status::run_status(&project),
     }
 }
 

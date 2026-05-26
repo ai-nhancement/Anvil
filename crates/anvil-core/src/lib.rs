@@ -6,4 +6,5 @@ pub mod error;
 pub mod pipeline;
 pub mod project;
 pub mod render;
+pub mod rotation;
 pub mod sidecar;

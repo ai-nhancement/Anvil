@@ -1,4 +1,4 @@
-//! Charter Stage Pipeline domain types (P5).
+//! Charter Stage Pipeline domain types (P5/P6).
 //!
 //! Defines the typed schemas for Findings Packets, Verification outcomes,
 //! and Curation records that flow through the Charter review cycle.
@@ -91,6 +91,12 @@ pub struct Finding {
     pub recommendation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<FindingMetadata>,
+    /// Set by the system (not the reviewer model) when the round count exceeds
+    /// `ADVISORY_THRESHOLD_ROUND` and the severity is P2 or P3.
+    /// Advisory findings must receive an explicit `AdvisoryDispositionType` during
+    /// curation but do not block the full-pool clean convergence check.
+    #[serde(default)]
+    pub advisory: bool,
 }
 
 // ── Reviewer meta ──────────────────────────────────────────────────────────────
@@ -275,7 +281,7 @@ pub struct VerifiedFinding {
 pub enum CurationAction {
     Keep,
     Drop,
-    /// Reserved for future use; not available in the P5 interactive CLI.
+    /// Reserved for future use; not available in the P5/P6 interactive CLI.
     Edit,
     Annotate,
 }
@@ -292,6 +298,33 @@ impl CurationAction {
     }
 }
 
+/// Explicit disposition type for advisory findings (P6).
+///
+/// Each advisory finding must receive one of these to pass the convergence gate check.
+/// `Drop-Advisory` and `Defer-Advisory` carry additional context in the disposition's
+/// `annotation` field (reason text or target phase, respectively).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AdvisoryDispositionType {
+    /// Acknowledged; no action required; finding recorded in the disposition.
+    AcceptAdvisory,
+    /// Finding refuted or non-applicable; requires reason (stored in `annotation`).
+    DropAdvisory,
+    /// Deferred to a named future phase; requires target phase (stored in `annotation`).
+    DeferAdvisory,
+}
+
+impl AdvisoryDispositionType {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AcceptAdvisory => "accept-advisory",
+            Self::DropAdvisory => "drop-advisory",
+            Self::DeferAdvisory => "defer-advisory",
+        }
+    }
+}
+
 /// Per-finding curation decision per the Artifact Specifications `CurationDisposition` schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurationDisposition {
@@ -301,9 +334,13 @@ pub struct CurationDisposition {
     /// Present only if `action == Edit`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited_finding: Option<Finding>,
-    /// Present only if `action == Annotate` or `action == Drop`.
+    /// Present only if `action == Annotate` or `action == Drop`, or for advisory findings
+    /// where `advisory_disposition` is `DropAdvisory` (reason) or `DeferAdvisory` (target phase).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotation: Option<String>,
+    /// Required for advisory findings (P6). `None` for non-advisory findings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advisory_disposition: Option<AdvisoryDispositionType>,
 }
 
 // ── Disposition Label ──────────────────────────────────────────────────────────
@@ -328,6 +365,48 @@ impl DispositionLabel {
             Self::Deferred => "Deferred",
         }
     }
+}
+
+// ── Severity tiering (P6) ─────────────────────────────────────────────────────
+
+/// Marks P2/P3 findings as advisory when `round_count > ADVISORY_THRESHOLD_ROUND`.
+///
+/// Called immediately after the model response is parsed, before the packet is stored.
+/// P1 findings are never advisory. The `advisory` flag is set by the system, not the
+/// reviewer model, so models never see or control this field.
+pub fn apply_severity_tiering(packet: &mut FindingsPacket, round_count: u32) {
+    if crate::rotation::is_advisory_round(round_count) {
+        for finding in &mut packet.findings {
+            if matches!(finding.severity, FindingSeverity::P2 | FindingSeverity::P3) {
+                finding.advisory = true;
+            }
+        }
+    }
+}
+
+/// Returns the IDs of advisory findings that lack an explicit `advisory_disposition`.
+///
+/// Used as a pre-commit gate in `anvil charter findings`: if the returned list is
+/// non-empty, the coordinator must provide dispositions before the record is stored.
+#[must_use]
+pub fn check_advisory_gate(
+    dispositions: &[CurationDisposition],
+    findings: &[Finding],
+) -> Vec<String> {
+    findings
+        .iter()
+        .filter(|f| f.advisory)
+        .filter_map(|f| {
+            let disposed = dispositions
+                .iter()
+                .any(|d| d.finding_id == f.id && d.advisory_disposition.is_some());
+            if disposed {
+                None
+            } else {
+                Some(f.id.clone())
+            }
+        })
+        .collect()
 }
 
 // ── Verifier ───────────────────────────────────────────────────────────────────
@@ -647,6 +726,7 @@ mod tests {
             evidence: "N/A".to_owned(),
             recommendation: "Add it".to_owned(),
             metadata: None,
+            advisory: false,
         };
         let verified = verify_one(&finding, std::path::Path::new("."));
         assert_eq!(verified.outcome, VerificationOutcome::CannotBeVerified);
@@ -675,6 +755,7 @@ mod tests {
             evidence: "test".to_owned(),
             recommendation: "test".to_owned(),
             metadata: None,
+            advisory: false,
         };
         let verified = verify_one(&finding, &dir);
         assert_eq!(verified.outcome, VerificationOutcome::Grounded);
@@ -692,6 +773,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn test_verify_section_heading_all_levels() {
         use std::io::Write as _;
@@ -716,6 +798,7 @@ mod tests {
                 evidence: "test".to_owned(),
                 recommendation: "test".to_owned(),
                 metadata: None,
+                advisory: false,
             };
             let verified = verify_one(&finding, &dir);
             assert_eq!(
@@ -739,6 +822,7 @@ mod tests {
             evidence: "test".to_owned(),
             recommendation: "test".to_owned(),
             metadata: None,
+            advisory: false,
         };
         let verified_missing = verify_one(&missing, &dir);
         assert_eq!(
@@ -764,6 +848,7 @@ mod tests {
             evidence: "test".to_owned(),
             recommendation: "test".to_owned(),
             metadata: None,
+            advisory: false,
         };
         let verified_nospace = verify_one(&nospace, &dir);
         assert_eq!(
@@ -790,6 +875,7 @@ mod tests {
             evidence: "test".to_owned(),
             recommendation: "test".to_owned(),
             metadata: None,
+            advisory: false,
         };
         let verified_indented = verify_one(&indented, &dir);
         assert_eq!(
@@ -828,6 +914,78 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_severity_tiering_marks_p2_p3_advisory_at_round_6() {
+        use super::{apply_severity_tiering, check_advisory_gate};
+
+        let make_finding = |id: &str, sev: FindingSeverity| Finding {
+            id: id.to_owned(),
+            severity: sev,
+            location: LocationAnchor {
+                artifact_path: "charter.md".to_owned(),
+                section_id: None,
+                line_range: None,
+                symbol_name: None,
+                quote: None,
+            },
+            claim: "test".to_owned(),
+            evidence: "test".to_owned(),
+            recommendation: "test".to_owned(),
+            metadata: None,
+            advisory: false,
+        };
+
+        let mut packet = FindingsPacket::new(
+            "charter.md:§root:R6".to_owned(),
+            6,
+            "reviewer-1".to_owned(),
+            "model-v1".to_owned(),
+            vec![
+                make_finding("F1", FindingSeverity::P1),
+                make_finding("F2", FindingSeverity::P2),
+                make_finding("F3", FindingSeverity::P3),
+            ],
+        );
+
+        // Rounds 1–5: no advisory marking.
+        apply_severity_tiering(&mut packet, 5);
+        assert!(!packet.findings[0].advisory, "P1 must not become advisory");
+        assert!(
+            !packet.findings[1].advisory,
+            "P2 at round 5 must not be advisory"
+        );
+        assert!(
+            !packet.findings[2].advisory,
+            "P3 at round 5 must not be advisory"
+        );
+
+        // Round 6+: P2/P3 become advisory, P1 stays blocking.
+        apply_severity_tiering(&mut packet, 6);
+        assert!(
+            !packet.findings[0].advisory,
+            "P1 must never become advisory"
+        );
+        assert!(
+            packet.findings[1].advisory,
+            "P2 at round 6 must be advisory"
+        );
+        assert!(
+            packet.findings[2].advisory,
+            "P3 at round 6 must be advisory"
+        );
+
+        // Advisory gate: findings with advisory=true need an advisory_disposition.
+        let missing = check_advisory_gate(&[], &packet.findings);
+        assert_eq!(missing, vec!["F2", "F3"], "gate should flag F2 and F3");
+
+        // P1 is non-advisory so gate should not flag it even with no disposition.
+        let missing_p1_only = check_advisory_gate(&[], &[packet.findings[0].clone()]);
+        assert!(
+            missing_p1_only.is_empty(),
+            "non-advisory P1 should not appear in gate failures"
+        );
+    }
+
+    #[test]
     fn test_verify_line_range_returns_cannot_be_verified() {
         use std::io::Write as _;
         let dir = std::env::temp_dir();
@@ -850,6 +1008,7 @@ mod tests {
             evidence: "test".to_owned(),
             recommendation: "test".to_owned(),
             metadata: None,
+            advisory: false,
         };
         let verified = verify_one(&finding, &dir);
         // In-bounds line range: CannotBeVerified (bounds check only, no text verified)

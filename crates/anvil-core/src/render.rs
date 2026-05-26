@@ -304,6 +304,7 @@ mod tests {
                 evidence: "See Goals section".to_owned(),
                 recommendation: "Add more detail".to_owned(),
                 metadata: None,
+                advisory: false,
             },
             outcome: VerificationOutcome::Grounded,
             evidence_note: "Section 'Goals' found.".to_owned(),

@@ -101,4 +101,10 @@ pub enum AnvilError {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("`anvil arbiter {command}` requires a non-empty `--reason` argument")]
+    EmptyReasoning { command: &'static str },
+
+    #[error("reviewer pool is empty — add at least one reviewer binding to anvil.toml")]
+    ReviewerPoolEmpty,
 }

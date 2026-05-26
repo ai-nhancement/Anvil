@@ -1,4 +1,4 @@
-//! `anvil charter` subcommands (P5):
+//! `anvil charter` subcommands (P5/P6):
 //! - `anvil charter review`  — invoke the reviewer model, store findings + verifier result
 //! - `anvil charter findings` — interactive curation, render disposition doc + hardening history
 
@@ -6,17 +6,19 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anvil_audit::{
-    records::{CuratedFindingsRecord, ReviewerFindingPacket, VerifierResult},
+    records::{CuratedFindingsRecord, ReviewerFindingPacket, RotationLog, VerifierResult},
     AuditStore, CrossRefKey, RecordType,
 };
 use anvil_core::{
     config::load_config,
     error::AnvilError,
     pipeline::{
-        extract_findings_packet_json, verify_findings, CurationAction, CurationDisposition,
-        DispositionLabel, Finding, FindingsPacket, VerifiedFinding,
+        apply_severity_tiering, check_advisory_gate, extract_findings_packet_json, verify_findings,
+        AdvisoryDispositionType, CurationAction, CurationDisposition, DispositionLabel, Finding,
+        FindingsPacket, VerifiedFinding,
     },
     render::{append_charter_hardening_history, render_disposition_doc, DispositionInput},
+    rotation::rotation_select,
 };
 use anvil_sidecar_client::proto::{self, invoke_request::Payload};
 use dialoguer::{Input, Select};
@@ -24,7 +26,7 @@ use dialoguer::{Input, Select};
 use crate::session::{
     connect_and_handshake, ensure_sidecar_running, find_model_binding, retrieve_api_key,
 };
-use crate::setup::with_tokio;
+use crate::setup::{with_tokio, ROLE_REVIEWER_1};
 
 // ── Reviewer system prompt ─────────────────────────────────────────────────────
 
@@ -77,9 +79,35 @@ incomplete scope definitions, and alignment issues.";
 /// # Errors
 ///
 /// Returns [`AnvilError`] on config, sidecar, model, or audit-store failure.
+#[allow(clippy::too_many_lines)]
 pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
     let config = load_config(project_root)?;
-    let binding = find_model_binding(&config, crate::setup::ROLE_REVIEWER_1)?;
+
+    // Determine effective reviewer pool and select reviewer via rotation.
+    let pool: Vec<String> = if config.reviewer_pool.is_empty() {
+        vec![ROLE_REVIEWER_1.to_owned()]
+    } else {
+        config.reviewer_pool.clone()
+    };
+
+    // Determine round number first (before rotation select).
+    let store = AuditStore::open(project_root)?;
+    let existing_packets = store.list(RecordType::ReviewerFindingPacket)?;
+    let round_number = u32::try_from(existing_packets.len()).unwrap_or(u32::MAX) + 1;
+
+    // Round-robin selection: round_number is 1-indexed.
+    let reviewer_binding_name = rotation_select(&pool, round_number)
+        .ok_or(AnvilError::ReviewerPoolEmpty)?
+        .to_owned();
+    let prev_reviewer = if round_number > 1 {
+        rotation_select(&pool, round_number - 1)
+            .unwrap_or(&reviewer_binding_name)
+            .to_owned()
+    } else {
+        reviewer_binding_name.clone()
+    };
+
+    let binding = find_model_binding(&config, &reviewer_binding_name)?;
     let conn_name = binding.provider_connection.clone();
     let model_id = binding.model_identity.clone();
 
@@ -103,12 +131,7 @@ pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
         )));
     }
 
-    // Determine round number.
-    let store = AuditStore::open(project_root)?;
-    let existing_packets = store.list(RecordType::ReviewerFindingPacket)?;
-    let round_number = u32::try_from(existing_packets.len()).unwrap_or(u32::MAX) + 1;
-
-    println!("Invoking reviewer for charter R{round_number}…");
+    println!("Invoking reviewer '{reviewer_binding_name}' for charter R{round_number}…");
 
     // Connect to sidecar and invoke.
     let port = ensure_sidecar_running(project_root, &config)?;
@@ -142,7 +165,7 @@ pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
     } else {
         partial.reviewer_model_identity
     };
-    let packet = FindingsPacket::new(
+    let mut packet = FindingsPacket::new(
         format!("charter.md:R{round_number}"),
         round_number,
         partial.reviewer_id,
@@ -150,8 +173,12 @@ pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
         partial.findings,
     );
 
+    // Apply severity tiering: P2/P3 become advisory in rounds 6+.
+    apply_severity_tiering(&mut packet, round_number);
+
     let finding_count = packet.findings.len();
-    println!("  Reviewer produced {finding_count} finding(s).");
+    let advisory_count = packet.findings.iter().filter(|f| f.advisory).count();
+    println!("  Reviewer produced {finding_count} finding(s) ({advisory_count} advisory).");
 
     // Run the verifier.
     let verified_findings = verify_findings(&packet.findings, project_root);
@@ -188,9 +215,20 @@ pub fn run_charter_review(project_root: &Path) -> Result<(), AnvilError> {
     );
     store.append(&vr_record)?;
 
+    // Write RotationLog to track reviewer selection for this round.
+    let rotation_log = RotationLog::new(
+        prev_reviewer,
+        reviewer_binding_name.clone(),
+        format!("round-robin selection for charter R{round_number}"),
+        round_number,
+        vec![CrossRefKey::new("charter.md", "§root", &format!("R{round_number}")).to_key_string()],
+    );
+    store.append(&rotation_log)?;
+
     println!("\n✓ Findings stored:");
     println!("  ReviewerFindingPacket: {}", rfp_record.id);
     println!("  VerifierResult:        {}", vr_record.id);
+    println!("  RotationLog:           {}", rotation_log.id);
     println!("\nNext step: `anvil charter findings` to curate and render the disposition.");
 
     Ok(())
@@ -311,6 +349,7 @@ struct CurationResult {
     dispositions: Vec<CurationDisposition>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResult, AnvilError> {
     let mut actions: BTreeMap<String, CurationAction> = BTreeMap::new();
     let mut disposition_map: BTreeMap<String, DispositionLabel> = BTreeMap::new();
@@ -318,7 +357,14 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
 
     for vf in verified_findings {
         let f = &vf.finding;
-        println!("Finding {} [{}]: {}", f.id, f.severity.as_str(), f.claim);
+        let advisory_badge = if f.advisory { " [ADVISORY]" } else { "" };
+        println!(
+            "Finding {} [{}{}]: {}",
+            f.id,
+            f.severity.as_str(),
+            advisory_badge,
+            f.claim
+        );
         println!("  Evidence:       {}", f.evidence);
         println!("  Recommendation: {}", f.recommendation);
         println!(
@@ -328,36 +374,74 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
         );
         println!();
 
-        // Edit action is reserved for P6+; P5 offers Keep / Drop / Annotate only.
-        let action_idx = Select::new()
-            .with_prompt("  Action")
-            .items(&["Keep", "Drop", "Annotate"])
-            .default(0)
-            .interact()
-            .map_err(|_| AnvilError::SetupCancelled)?;
+        let (action, annotation, advisory_disposition) = if f.advisory {
+            // Advisory findings use the advisory disposition flow instead of Keep/Drop/Annotate.
+            let adv_idx = Select::new()
+                .with_prompt("  Advisory disposition")
+                .items(&["Accept-Advisory", "Drop-Advisory", "Defer-Advisory"])
+                .default(0)
+                .interact()
+                .map_err(|_| AnvilError::SetupCancelled)?;
 
-        let action = match action_idx {
-            1 => CurationAction::Drop,
-            2 => CurationAction::Annotate,
-            _ => CurationAction::Keep,
-        };
+            let adv_type = match adv_idx {
+                1 => AdvisoryDispositionType::DropAdvisory,
+                2 => AdvisoryDispositionType::DeferAdvisory,
+                _ => AdvisoryDispositionType::AcceptAdvisory,
+            };
 
-        let annotation = if matches!(action, CurationAction::Drop | CurationAction::Annotate) {
+            let prompt = match adv_type {
+                AdvisoryDispositionType::DropAdvisory => "  Reason (required)",
+                AdvisoryDispositionType::DeferAdvisory => "  Target phase (required)",
+                AdvisoryDispositionType::AcceptAdvisory => "  Note (optional)",
+            };
+
             let note: String = Input::new()
-                .with_prompt("  Note")
+                .with_prompt(prompt)
                 .allow_empty(true)
                 .interact_text()
                 .map_err(|_| AnvilError::SetupCancelled)?;
-            if note.is_empty() {
-                None
-            } else {
-                Some(note)
-            }
+
+            let annotation = if note.is_empty() { None } else { Some(note) };
+            let action = match adv_type {
+                AdvisoryDispositionType::DropAdvisory => CurationAction::Drop,
+                _ => CurationAction::Keep,
+            };
+
+            (action, annotation, Some(adv_type))
         } else {
-            None
+            // Non-advisory: standard Keep / Drop / Annotate flow.
+            let action_idx = Select::new()
+                .with_prompt("  Action")
+                .items(&["Keep", "Drop", "Annotate"])
+                .default(0)
+                .interact()
+                .map_err(|_| AnvilError::SetupCancelled)?;
+
+            let action = match action_idx {
+                1 => CurationAction::Drop,
+                2 => CurationAction::Annotate,
+                _ => CurationAction::Keep,
+            };
+
+            let annotation = if matches!(action, CurationAction::Drop | CurationAction::Annotate) {
+                let note: String = Input::new()
+                    .with_prompt("  Note")
+                    .allow_empty(true)
+                    .interact_text()
+                    .map_err(|_| AnvilError::SetupCancelled)?;
+                if note.is_empty() {
+                    None
+                } else {
+                    Some(note)
+                }
+            } else {
+                None
+            };
+
+            (action, annotation, None)
         };
 
-        if matches!(action, CurationAction::Keep) {
+        if !f.advisory && matches!(action, CurationAction::Keep) {
             let label_idx = Select::new()
                 .with_prompt("  Disposition label")
                 .items(&[
@@ -384,6 +468,7 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
             action,
             edited_finding: None,
             annotation,
+            advisory_disposition,
         });
 
         println!();
@@ -514,6 +599,25 @@ pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
         &history_summary,
     )?;
 
+    // Advisory gate check: all advisory findings must have an explicit advisory disposition.
+    let missing_advisory: Vec<String> = check_advisory_gate(&dispositions, &rfp.packet.findings);
+    if !missing_advisory.is_empty() {
+        eprintln!(
+            "error: advisory gate check failed — {} advisory finding(s) lack explicit disposition:",
+            missing_advisory.len()
+        );
+        for id in &missing_advisory {
+            eprintln!("  {id}");
+        }
+        eprintln!(
+            "Re-run `anvil charter findings` and provide Accept-Advisory, Drop-Advisory, or \
+             Defer-Advisory for each advisory finding."
+        );
+        return Err(AnvilError::Io(std::io::Error::other(
+            "advisory gate check failed — one or more advisory findings lack explicit disposition",
+        )));
+    }
+
     // Persist CuratedFindingsRecord.
     let curated_record = CuratedFindingsRecord::new(
         rfp.packet.packet_id.clone(),
@@ -605,6 +709,7 @@ mod tests {
             evidence: "test".to_owned(),
             recommendation: "test".to_owned(),
             metadata: None,
+            advisory: false,
         };
         let vf = VerifiedFinding {
             finding,

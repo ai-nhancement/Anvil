@@ -249,6 +249,29 @@ pub struct RotationLog {
     pub rotated_from: String,
     pub rotated_to: String,
     pub reason: String,
+    /// The review round that triggered this rotation.
+    pub round_number: u32,
+}
+
+impl RotationLog {
+    #[must_use]
+    pub fn new(
+        rotated_from: String,
+        rotated_to: String,
+        reason: String,
+        round_number: u32,
+        cross_references: Vec<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            rotated_from,
+            rotated_to,
+            reason,
+            round_number,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,6 +327,35 @@ pub struct ConvergenceDeclaration {
     pub cross_references: Vec<String>,
     pub phase_id: String,
     pub round_count: u32,
+    /// Non-empty arbiter reasoning required to create this record (P6).
+    pub reasoning: String,
+    /// Count of advisory findings open at declaration time (P6).
+    pub advisory_finding_count: u32,
+    /// Count of arbiter-decided findings at declaration time (P6).
+    pub arbiter_decided_count: u32,
+}
+
+impl ConvergenceDeclaration {
+    #[must_use]
+    pub fn new(
+        phase_id: String,
+        round_count: u32,
+        reasoning: String,
+        advisory_finding_count: u32,
+        arbiter_decided_count: u32,
+        cross_references: Vec<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            phase_id,
+            round_count,
+            reasoning,
+            advisory_finding_count,
+            arbiter_decided_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,8 +381,39 @@ pub struct ArbiterFindingResolution {
     pub id: String,
     pub created_at: DateTime<Utc>,
     pub cross_references: Vec<String>,
+    /// Composite finding reference: `"<packet_id>:<finding_id>"` (e.g., `"uuid:F1"`).
     pub finding_id: String,
-    pub resolution: String,
+    /// Identifier of the human arbiter making this resolution.
+    pub arbiter_id: String,
+    /// Non-empty reasoning required to create this record.
+    pub reasoning: String,
+    /// Summary of the chosen direction (e.g., "Keep approach X as designed").
+    pub chosen_direction_summary: String,
+    /// Which other findings or rounds this contradicts or relates to.
+    pub contradiction_context: String,
+}
+
+impl ArbiterFindingResolution {
+    #[must_use]
+    pub fn new(
+        finding_id: String,
+        arbiter_id: String,
+        reasoning: String,
+        chosen_direction_summary: String,
+        contradiction_context: String,
+        cross_references: Vec<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            finding_id,
+            arbiter_id,
+            reasoning,
+            chosen_direction_summary,
+            contradiction_context,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

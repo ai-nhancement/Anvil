@@ -17,6 +17,14 @@ pub struct AnvilConfig {
     /// Model bindings: (`model_identity`, `provider_connection`) tuples.
     #[serde(default)]
     pub model_bindings: Vec<ModelBinding>,
+    /// Ordered list of reviewer binding names for round-robin rotation (P6).
+    /// Empty means fall back to `["reviewer-1"]` (single-reviewer mode).
+    #[serde(default)]
+    pub reviewer_pool: Vec<String>,
+    /// If `true`, a single clean reviewer pass satisfies the full-pool clean convergence
+    /// condition even when the pool has more than one member (P6).
+    #[serde(default)]
+    pub single_clean_pass_override: bool,
 }
 
 impl AnvilConfig {
@@ -28,6 +36,8 @@ impl AnvilConfig {
             sidecar: SidecarConfig::default(),
             provider_connections: BTreeMap::new(),
             model_bindings: Vec::new(),
+            reviewer_pool: Vec::new(),
+            single_clean_pass_override: false,
         }
     }
 

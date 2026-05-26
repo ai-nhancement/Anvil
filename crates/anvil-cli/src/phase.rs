@@ -216,12 +216,14 @@ pub fn run_phase_review(project_root: &Path, phase_id: &str) -> Result<(), Anvil
     let briefing_path = project_root
         .join("reviews")
         .join(format!("BRIEFING_{phase_id}_R{round_number}.md"));
-    let briefing_doc = std::fs::read_to_string(&briefing_path).map_err(|_| {
+    let briefing_bytes = std::fs::read(&briefing_path).map_err(|_| {
         AnvilError::Io(std::io::Error::other(format!(
             "briefing not found at '{}' — run `anvil phase build {phase_id}` first",
             briefing_path.display()
         )))
     })?;
+    let briefing_doc = String::from_utf8_lossy(&briefing_bytes).into_owned();
+    let briefing_hash = crate::utils::sha256_hex(&briefing_bytes);
 
     println!("Invoking reviewer '{reviewer_name}' for phase {phase_id} R{round_number}…");
 
@@ -266,6 +268,7 @@ pub fn run_phase_review(project_root: &Path, phase_id: &str) -> Result<(), Anvil
     );
 
     apply_severity_tiering(&mut packet, round_number);
+    packet.artifact_hash = Some(briefing_hash);
 
     let finding_count = packet.findings.len();
     let advisory_count = packet.findings.iter().filter(|f| f.advisory).count();
@@ -380,11 +383,23 @@ pub fn run_phase_ship(project_root: &Path, phase_id: &str) -> Result<(), AnvilEr
         })
         .collect();
 
+    let round_count = u32::try_from(phase_rfps.len()).unwrap_or(u32::MAX);
+    let current_hash: Option<String> = if round_count > 0 {
+        let latest_briefing = project_root
+            .join("reviews")
+            .join(format!("BRIEFING_{phase_id}_R{round_count}.md"));
+        std::fs::read(&latest_briefing)
+            .ok()
+            .map(|b| crate::utils::sha256_hex(&b))
+    } else {
+        None
+    };
+
     let pool_result = check_full_pool_clean(
         &pool,
         &phase_rfps,
         &arbiter_decided_ids,
-        None,
+        current_hash.as_deref(),
         config.single_clean_pass_override,
     );
 
@@ -404,7 +419,6 @@ pub fn run_phase_ship(project_root: &Path, phase_id: &str) -> Result<(), AnvilEr
         });
     }
 
-    let round_count = u32::try_from(phase_rfps.len()).unwrap_or(u32::MAX);
     let cross_ref =
         CrossRefKey::new(&artifact_ref_prefix, "§ship", &format!("R{round_count}")).to_key_string();
 
@@ -543,14 +557,22 @@ mod tests {
         let (tmp, store) = init_store();
         std::fs::write(tmp.path().join("anvil.toml"), "[choices]\n").unwrap();
 
-        // Submit a clean-pass RFP for phase "P8".
-        let packet = FindingsPacket::new(
+        // Create the briefing file so run_phase_ship can compute a current hash.
+        let reviews_dir = tmp.path().join("reviews");
+        std::fs::create_dir_all(&reviews_dir).unwrap();
+        let briefing_content = b"# Phase P8 R1 Briefing";
+        std::fs::write(reviews_dir.join("BRIEFING_P8_R1.md"), briefing_content).unwrap();
+        let briefing_hash = crate::utils::sha256_hex(briefing_content);
+
+        // Submit a clean-pass RFP for phase "P8" with matching artifact hash.
+        let mut packet = FindingsPacket::new(
             "phase:P8:R1".to_owned(),
             1,
             "reviewer-1".to_owned(),
             "model-v1".to_owned(),
             vec![],
         );
+        packet.artifact_hash = Some(briefing_hash);
         let rfp = ReviewerFindingPacket::from_packet("phase:P8:R1".to_owned(), packet, vec![]);
         store.append(&rfp).expect("append RFP");
 

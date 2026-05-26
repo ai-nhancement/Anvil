@@ -34,7 +34,7 @@
     "status": {
       "type": "string",
       "description": "Document status per Artifact Specifications Standard Vocabularies.",
-      "minLength": 1
+      "enum": ["Draft", "Awaiting Review", "In Revision", "Convergent", "Approved", "Superseded"]
     },
     "files_changed": {
       "type": "array",

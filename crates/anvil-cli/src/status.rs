@@ -5,7 +5,6 @@
 //! scoped to a specific artifact (default: `charter.md`).
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::path::Path;
 
 use anvil_audit::{
@@ -224,13 +223,7 @@ fn count_open_advisory(
 
 /// Returns the SHA-256 hex digest of a string.
 pub(crate) fn compute_hex_hash(content: &str) -> String {
-    use sha2::Digest as _;
-    let digest = sha2::Sha256::digest(content.as_bytes());
-    let mut hex = String::with_capacity(64);
-    for b in &digest {
-        write!(hex, "{b:02x}").unwrap();
-    }
-    hex
+    crate::utils::sha256_hex(content.as_bytes())
 }
 
 /// Checks whether all pool members have submitted a clean pass on the current artifact state.

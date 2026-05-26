@@ -37,31 +37,78 @@ pub struct BriefingTestArea {
     pub coverage_status: String,
 }
 
+/// Status vocabulary for `PhaseBriefingContract`, per Artifact Specifications Standard Vocabularies.
+///
+/// The serde rename values match the vocabulary labels defined in the Artifact Specifications.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BriefingStatus {
+    #[serde(rename = "Draft")]
+    #[default]
+    Draft,
+    #[serde(rename = "Awaiting Review")]
+    AwaitingReview,
+    #[serde(rename = "In Revision")]
+    InRevision,
+    #[serde(rename = "Convergent")]
+    Convergent,
+    #[serde(rename = "Approved")]
+    Approved,
+    #[serde(rename = "Superseded")]
+    Superseded,
+}
+
+impl BriefingStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "Draft",
+            Self::AwaitingReview => "Awaiting Review",
+            Self::InRevision => "In Revision",
+            Self::Convergent => "Convergent",
+            Self::Approved => "Approved",
+            Self::Superseded => "Superseded",
+        }
+    }
+}
+
 /// The typed JSON contract the Coder produces inside `<phase_briefing>` tags.
 ///
 /// Maps to the 7 required sections of the Phase Review Briefing Template
 /// (Artifact Specifications §Phase Review Briefing Template).
+///
+/// All section fields carry `#[serde(default)]` so that absent JSON fields default to
+/// empty / default values and are caught with precise `PhaseBriefingMissingSection`
+/// errors by `validate_phase_briefing_contract`, rather than opaque `ModelResponseBadJson`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseBriefingContract {
-    /// Phase ID (e.g. `"P8"`).
+    /// Phase ID (e.g. `"P8"`). Required — absence produces `ModelResponseBadJson`.
     pub phase_id: String,
-    /// One-line description of what this briefing covers.
+    /// One-line description of what this briefing covers (section 1 — Header block).
+    #[serde(default)]
     pub scope: String,
     /// Which Plan section is being implemented (e.g. `"§P8"`).
+    #[serde(default)]
     pub spec_section: String,
     /// Document status per Artifact Specifications Standard Vocabularies.
-    pub status: String,
+    #[serde(default)]
+    pub status: BriefingStatus,
     /// What Was Built — file-level changes (section 2).
+    #[serde(default)]
     pub files_changed: Vec<BriefingFileChange>,
     /// Architecture Compliance — invariant → evidence mapping (section 3).
+    #[serde(default)]
     pub compliance_items: Vec<BriefingComplianceItem>,
     /// What to Review — numbered questions for the reviewer (section 4).
+    #[serde(default)]
     pub what_to_review: Vec<String>,
     /// Test Coverage Summary — per-area coverage table (section 5).
+    #[serde(default)]
     pub test_areas: Vec<BriefingTestArea>,
     /// How to Activate for Testing — runbook instructions (section 6).
+    #[serde(default)]
     pub how_to_activate: String,
     /// Next Phase — preview of what ships after this phase (section 7).
+    #[serde(default)]
     pub next_phase: String,
 }
 
@@ -80,6 +127,9 @@ pub const REQUIRED_BRIEFING_SECTIONS: [&str; 7] = [
 ];
 
 /// Validates that all 7 required sections of a `PhaseBriefingContract` are present and non-empty.
+///
+/// Because all section fields carry `#[serde(default)]`, this function is the single gate
+/// for section completeness — both absent-from-JSON and present-but-empty cases are caught here.
 ///
 /// # Errors
 ///
@@ -135,10 +185,14 @@ pub fn validate_phase_briefing_contract(
 /// Extracts a `PhaseBriefingContract` from a model response containing
 /// `<phase_briefing>...</phase_briefing>` tags.
 ///
+/// Because section fields carry `#[serde(default)]`, absent fields produce empty values
+/// rather than `ModelResponseBadJson`; call `validate_phase_briefing_contract` after this
+/// to enforce section completeness.
+///
 /// # Errors
 ///
 /// Returns [`AnvilError::ModelResponseMissingPacket`] if the tags are absent,
-/// or [`AnvilError::ModelResponseBadJson`] if the JSON is invalid.
+/// or [`AnvilError::ModelResponseBadJson`] if the JSON is structurally invalid.
 pub fn parse_phase_briefing_contract(response: &str) -> Result<PhaseBriefingContract, AnvilError> {
     let start_tag = "<phase_briefing>";
     let end_tag = "</phase_briefing>";
@@ -190,7 +244,7 @@ pub fn render_phase_briefing_doc(
         contract.phase_id,
         contract.scope,
         contract.spec_section,
-        contract.status
+        contract.status.as_str()
     )
     .ok();
 
@@ -278,7 +332,7 @@ mod tests {
             phase_id: "P8".to_owned(),
             scope: "Build Stage Pipeline".to_owned(),
             spec_section: "§P8".to_owned(),
-            status: "Awaiting R1 Review".to_owned(),
+            status: BriefingStatus::AwaitingReview,
             files_changed: vec![BriefingFileChange {
                 file: "crates/anvil-cli/src/phase.rs".to_owned(),
                 action: "CREATE".to_owned(),
@@ -405,6 +459,57 @@ mod tests {
     }
 
     #[test]
+    fn test_missing_section_field_produces_section_error_not_json_error() {
+        // Regression: absent JSON fields (not just empty strings) must produce
+        // PhaseBriefingMissingSection via validate, not opaque ModelResponseBadJson.
+        let json_missing_scope = r#"{"phase_id":"P8","files_changed":[{"file":"f","action":"CREATE","purpose":"p"}],"compliance_items":[{"invariant":"i","evidence":"e"}],"what_to_review":["q"],"test_areas":[{"area":"a","tests_added":"t","coverage_status":"c"}],"how_to_activate":"h","next_phase":"n"}"#;
+        let wrapped = format!("<phase_briefing>{json_missing_scope}</phase_briefing>");
+        let contract = parse_phase_briefing_contract(&wrapped)
+            .expect("parse must succeed (scope defaults to empty string)");
+        let err = validate_phase_briefing_contract(&contract)
+            .expect_err("validation must fail with missing scope");
+        assert!(
+            matches!(
+                err,
+                AnvilError::PhaseBriefingMissingSection {
+                    section: "scope",
+                    ..
+                }
+            ),
+            "absent scope field must produce PhaseBriefingMissingSection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_status_value_produces_json_error() {
+        // BriefingStatus is an enum; unknown values must fail deserialization.
+        let json = r#"{"phase_id":"P8","status":"INVALID_STATUS","scope":"s","files_changed":[{"file":"f","action":"CREATE","purpose":"p"}],"compliance_items":[{"invariant":"i","evidence":"e"}],"what_to_review":["q"],"test_areas":[{"area":"a","tests_added":"t","coverage_status":"c"}],"how_to_activate":"h","next_phase":"n"}"#;
+        let wrapped = format!("<phase_briefing>{json}</phase_briefing>");
+        let result = parse_phase_briefing_contract(&wrapped);
+        assert!(
+            matches!(result, Err(AnvilError::ModelResponseBadJson { .. })),
+            "invalid status must produce ModelResponseBadJson, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_briefing_status_roundtrip() {
+        for status in [
+            BriefingStatus::Draft,
+            BriefingStatus::AwaitingReview,
+            BriefingStatus::InRevision,
+            BriefingStatus::Convergent,
+            BriefingStatus::Approved,
+            BriefingStatus::Superseded,
+        ] {
+            let serialized = serde_json::to_string(&status).unwrap();
+            let deserialized: BriefingStatus = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(status, deserialized);
+            assert!(!status.as_str().is_empty());
+        }
+    }
+
+    #[test]
     fn test_parse_phase_briefing_contract_roundtrip() {
         let contract = minimal_contract();
         let json = serde_json::to_string(&contract).unwrap();
@@ -412,6 +517,7 @@ mod tests {
         let parsed = parse_phase_briefing_contract(&wrapped).unwrap();
         assert_eq!(parsed.phase_id, "P8");
         assert_eq!(parsed.scope, "Build Stage Pipeline");
+        assert_eq!(parsed.status, BriefingStatus::AwaitingReview);
     }
 
     #[test]
@@ -446,5 +552,6 @@ mod tests {
         assert!(doc.contains("## Test Coverage Summary"));
         assert!(doc.contains("## How to Activate for Testing"));
         assert!(doc.contains("## Next Phase"));
+        assert!(doc.contains("Awaiting Review"));
     }
 }

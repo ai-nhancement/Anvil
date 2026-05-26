@@ -123,4 +123,13 @@ pub enum AnvilError {
         packet_id: String,
         finding_id: String,
     },
+
+    #[error("phase '{phase_id}' briefing is missing required section '{section}'")]
+    PhaseBriefingMissingSection {
+        phase_id: String,
+        section: &'static str,
+    },
+
+    #[error("phase '{phase_id}' cannot ship: {reason}")]
+    PhaseShipBlocked { phase_id: String, reason: String },
 }

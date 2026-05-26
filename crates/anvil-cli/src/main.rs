@@ -2,6 +2,7 @@ mod arbiter;
 mod charter;
 mod discuss;
 mod graph;
+mod phase;
 mod plan;
 mod session;
 mod setup;
@@ -68,6 +69,9 @@ enum Command {
     /// Plan stage pipeline (invoke, review, findings, consolidate).
     #[command(subcommand)]
     Plan(PlanCmd),
+    /// Build stage pipeline — per-phase build, review, and ship loop (P8).
+    #[command(subcommand)]
+    Phase(PhaseCmd),
     /// Phase dependency graph queries.
     #[command(subcommand)]
     Graph(GraphCmd),
@@ -184,6 +188,40 @@ enum GraphCmd {
         /// Project directory (defaults to current directory).
         #[arg(long, default_value = ".")]
         project: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PhaseCmd {
+    /// Invoke the Coder for a phase and produce the Phase Review Briefing.
+    Build {
+        /// Phase ID to build (e.g. `P8`).
+        id: String,
+        /// Output format: `text` (default) or `json` (prints briefing contract JSON; no file write).
+        #[arg(long, value_name = "FORMAT", default_value = "text")]
+        format: String,
+        /// Print the `PhaseBriefingContract` JSON Schema and exit.
+        #[arg(long)]
+        describe_schema: bool,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: std::path::PathBuf,
+    },
+    /// Send the latest phase briefing to the next reviewer in rotation; store findings.
+    Review {
+        /// Phase ID to review (e.g. `P8`).
+        id: String,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: std::path::PathBuf,
+    },
+    /// Ship a phase (requires full-pool clean termination condition).
+    Ship {
+        /// Phase ID to ship (e.g. `P8`).
+        id: String,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: std::path::PathBuf,
     },
 }
 
@@ -335,6 +373,22 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
             PlanCmd::Consolidate { trigger, project } => {
                 plan::run_plan_consolidate(&project, &trigger)
             }
+        },
+        Command::Phase(cmd) => match cmd {
+            PhaseCmd::Build {
+                id,
+                format,
+                describe_schema,
+                project,
+            } => {
+                let fmt = match format.as_str() {
+                    "json" => phase::OutputFormat::Json,
+                    _ => phase::OutputFormat::Text,
+                };
+                phase::run_phase_build(&project, &id, fmt, describe_schema)
+            }
+            PhaseCmd::Review { id, project } => phase::run_phase_review(&project, &id),
+            PhaseCmd::Ship { id, project } => phase::run_phase_ship(&project, &id),
         },
         Command::Graph(cmd) => match cmd {
             GraphCmd::Show { project } => graph::run_graph_show(&project),

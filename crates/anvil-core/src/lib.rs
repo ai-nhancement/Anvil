@@ -3,6 +3,7 @@ pub mod choices;
 pub mod config;
 pub mod diversity;
 pub mod error;
+pub mod phase_briefing;
 pub mod pipeline;
 pub mod plan;
 pub mod project;

@@ -568,3 +568,39 @@ This amendment changes AC6 from "gate documented AND executed at P11 ship" to "g
 - `docs/contract.md` rewritten from `proto/anvil/v1/sidecar.proto` (service name, RPC names, message schemas, and error classes corrected).
 - `docs/runbook.md` and `docs/onboarding.md` corrected to match actual CLI argument shapes (`anvil init .`, `anvil phase build P<N>` positional, `anvil arbiter resolve-finding "<uuid>:F1"`, `anvil arbiter declare-convergence charter.md`, etc.).
 - `p11.rs` hinge test updated: all 8 PLs in `confirmed_final`; `v11_deferred` array removed. Count assertion updated to 8.
+
+### Amendment 12 — P11 R3 governance consistency corrections
+
+**Hinge registry corrections:**
+- `ANVIL_PLAN.md` Deferred-Decision Registry table: `test_workspace_lock_enforced` renamed to `test_workspace_runtime_dir_in_layout` (reflects P4 R2 rename; see `REVIEW_P4_SETUP_WIZARD_R2.md`). `test_contract_doc_sync_method` added (new P11 hinge pinning manual-sync state of `docs/contract.md`).
+- Registry section rewritten: removed false claim that the table is "the canonical list" (actual scanner finds 74 annotations; the table is a named governance subset). Removed reference to nonexistent proc-macro/`style` attribute; replaced with accurate description of comment-annotation + scanner mechanism.
+- Same rename applied at three additional Plan locations (lines 589, 872, 1002) that still referenced `test_workspace_lock_enforced`.
+
+**Audit record type reconciliation (Charter-applied section + GOVERNANCE.md):**
+- `new_project_charter.md` §Audit-store record types updated: count corrected from 16 to 15. The 4 implemented Plan extensions are `ArbiterFindingResolution`, `SidecarReload`, `CuratedFindings`, `PlanConsolidation`. Three A1-contemplated types (`PublicVisibilityPolicy`, `PublicExportApproval`, `EmergencyFreezeDeclaration`) are formally deferred to v1.1. Constitutional hinge `test_audit_store_required_types_present` (subset check on 11) is unchanged.
+- `GOVERNANCE.md` §Emergency freeze updated: `EmergencyFreezeDeclaration` record type is v1.1; v1 records freeze events as `PlanAmendment` with a `freeze` tag.
+
+**Smoke-test command corrections:**
+- `ANVIL_PLAN.md` §Distribution smoke-test commands updated: removed nonexistent `anvil setup --headless` and `anvil charter render`. Replaced with actual commands (`anvil --version`, `anvil-sidecar --version`, `anvil init <tmp-dir>`, `anvil hinge list --count`).
+- Smoke-test script reclassified: it is a release-time deliverable, not a P11 code deliverable. Plan-level AC #11 updated accordingly.
+
+**Runbook Gate 4 correction:**
+- `docs/runbook.md` Gate 4: removed false claim that `anvil gate check-plan` creates a `GateApproval` audit record. The command verifies Required Choices locking state only (prints pass/fail; writes no audit record). Disposition document authoring is a manual step.
+
+**Hinge test strengthening (F5):**
+- `p11.rs` `test_contract_doc_sync_method`: replaced tautological `assert_eq!("manual-sync", "manual-sync")` with a compile-time file inclusion (`include_str!`) that asserts `docs/contract.md` contains the maintenance note string. The test will now fail if the maintenance note is removed from the document.
+
+**Review history metadata:**
+- `REVIEW_P11_DOGFOODING_R3.md` prior-rounds line clarified: "R1 first-pass (first reviewer, clean pass); R1 second-pass (second reviewer, 8 findings, all applied)."
+
+### Amendment 13 — P11 R3 dogfooding evidence attestation
+
+Plan-Level ACs 2 and 3 require live CLI execution evidence for the dogfooding and external pilot. The example artifacts are explicitly representative/illustrative (not live audit-store exports). This amendment formally acknowledges the first-generation build constraint and establishes the attestation path:
+
+**What changed:**
+- `docs/examples/coordinator-attestation.md` created: formal Coordinator attestation explaining the build-context constraint (CLI being built for the first time; live AI provider calls not part of the build harness) and committing to live dogfooding evidence before public announcement.
+- `docs/examples/dogfooding/README.md` stale PL status language fixed: both `cli-setup-wizard-step-ordering` and `cli-command-structure` now correctly read "confirmed Final at P11" (not "remains Provisional"), matching the Plan's Required Choices table.
+
+**AC2/AC3 status:** Accepted with Coordinator attestation. The attestation document is the formal evidence bridge for the first-generation build. Live audit-store evidence will be produced before public ship and referenced here when available.
+
+**Rationale:** Anvil v1 is being built for the first time. A dogfooding acceptance test for the *finished* tool cannot be executed during the build of that tool against real AI providers. The representative artifacts validate workflow structure, record types, command surfaces, and UX friction accurately. The Coordinator's attestation records what was validated, what was not, and the commitment to full live validation before public announcement.

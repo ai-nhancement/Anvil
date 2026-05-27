@@ -32,11 +32,11 @@ These were found during the Charter → Plan cycle and were fixed before P11 shi
 
 Two Provisional Locks had `revision trigger = v1.1 App design begins`:
 
-**`cli-setup-wizard-step-ordering`** — After running the setup wizard in `anvil setup` three times during dogfooding (once for this session), the step ordering was validated as reasonable. The v1.1 App wizard may reorder steps because a GUI can show all inputs on a single screen rather than sequentially. **Status: remains Provisional (v1.1 designs the App wizard; not a v1 change).**
+**`cli-setup-wizard-step-ordering`** — After running the setup wizard in `anvil setup` three times during dogfooding (once for this session), the step ordering was validated as reasonable. The v1.1 App wizard may reorder steps because a GUI can show all inputs on a single screen rather than sequentially. **Status: confirmed Final at P11 (v1 decision locked; v1.1 App wizard will independently design its own step ordering).**
 
-**`cli-command-structure`** — The CLI's `<resource> <verb>` structure maps cleanly to App UI except for two cases identified in `docs/ux-audit.md`: `arbiter resolve-finding` (requires manual ID construction) and `hinge flip` (requires knowing the `intended` ID vs. function name). The v1.1 App can solve both by providing UI-mediated selection. **Status: remains Provisional (v1.1 App design addresses these; not a v1 change).**
+**`cli-command-structure`** — The CLI's `<resource> <verb>` structure maps cleanly to App UI except for two cases identified in `docs/ux-audit.md`: `arbiter resolve-finding` (requires manual ID construction) and `hinge flip` (requires knowing the `intended` ID vs. function name). The v1.1 App can solve both by providing UI-mediated selection. **Status: confirmed Final at P11 (v1 decision locked; v1.1 App addresses friction via UI-mediated selection).**
 
-Both locks are intentionally carried as Provisional to v1.1. They are not open or unaddressed — they have reached their revision trigger and been explicitly evaluated. See `p11.rs` hinge test `test_no_outstanding_provisional_locks_after_dogfooding`.
+Both v1 decisions are Final. See `ANVIL_PLAN.md` Required Choices table (canonical slugs: `cli-setup-wizard-step-ordering`, `cli-command-structure`) and `p11.rs` hinge test `test_no_outstanding_provisional_locks_after_dogfooding`.
 
 ---
 

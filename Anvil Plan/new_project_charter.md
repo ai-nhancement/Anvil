@@ -465,7 +465,7 @@ Fifteen new choices, all Final. Open-source-related: Open-source license = Apach
 
 ### Audit-store record types updated
 
-The Charter's *Audit-Store Minimum Schema* invariant lists eleven required types and explicitly permits Plan extensions. With Amendment A1 applied, v1's audit store now includes sixteen record types in total: the original 11 + 5 Plan extensions (`ArbiterFindingResolution`, `SidecarReload`, `PublicVisibilityPolicy`, `PublicExportApproval`, `EmergencyFreezeDeclaration`). The constitutional hinge `test_audit_store_required_types_present` is unchanged (subset check on the required 11). Plan Draft 7 reconciles per-implementation counts and hinges accordingly.
+The Charter's *Audit-Store Minimum Schema* invariant lists eleven required types and explicitly permits Plan extensions. With Amendment A1 applied and P11 Plan deferral recorded, v1's audit store includes **15 record types**: the original 11 Charter-required + 4 Plan extensions (`ArbiterFindingResolution`, `SidecarReload`, `CuratedFindings`, `PlanConsolidation`). Three types originally contemplated in Amendment A1 (`PublicVisibilityPolicy`, `PublicExportApproval`, `EmergencyFreezeDeclaration`) are formally deferred to v1.1: `PublicVisibilityPolicy` and `PublicExportApproval` alongside the deferred `anvil audit export --public` command (Plan Amendment 9); `EmergencyFreezeDeclaration` alongside the v1.1 governance tooling. The constitutional hinge `test_audit_store_required_types_present` is unchanged (subset check on the required 11).
 
 ### Downstream
 

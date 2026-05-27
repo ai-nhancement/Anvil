@@ -100,17 +100,16 @@ Curation produces `ArbiterFindingResolution` records for each finding dispositio
 
 ## Gate 4 — Charter Review: Disposition Rendered
 
-After curation, render the disposition document:
+After curation, write the disposition document (a markdown file in `Review Rounds/`) by hand, then verify the Plan contract is satisfied:
 
 ```sh
-# The disposition document is typically a markdown file in Review Rounds/
-# Write it by hand or generate it; the gate records its completion.
+# Verify Required Choices locking state; prints pass/fail — writes no audit record
 anvil gate check-plan --project .
 ```
 
-The gate check verifies the Plan contract is satisfied before advancing.
+The gate check confirms that Required Choices are in their expected locked state before advancing. It does not write an audit record; disposition document authoring is a manual step.
 
-**Audit record:** `GateApproval` (disposition-rendered gate)
+**Audit record:** none (manual step; `anvil gate check-plan` is a verification-only command)
 
 ---
 

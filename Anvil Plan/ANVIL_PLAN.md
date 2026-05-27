@@ -586,7 +586,7 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
 - **Hinge-test list.**
   - `test_wizard_step_count` — pins 7.
   - `test_diversity_policy_validation_rejects_same_family`
-  - `test_workspace_lock_enforced` — pins that two `anvil` processes can't write the same workspace.
+  - `test_workspace_runtime_dir_in_layout` — pins that `.anvil/run` exists in `LAYOUT_DIRS` for sidecar PID/port file placement. (Renamed from `test_workspace_lock_enforced` in P4 R2; see `REVIEW_P4_SETUP_WIZARD_R2.md`.)
   - `test_api_keys_encrypted_at_rest`
   - `test_wizard_cancellation_leaves_no_partial_state`
   - `test_api_keys_env_var_bypass_works_headless`
@@ -869,7 +869,7 @@ P0 — Bootstrap
 
 - **Audit store record schemas** (P2; Rust types; versioned).
 - **Hinge-test convention** spans Rust and Go (P0 stubs; P10 unifies).
-- **Sidecar lifecycle** — workspace-scoped daemon, CLI-managed. Spawn logic lives in `anvil-core` so CLI and future App share the same implementation. See *Locked Required Project-Level Choices* for the full spec. **Multi-workspace behavior:** v1's design is single-active-project, but running `anvil` from multiple workspace directories is *supported-but-uncoordinated*, not unsupported. Each workspace spawns an independent daemon with its own PID/port files; daemons do not coordinate. On second-workspace activation, the CLI emits a visible warning naming the other active workspaces (detected via sibling `.anvil/run/` directories under the user's projects root) and the per-workspace resource footprint. The warning is informational; it does not block. Global sidecar sharing (one daemon serving multiple workspaces, with coordinated rate-limiting and shared connection pools) is a post-v1 consideration; see *Open Items*. Running the *same workspace* from two `anvil` processes simultaneously remains hard-blocked by file-system locking (P4's `test_workspace_lock_enforced`).
+- **Sidecar lifecycle** — workspace-scoped daemon, CLI-managed. Spawn logic lives in `anvil-core` so CLI and future App share the same implementation. See *Locked Required Project-Level Choices* for the full spec. **Multi-workspace behavior:** v1's design is single-active-project, but running `anvil` from multiple workspace directories is *supported-but-uncoordinated*, not unsupported. Each workspace spawns an independent daemon with its own PID/port files; daemons do not coordinate. On second-workspace activation, the CLI emits a visible warning naming the other active workspaces (detected via sibling `.anvil/run/` directories under the user's projects root) and the per-workspace resource footprint. The warning is informational; it does not block. Global sidecar sharing (one daemon serving multiple workspaces, with coordinated rate-limiting and shared connection pools) is a post-v1 consideration; see *Open Items*. Running the *same workspace* from two `anvil` processes simultaneously remains hard-blocked by file-system locking (P4's `test_workspace_runtime_dir_in_layout`).
 - **Trust-boundary invariants** — three rules locked at Plan level (no partial commit, stateless sidecar, App not on trust boundary). See *Plan-Level Trust-Boundary Invariants*. Enforced by `anvil-core`; not bypassable by CLI or App surface.
 - **App-compatibility constraints** — eight v1 decisions made explicitly for App coexistence. See *App-Compatibility Design Decisions*.
 - **CLI command structure** (`cli-command-structure`) — verb-resource pattern (`anvil <resource> <verb>`). Was Provisionally Locked with `revision trigger = v1.1 App design begins`; **confirmed Final at P11** after evaluation against `docs/ux-audit.md` and dogfooding session.
@@ -919,7 +919,7 @@ P0 — Bootstrap
 | `test_streaming_aborts_on_error_no_continuation` | Go | P3c |
 | `test_wizard_step_count` | Rust | P4 |
 | `test_diversity_policy_validation_rejects_same_family` | Rust | P4 |
-| `test_workspace_lock_enforced` | Rust | P4 |
+| `test_workspace_runtime_dir_in_layout` | Rust | P4 |
 | `test_api_keys_encrypted_at_rest` | Rust | P4 |
 | `test_wizard_cancellation_leaves_no_partial_state` | Rust | P4 |
 | `test_api_keys_env_var_bypass_works_headless` | Rust | P4 |
@@ -940,13 +940,14 @@ P0 — Bootstrap
 | `test_hinge_comment_metadata_required` | Go | P10b |
 | `test_bi_language_registry_merge` | Rust | P10b |
 | `test_no_outstanding_provisional_locks_after_dogfooding` | Rust | P11 |
+| `test_contract_doc_sync_method` | Rust | P11 |
 
-**Total hinges:** the table above is the canonical list. The count is derived from the table at validation time (`anvil hinge list --count`) rather than restated as prose, so it cannot drift. Prior drafts hard-coded counts in two places (here and in *Evaluation Metric Targets*); those references are removed in favor of "the canonical registry" so a hinge addition or removal does not require synchronized prose edits.
+**Named hinges above:** the table lists hinges explicitly named in the Plan for cross-referencing. The full hinge registry (74 annotations as of v1 ship) is the canonical source; it lives in source via `// hinge_test:` comment annotations and is queried by `anvil hinge list --count --project <dir>`. The Plan table is a named subset — a governance act, not an exhaustive list. Adding or removing a row here is a deliberate cross-reference decision. Run `anvil hinge list` for the authoritative count.
 
 **Pin convention.** Hinge tests fall into two categories:
 
 - *Constitutional pins:* the pinned value is fixed by a Charter invariant or Charter-amendment commitment. Examples: `test_audit_store_record_types_count` (pins 11; tied to *Audit-Store Minimum Schema* invariant), `test_error_class_count` (pins 6; tied to the contract's error-class enum), `test_proto_package_version` (pins `anvil.v1`; tied to schema-versioning policy). These remain *exact-equality* tests because flipping the count would mean the Charter or contract is changing — which is itself the signal the test is meant to produce.
-- *Operational pins:* the pinned value is the current implementation choice but may grow without re-opening the Charter. Examples: `test_wizard_step_count`, `test_v1_minimum_provider_adapters`, `test_required_choices_count`. These should be *minimum-equality* tests (`assert count >= N`) paired with a registry entry naming the current value, so legitimate additions do not require synchronized prose edits across the Plan. P10b's hinge-framework implementation enforces this convention: the hinge proc-macro accepts a `style: "exact" | "minimum"` attribute; constitutional pins use `"exact"`, operational pins use `"minimum"`. Drift is detected by comparing the macro-emitted manifest against the Charter's constitutional list.
+- *Operational pins:* the pinned value is the current implementation choice but may grow without re-opening the Charter. Examples: `test_wizard_step_count`, `test_v1_minimum_provider_adapters`, `test_required_choices_count`. These should be *minimum-equality* tests (`assert count >= N`) paired with a registry entry naming the current value, so legitimate additions do not require synchronized prose edits across the Plan. The hinge framework uses `// hinge_test: pins=..., intended=..., phase=...` source annotations (Rust and Go); `anvil hinge list --strict --project <dir>` scans all annotations and checks for consensus violations.
 
 ---
 
@@ -999,7 +1000,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **Audit store query language.** `anvil audit list` and `anvil audit show` are sufficient for v1. A structured query language (SQL-like or a custom DSL) enabling cross-record queries is deferred to post-v1. Status: open, deferred beyond v1 scope.
 
-- **Concurrent project support.** v1 is single-active-project by design; the storage layer may hold multiple projects. Workspace-level file-system locking (P4 hinge `test_workspace_lock_enforced`) prevents concurrent writes. True multi-project parallelism (multiple active projects simultaneously) is out of v1 scope. Status: not open — decided as out of scope.
+- **Concurrent project support.** v1 is single-active-project by design; the storage layer may hold multiple projects. Workspace-level file-system locking (P4 hinge `test_workspace_runtime_dir_in_layout`) prevents concurrent writes. True multi-project parallelism (multiple active projects simultaneously) is out of v1 scope. Status: not open — decided as out of scope.
 
 - **Reviewer prompt management.** Prompts sent to reviewers are constructed by the Vault with fixed templates in v1. Per-project prompt customization (editable templates, version-controlled prompts) is deferred. Status: open, deferred to v1.1.
 
@@ -1012,7 +1013,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
   - *Install method:* per-platform release archive (`.zip` Windows, `.tar.gz` macOS / Linux) containing both `anvil` and `anvil-sidecar` binaries plus a top-level `INSTALL.md`. No platform-specific installer (`.msi` / `.dmg` / `.deb`) in v1; those land in v1.1 alongside the Tauri bundles.
   - *Signing and checksums:* SHA-256 checksums published alongside every release archive in a `SHA256SUMS.txt` file, signed via the project's GPG key (also used for the security-disclosure policy). No code-signing certificates for Windows or macOS in v1 — release notes document the expected unsigned-binary warnings on each OS and how to verify checksums manually.
   - *Release artifact layout:* `anvil-v1.<minor>.<patch>-<platform>.{zip,tar.gz}` + `SHA256SUMS.txt` + `SHA256SUMS.txt.asc` + `RELEASE_NOTES.md`. All four published to the GitHub Releases page atomically.
-  - *Smoke tests:* every release candidate runs a scripted smoke test against the release archive (extract, run `anvil --version`, run `anvil-sidecar --version`, run `anvil init` in a temp dir, run `anvil setup --headless` with test credentials, run `anvil charter render` on a fixture Charter, verify the rendered output matches expected hash). The smoke-test script is itself a v1 deliverable in P11. **The smoke test must explicitly verify the exact text of the unsigned-binary warning each OS displays on first run** (Windows SmartScreen, macOS Gatekeeper, Linux distribution-specific warnings), so users encountering the warning in the wild see language that matches the runbook's expectations.
+  - *Smoke tests:* every release candidate runs a scripted smoke test against the release archive (extract, run `anvil --version`, run `anvil-sidecar --version`, run `anvil init <tmp-dir>`, run `anvil hinge list --count --project <tmp-dir>` and verify non-zero exit, verify `anvil.toml` was created by init). The smoke-test script is a release-time deliverable written before the first release candidate is published; it is not a P11 code deliverable. **The smoke test must explicitly verify the exact text of the unsigned-binary warning each OS displays on first run** (Windows SmartScreen, macOS Gatekeeper, Linux distribution-specific warnings), so users encountering the warning in the wild see language that matches the runbook's expectations.
   - *Windows-specific daemon robustness (R5 addition; Windows is the primary platform).* The P11 smoke-test list includes Windows-only scenarios for the sidecar daemon:
     1. *User logoff:* daemon launched, user logs off, user logs back in — daemon either survives (preferred) or is detected as stale and cleaned by the next `anvil` invocation. Either is acceptable; the failure mode to prevent is "daemon is zombie-running but not reachable."
     2. *Laptop close-lid / sleep:* daemon launched, system enters sleep (>30 min), system resumes — daemon either survives or is detected as stale and cleaned. Same acceptance.
@@ -1141,7 +1142,7 @@ The Plan is satisfied — and Anvil v1 is ready to ship — when:
 8. `convergence-declaration` log shows the rotation paths actually taken.
 9. The Plan has been reviewed by at least two non-Coder reviewers and converged.
 10. No outstanding hinge tests block Ship.
-11. v1 binaries (`anvil`, `anvil-sidecar`) build correctly for the primary platform (Windows x64); stretch platforms (macOS aarch64/x64, Linux x64 musl-static) ship best-effort. A signed `SHA256SUMS.txt.asc` is published with every release archive. The smoke-test script in *Open Items / Distribution* passes against the primary-platform release candidate before v1 is declared shipped.
+11. v1 binaries (`anvil`, `anvil-sidecar`) build correctly for the primary platform (Windows x64); stretch platforms (macOS aarch64/x64, Linux x64 musl-static) ship best-effort. A signed `SHA256SUMS.txt.asc` is published with every release archive. The smoke-test script described in *Open Items / Distribution* passes against the primary-platform release candidate before v1 is declared shipped. The script is written at release time (not in P11); its commands are restricted to commands that exist in the v1 binary (`anvil --version`, `anvil-sidecar --version`, `anvil init`, `anvil hinge list`, etc.).
 
 ---
 

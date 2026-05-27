@@ -38,6 +38,11 @@ mod tests {
         // Flipping to "ci-enforced" requires adding a CI step that extracts service/RPC/
         // message definitions from the proto or generated descriptors and fails on mismatch.
         // That step is explicitly a v1.1 task (noted in docs/contract.md maintenance note).
-        assert_eq!("manual-sync", "manual-sync");
+        let contract_doc = include_str!("../../../docs/contract.md");
+        assert!(
+            contract_doc.contains("Automated drift detection is a v1.1 task"),
+            "docs/contract.md must retain the maintenance note; if it was removed, \
+             update this test to reflect the new sync approach"
+        );
     }
 }

@@ -8,7 +8,7 @@
 **Fmt:** Clean (`cargo fmt --all -- --check`)  
 **Go tests:** All passing (`go test ./...` from `sidecar/`)
 
-Prior rounds: R1 (2026-05-27, clean pass), R1 second pass (2026-05-27, 8 findings, all applied), R2 (2026-05-27, 5 findings). All 5 findings applied.
+Prior rounds: R1 first-pass (2026-05-27, first reviewer, clean pass); R1 second-pass (2026-05-27, second reviewer, 8 findings, all applied); R2 (2026-05-27, 5 findings, all applied).
 
 ---
 

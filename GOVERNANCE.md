@@ -24,7 +24,7 @@ If the BDFL is permanently unable to fulfill the role, the most senior active ma
 
 ## Emergency freeze
 
-The BDFL may declare an emergency freeze that halts all merges to `main` pending resolution of a named issue (security incident, governance dispute, legal matter). The freeze declaration and the resolution are both recorded as `EmergencyFreezeDeclaration` audit-store records once the audit store is operational (P2).
+The BDFL may declare an emergency freeze that halts all merges to `main` pending resolution of a named issue (security incident, governance dispute, legal matter). The freeze declaration and the resolution will be recorded as `EmergencyFreezeDeclaration` audit-store records. The `EmergencyFreezeDeclaration` record type is a v1.1 deliverable; in v1, freeze events are recorded as plain `PlanAmendment` records with a `freeze` tag in the metadata until the dedicated record type is available.
 
 An adversarial emergency freeze — a freeze declared by someone other than the BDFL using technical access — is invalid. Any merge blocked by such a freeze is un-blocked by the BDFL's counter-declaration, which also triggers an automatic governance review.
 

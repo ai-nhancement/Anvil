@@ -1,7 +1,7 @@
 # Anvil v1.1 Charter
 
-**Version:** R1 (converged via dogfooding session, 2026-05-26)  
-**Produced using:** Anvil v1.0.0 CLI (`anvil discuss` + `anvil charter review`)  
+**Version:** R1 (representative final/converged form — not a live `anvil discuss` / `anvil charter review` output)  
+**Produced using:** Representative of output expected from Anvil v1.0.0 CLI (`anvil discuss` + `anvil charter review`)  
 **Feeds into:** Anvil v1.1 implementation (Build stage begins after v1 ships)
 
 ---

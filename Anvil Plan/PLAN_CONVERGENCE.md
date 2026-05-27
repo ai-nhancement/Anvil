@@ -48,7 +48,7 @@ All three criteria hold for the post-R5 Plan.
 
 **v1.1 Design Seeds** (five items in the appendix added in R5) are explicitly post-v1 and do not block. They are queryable design seeds for the next iteration, not unresolved v1 questions.
 
-**Open Items** remaining in the Plan are all explicitly scoped as post-v1 or deferred to v1.x (audit store query language; concurrent project support; reviewer prompt management; reviewer findings deduplication; performance characterization; distribution release mechanics refinement; auto-update; external pilot project selection resolved in P11; `anvil init` vs `anvil setup` naming resolved in Draft 5). None block.
+**Open Items** remaining in the Plan are all explicitly scoped as post-v1 or deferred to v1.x (audit store query language; concurrent project support; reviewer prompt management; reviewer findings deduplication; performance characterization; distribution release mechanics refinement; auto-update; external pilot project selected in P11 (Leaflog, representative Gate 1 artifacts; live execution deferred to Gate 2); `anvil init` vs `anvil setup` naming resolved in Draft 5). None block.
 
 ## What this convergence does
 

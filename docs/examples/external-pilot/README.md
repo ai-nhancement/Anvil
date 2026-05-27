@@ -70,10 +70,10 @@ P1 would require 2 rounds: GPT-4o would likely find a reminder due-date logic bu
 ### Ship
 
 `anvil ship --project .` would pass all gates in a successful run:
-- All 4 phases shipped
+- All 4 phases would ship (representative_shipped_shape)
 - No unresolved rollbacks
 - Hinge consensus clean (3 hinge tests; 0 violations)
-- Audit integrity: pass
+- Audit integrity: representative_pass_shape
 
 ---
 

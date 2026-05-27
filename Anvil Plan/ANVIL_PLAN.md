@@ -54,9 +54,9 @@ If the Coder encounters a conflict between this Plan and the Charter's amendment
 
 Anvil v1 is a **Rust CLI** with a Go sidecar for model-provider integration, communicating over **gRPC with versioned protobuf schemas**. The CLI is the v1 deliverable; a desktop App (Tauri + React + TypeScript) is scoped as v1.1 and will be informed by usage feedback from v1.
 
-**Why CLI-first.** Anvil's value proposition is *structure for vibe coding* — review gates, provenance, adversarial cross-vendor diversity, and explicit workflow discipline replacing the unstructured agent-loop approach that produces unreliable output. The CLI surface is the right v1 form because Anvil's gate-heavy workflow — six human-approval gates per phase, structured briefings, finding-by-finding curation, disposition rendering — maps naturally to a terminal interface where each gate is a prompt and each artifact is a file. The audience most likely to surface real issues with that discipline is experienced developers using CLI surfaces in real workflows. The App in v1.1 will be designed against this evidence rather than against guesses.
+**Why CLI-first.** Anvil's value proposition is *structure for vibe coding* — review gates, provenance, adversarial cross-vendor diversity, and explicit workflow discipline replacing the unstructured agent-loop approach that produces unreliable output. The CLI surface is the right v1 form because Anvil's gate-heavy workflow — six human-approval gates per phase, structured briefings, finding-by-finding curation, disposition rendering — maps naturally to a terminal interface where each gate is a prompt and each artifact is a file. The audience most likely to surface real issues with that discipline is experienced developers using CLI surfaces in real workflows. The App in v1.1 will be designed against Gate 2 live usage evidence rather than against guesses.
 
-**Architectural commitment that survives v1 → v1.1.** Even though v1 ships only the CLI, the Vault is designed as a clean Rust library (`anvil-core`) with a command/query API that an App can consume directly in v1.1 without rework. File-system locking is in place from v1 so the App can coexist with the CLI from day one of v1.1. Several Plan-stage decisions in v1 are *Provisionally Locked* with `revision trigger = v1.1 App design begins`, so the App design can refine them based on real CLI usage data. The v1 decisions made explicitly for App compatibility are named in *App-Compatibility Design Decisions*.
+**Architectural commitment that survives v1 → v1.1.** Even though v1 ships only the CLI, the Vault is designed as a clean Rust library (`anvil-core`) with a command/query API that an App can consume directly in v1.1 without rework. File-system locking is in place from v1 so the App can coexist with the CLI from day one of v1.1. Several Plan-stage decisions in v1 are *Provisionally Locked* with `revision trigger = v1.1 App design begins`, so the App design can refine them based on Gate 2 live CLI usage data. The v1 decisions made explicitly for App compatibility are named in *App-Compatibility Design Decisions*.
 
 **The architectural shape:**
 
@@ -808,10 +808,10 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
 
 ### **P11 — Dogfooding and Documentation**
 
-- **Goal.** Use Anvil v1 CLI to manage Anvil v1.1 design (Charter + Plan for the App addition) and to complete one external pilot project. Resolve all Provisional Locks. Produce docs.
+- **Goal.** Use Anvil v1 CLI to manage Anvil v1.1 design (Charter + Plan for the App addition) and to complete one external pilot project. Resolve all Provisional Locks. Produce docs. *Gate 1 (complete): representative dogfooding and pilot artifacts, documentation deliverables, and Coordinator attestation. Gate 2 (deferred): live CLI execution against real AI providers before public ship.*
 - **Action list.**
-  - **Dogfooding:** Run a Charter → Plan cycle on the Anvil v1.1 App design using the v1 CLI. Fix integration gaps surfaced by dogfooding. (Full Build → Ship on v1.1 happens in v1.1 itself.)
-  - **External pilot:** Identify and run a small, non-self-referential project through a full Charter → Plan → Build → Ship cycle using the v1 CLI. **Pilot selection rubric (all must hold):**
+  - **Dogfooding (Gate 1 complete; Gate 2 deferred):** Produce representative Charter and Plan for Anvil v1.1 showing the converged shape expected from a live `anvil discuss` + `anvil charter review` + `anvil plan invoke` cycle. Representative artifacts in `docs/examples/dogfooding/`. Live execution against real AI providers is a Gate 2 requirement deferred to before public ship.
+  - **External pilot (Gate 1 complete; Gate 2 deferred):** Leaflog selected as representative pilot scenario; full Charter → Plan → Build → Ship representative artifacts documented in `docs/examples/external-pilot/`. Live execution of the full cycle against real AI providers is a Gate 2 requirement deferred to before public ship. When the live Gate 2 pilot runs, it must satisfy the following rubric: **Pilot selection rubric (all must hold):**
     - *Scope ceiling:* the pilot's Plan has between 3 and 7 phases. Larger plans become unbounded; smaller plans don't exercise multi-phase rotation.
     - *Timebox:* 14 calendar days from `anvil setup` to `anvil ship`. If the pilot exceeds the timebox, the pilot's *current state* is the ship gate — partial completion is acceptable evidence; full Ship is preferred but not required.
     - *External user:* the Coordinator may operate the CLI for the pilot, but the *project being built* must originate from someone other than the Coordinator (a friend's tool, a community-suggested utility, a documentation site for an unrelated topic). The purpose is to validate Anvil works on someone else's problem domain.
@@ -831,10 +831,10 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
   3. Onboarding guide can be followed by a new user without consulting the runbook.
   4. Representative dogfooding artifacts (v1.1 charter + plan summary) and external pilot artifacts in `docs/examples/`, with formal Coordinator attestation (`docs/examples/coordinator-attestation.md`). Documentation deliverable complete; live CLI execution against real AI providers is a Gate 2 requirement.
 - **Acceptance criteria — Gate 2 (deferred; required before public ship):**
-  1. At least one Charter → Plan cycle completes via `anvil` CLI alone for the Anvil v1.1 App design (live execution against real AI providers; actual audit-store records preserved). *(Deferred with attestation)*
-  2. At least one external, non-self-referential project completes a full Charter → Plan → Build → Ship cycle via `anvil` CLI alone (live execution; actual audit-store records preserved). *(Deferred with attestation)*
-  3. The external pilot includes at least one Build phase that goes through multi-reviewer rotation (live execution). *(Deferred — see AC2)*
-  4. The v1.1 Plan from live dogfooding validated as the input for the v1.1 App design. *(Deferred — see AC1)*
+  1. The dogfooding test in P11 has produced a Charter and Plan for Anvil v1.1 using the v1 CLI alone (live execution against real AI providers; actual audit-store records preserved). *(Deferred with attestation — see `docs/examples/coordinator-attestation.md`)*
+  2. At least one external, non-self-referential project has completed a full Charter → Plan → Build → Ship cycle using the v1 CLI alone, including at least one Build phase with multi-reviewer rotation (live execution; actual audit-store records preserved). *(Deferred with attestation — see `docs/examples/coordinator-attestation.md`)*
+  3. The v1.1 Plan from live dogfooding validated as the input for the v1.1 App design. *(Deferred with attestation — see `docs/examples/coordinator-attestation.md`)*
+  4. Release archive produced for the primary platform (Windows x64) with `SHA256SUMS.txt` + signed `SHA256SUMS.txt.asc`; smoke-test script (written at release time, not a P11 deliverable) passes against the release candidate. *(Deferred — release-time)*
 - **Dependencies.** All prior phases.
 - **Hinge-test list.**
   - `test_no_outstanding_provisional_locks_after_dogfooding`
@@ -986,7 +986,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **Risk: Vendor adapter brittleness.** Vendor APIs change response schemas, add error codes, deprecate endpoints, and change streaming behavior. Raw HTTP adapters absorb this churn directly. *Mitigation:* error class mapping is hinge-tested per adapter; vendor API test fixtures (recorded responses) used for contract-conformance tests; the `ErrorClass` taxonomy is stable even if vendor error codes change beneath it.
 
-- **Risk: v1 → v1.1 transition harder than planned.** The v1 architecture is designed to make the App addition non-disruptive, but architectural assumptions made in v1 may not survive contact with real App requirements. *Mitigation:* two v1.1-prep Provisional Locks (`cli-setup-wizard-step-ordering`, `cli-command-structure`) forced deliberate re-evaluation at the v1 → v1.1 boundary — both confirmed Final at P11 after dogfooding and UX audit. The eight decisions in *App-Compatibility Design Decisions* are explicitly named so they can be deliberated against rather than discovered.
+- **Risk: v1 → v1.1 transition harder than planned.** The v1 architecture is designed to make the App addition non-disruptive, but architectural assumptions made in v1 may not survive contact with real App requirements. *Mitigation:* two v1.1-prep Provisional Locks (`cli-setup-wizard-step-ordering`, `cli-command-structure`) forced deliberate re-evaluation at the v1 → v1.1 boundary — both confirmed Final at P11 after UX audit and build observations. The eight decisions in *App-Compatibility Design Decisions* are explicitly named so they can be deliberated against rather than discovered.
 
 - **Risk: CLI usability ceiling.** A CLI is inherently harder to make accessible to non-expert users. v1 will reach a smaller, more expert audience by design. *Mitigation:* this is intentional for v1; the audience is exactly the one most likely to surface real workflow issues. The external pilot in P11 will validate CLI usability on a real project by a real user — deferred to before public ship (Gate 2). v1.1 broadens the audience via the App.
 
@@ -1028,7 +1028,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **Provider adapter expansion roadmap.** v1 ships three direct-API adapters (Anthropic, OpenAI, Google AI Studio) — the minimum set required to satisfy the family-floor invariant with Claude as Coder. The architecture supports cloud-hosted variants (Azure OpenAI, AWS Bedrock, Google Vertex AI) and additional direct APIs (xAI) as additive adapters that do not modify Vault, contract, or existing adapters. Gateways (DigitalOcean Gradient, OpenRouter) are likewise additive. Which adapters ship in v1.1 vs. later will be informed by live Gate 2 dogfooding and pilot evidence on users' actual provider preferences. The family-floor invariant is unaffected by adapter expansion because it operates on model identity, not on access path. Status: open, prioritization deferred to Gate 2 evidence.
 
-- **External pilot project selection.** The specific project used for the P11 external pilot is not pre-selected in the Plan; it is chosen during P11 based on what is available and small enough to complete within the phase. Status: open, resolved in P11.
+- **External pilot project selection.** Leaflog (a structured changelog and release-notes CLI) selected as the Gate 1 representative pilot scenario and documented in `docs/examples/external-pilot/`. Live execution of the full cycle is deferred to Gate 2. Status: Leaflog selected (Gate 1 complete); live execution deferred to Gate 2.
 
 (Two prior Open Items — *Checkpoint/resume for long sidecar streams* and *Global sidecar sharing across workspaces* — were promoted in R5 to the new *v1.1 Design Seeds* appendix below, where they are documented as forward design work with explicit constraints rather than vague post-v1 notes.)
 
@@ -1098,7 +1098,7 @@ This appendix collects items that are explicitly *not* v1 scope but are anticipa
 - Hard-stop must be overridable in-session by the Coordinator via an explicit `--override-cost-limit --reason "<text>"` flag, with audit-record logging.
 - The Coordinator must be the human, not a model. No automated agent should be able to bypass cost limits.
 
-**v1 data points that will inform v1.1.** Observed pattern: do users hit cost limits often? Do they want hard-stops, warn-only, or a graduated policy (warn at X%, soft-stop at Y%, hard-stop at Z%)? Data from P11 and pilot usage.
+**v1 data points that will inform v1.1.** Observed pattern: do users hit cost limits often? Do they want hard-stops, warn-only, or a graduated policy (warn at X%, soft-stop at Y%, hard-stop at Z%)? Data from Gate 2 live dogfooding and pilot usage.
 
 ### Seed 6: Logo and tagline
 
@@ -1160,7 +1160,7 @@ The following criteria must be satisfied before the repository is made public or
 3. The v1.1 Plan from live dogfooding validated as the input for the v1.1 App design.
 4. Release archive produced for the primary platform (Windows x64) with `SHA256SUMS.txt` + signed `SHA256SUMS.txt.asc`; smoke-test script (written at release time, not a P11 deliverable) passes against the release candidate.
 
-**Status: Deferred (attested) — see `docs/examples/coordinator-attestation.md`.**
+**Status:** AC1–AC3: Deferred (attested) — see `docs/examples/coordinator-attestation.md`. AC4: Deferred (release-time) — not covered by the dogfooding attestation.
 
 ---
 
@@ -1184,11 +1184,11 @@ The converged Plan becomes the constitutional input to the Build stage. Post-con
 
 ## v1 → v1.1 Transition
 
-This Plan is for **v1 (CLI)**. The v1.1 work — adding the Tauri + React + TypeScript desktop App — is its own Charter + Plan, scoped after v1 ships and after v1 usage produces design evidence for what the App needs to support.
+This Plan is for **v1 (CLI)**. The v1.1 work — adding the Tauri + React + TypeScript desktop App — is its own Charter + Plan, scoped after v1 ships and after Gate 2 live usage produces design evidence for what the App needs to support.
 
 The v1 → v1.1 transition is a deliberate review point, not an implicit re-decision. Two Provisional Locks carried `revision trigger = v1.1 App design begins` and were evaluated at P11:
 
-- *CLI Setup Wizard step ordering and prompts* (`cli-setup-wizard-step-ordering`) — evaluated against v1 usage feedback and `docs/ux-audit.md`. **Confirmed Final at P11.** The v1 seven-step sequential wizard is the locked v1 design; the v1.1 App wizard is an independent design.
+- *CLI Setup Wizard step ordering and prompts* (`cli-setup-wizard-step-ordering`) — evaluated against build observations and `docs/ux-audit.md`. **Confirmed Final at P11.** The v1 seven-step sequential wizard is the locked v1 design; the v1.1 App wizard is an independent design.
 - *CLI command structure* (`cli-command-structure`) — evaluated against `docs/ux-audit.md` and build observations. **Confirmed Final at P11.** The `anvil <resource> <verb>` pattern is the locked v1 design; the v1.1 App IPC boundary is an independent design.
 
 Eight decisions in *App-Compatibility Design Decisions* are consciously made for App coexistence. These are the starting constraints for the v1.1 design; they may be revised by the v1.1 Charter process but not unilaterally.
@@ -1201,7 +1201,7 @@ The Vault library (`anvil-core`) is designed throughout v1 with no CLI-shaped as
 
 Anvil v1 is a **Rust CLI + Go sidecar** focused on the audience most likely to surface real issues with the workflow discipline: experienced developers using CLI surfaces in real workflows. The architecture (Rust Vault + versioned protobuf gRPC + Go sidecar) is the same architecture that will support the v1.1 App; v1 just does not ship the App.
 
-The value prop is **structure for vibe coding** — review gates, provenance, adversarial cross-vendor diversity, and explicit workflow discipline replacing the unstructured agent-loop approach. v1 proves the discipline; v1.1 broadens the audience.
+The value prop is **structure for vibe coding** — review gates, provenance, adversarial cross-vendor diversity, and explicit workflow discipline replacing the unstructured agent-loop approach. v1 builds and tests the discipline; Gate 2 live usage will prove it; v1.1 broadens the audience.
 
 Fifteen phases, mostly linear, with parallelization at P3 (Rust client + Go sidecar) and after P8 (Ship + Eval). The critical path is P0 → P1 → P2 → P3a → (P3b ∥ P3c) → P4 → P5 → P6 → P7 → P8 → P11.
 

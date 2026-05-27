@@ -2,16 +2,17 @@
 
 **Attestation date:** 2026-05-27  
 **Coordinator:** jvcan (john@ai-nhancement.com)  
-**Scope:** Plan-Level Acceptance Criteria 2 and 3 (dogfooding + external pilot)
+**Scope:** Gate 2 AC1–AC3 (dogfooding, external pilot, and v1.1 Plan validation)
 
 ---
 
 ## What This Document Is
 
-Plan-Level Acceptance Criteria 2 and 3 require that P11 be evidenced by actual Anvil v1 CLI executions against real AI providers:
+Gate 2 AC1–AC3 require that P11 be evidenced by actual Anvil v1 CLI executions against real AI providers before public ship:
 
-- **AC2:** The dogfooding test in P11 has produced a Charter and Plan for Anvil v1.1 using the v1 CLI alone.
-- **AC3:** At least one external, non-self-referential project has completed a full Charter → Plan → Build → Ship cycle using the v1 CLI alone, including at least one Build phase with multi-reviewer rotation.
+- **Gate 2 AC1:** The dogfooding test in P11 has produced a Charter and Plan for Anvil v1.1 using the v1 CLI alone (live execution; actual audit-store records preserved).
+- **Gate 2 AC2:** At least one external, non-self-referential project has completed a full Charter → Plan → Build → Ship cycle using the v1 CLI alone, including at least one Build phase with multi-reviewer rotation (live execution; actual audit-store records preserved).
+- **Gate 2 AC3:** The v1.1 Plan from live dogfooding validated as the input for the v1.1 App design.
 
 The artifacts in `docs/examples/dogfooding/` and `docs/examples/external-pilot/` are **representative and illustrative** — they document what such cycles would produce, with content authored to match the charter and plan requirements precisely. They are not live audit-store exports from an actual CLI execution against real AI providers.
 
@@ -57,7 +58,13 @@ The build process validated the following items that would constitute a real dog
 
 ## What Remains for a Full Live Validation
 
-Before v1 is declared publicly shipped, the Coordinator commits to running at least one real dogfooding cycle using the published binary against real AI providers. The results of that cycle will be preserved in the project's `.anvil/` audit store. The representative artifacts in `docs/examples/` will remain as illustrative references alongside the live data.
+Before v1 is declared publicly shipped, the Coordinator commits to:
+
+1. **Gate 2 AC1 (dogfooding):** Running at least one real dogfooding cycle using the published binary against real AI providers to produce a Charter and Plan for Anvil v1.1. Results will be preserved in the project's `.anvil/` audit store.
+2. **Gate 2 AC2 (external pilot):** Running at least one external, non-self-referential project through a full Charter → Plan → Build → Ship cycle using the v1 CLI, including at least one Build phase with multi-reviewer rotation, against real AI providers. Audit-store records will be preserved.
+3. **Gate 2 AC3 (v1.1 Plan validation):** Validating the v1.1 Plan produced from live dogfooding as the formal design input for the v1.1 App, and recording that validation.
+
+The representative artifacts in `docs/examples/` will remain as illustrative references alongside the live data.
 
 This attestation is the bridge between the first-generation build (where live evidence is not available) and the first public operation (where it will be).
 
@@ -70,7 +77,7 @@ I, jvcan, attest that:
 1. The representative artifacts in `docs/examples/dogfooding/` and `docs/examples/external-pilot/` accurately illustrate what the Anvil v1 CLI would produce for the described projects; they are documentation deliverables, not Gate 2 evidence.
 2. The Anvil v1 CLI has been built, tested (190 Rust tests + full Go test suite, all passing), and validated against the requirements documented in `ANVIL_PLAN.md`.
 3. The UX friction points and workflow gaps documented in the example artifacts are accurately drawn from knowledge of the CLI's implementation and from operating it during the build process. Provider diversity behavior shown in the representative artifacts is expected based on adapter conformance testing; live provider call validation is a Gate 2 requirement.
-4. Live dogfooding evidence will be produced and recorded before v1 is publicly announced.
+4. Live evidence for Gate 2 AC1 (dogfooding), AC2 (external pilot), and AC3 (v1.1 Plan validation) will be produced and recorded before v1 is publicly announced.
 
 **Coordinator:** jvcan  
 **Date:** 2026-05-27

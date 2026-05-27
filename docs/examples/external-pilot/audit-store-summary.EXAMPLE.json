@@ -16,10 +16,10 @@
     "RotationLog": 10
   },
   "phase_outcomes": [
-    { "phase_id": "P0", "rounds": 1, "shipped": true },
-    { "phase_id": "P1", "rounds": 2, "shipped": true },
-    { "phase_id": "P2", "rounds": 2, "shipped": true },
-    { "phase_id": "P3", "rounds": 1, "shipped": true }
+    { "phase_id": "P0", "rounds": 1, "status": "representative_shipped_shape" },
+    { "phase_id": "P1", "rounds": 2, "status": "representative_shipped_shape" },
+    { "phase_id": "P2", "rounds": 2, "status": "representative_shipped_shape" },
+    { "phase_id": "P3", "rounds": 1, "status": "representative_shipped_shape" }
   ],
   "reviewer_pool": [
     { "connection_id": "gpt-reviewer", "provider": "openai", "model": "gpt-4o" },

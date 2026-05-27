@@ -530,7 +530,7 @@ P11 documentation deliverables produced and confirmed:
 - `docs/contract.md` — sidecar gRPC contract reference regenerated from `proto/anvil/v1/sidecar.proto`
 - `docs/ux-audit.md` — CLI → App UI audit covering all 16 command families; 7 v1.1 recommendations; cross-cutting friction table
 - `docs/examples/external-pilot/` — Leaflog pilot representative artifacts (charter, plan, audit-store-summary.json, README)
-- `docs/examples/dogfooding/` — v1.1 charter, plan phase summary, and dogfooding session notes
+- `docs/examples/dogfooding/` — v1.1 charter, plan phase summary, and representative dogfooding artifacts
 
 Plan-Level Acceptance Criterion AC3 satisfied: "Documentation exists."
 

@@ -61,17 +61,18 @@ mod tests {
         //   | Choice text (`slug`) | **Final (P11)** | ...
         // Bold markers are stripped before matching so minor formatting changes
         // (e.g. "**Final** (P11)" vs "**Final (P11)**") do not silently break extraction.
-        // Split by | to get the Choice column, then extract the backtick-enclosed slug.
+        // .trim() on the line and the extracted slug ensures the bidirectional contract
+        // is whitespace-tolerant: cosmetic markdown edits cannot cause spurious failures.
         let plan_slugs: Vec<String> = lines[section_start..section_end]
             .iter()
             .copied()
             .filter(|line| line.replace("**", "").contains("Final (P11)"))
             .filter_map(|line| {
-                let cols: Vec<&str> = line.split('|').collect();
+                let cols: Vec<&str> = line.trim().split('|').collect();
                 cols.get(1).and_then(|col| {
                     let mut parts = col.split('`');
                     parts.next(); // text before first backtick
-                    parts.next().map(std::string::ToString::to_string) // the slug
+                    parts.next().map(|s| s.trim().to_string()) // the slug, trimmed
                 })
             })
             .collect();

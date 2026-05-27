@@ -874,7 +874,7 @@ P0 — Bootstrap
 - **Sidecar lifecycle** — workspace-scoped daemon, CLI-managed. Spawn logic lives in `anvil-core` so CLI and future App share the same implementation. See *Locked Required Project-Level Choices* for the full spec. **Multi-workspace behavior:** v1's design is single-active-project, but running `anvil` from multiple workspace directories is *supported-but-uncoordinated*, not unsupported. Each workspace spawns an independent daemon with its own PID/port files; daemons do not coordinate. On second-workspace activation, the CLI emits a visible warning naming the other active workspaces (detected via sibling `.anvil/run/` directories under the user's projects root) and the per-workspace resource footprint. The warning is informational; it does not block. Global sidecar sharing (one daemon serving multiple workspaces, with coordinated rate-limiting and shared connection pools) is a post-v1 consideration; see *Open Items*. Running the *same workspace* from two `anvil` processes simultaneously remains hard-blocked by file-system locking (P4's `test_workspace_runtime_dir_in_layout`).
 - **Trust-boundary invariants** — three rules locked at Plan level (no partial commit, stateless sidecar, App not on trust boundary). See *Plan-Level Trust-Boundary Invariants*. Enforced by `anvil-core`; not bypassable by CLI or App surface.
 - **App-compatibility constraints** — eight v1 decisions made explicitly for App coexistence. See *App-Compatibility Design Decisions*.
-- **CLI command structure** (`cli-command-structure`) — verb-resource pattern (`anvil <resource> <verb>`). Was Provisionally Locked with `revision trigger = v1.1 App design begins`; **confirmed Final at P11** after evaluation against `docs/ux-audit.md` and dogfooding session.
+- **CLI command structure** (`cli-command-structure`) — verb-resource pattern (`anvil <resource> <verb>`). Was Provisionally Locked with `revision trigger = v1.1 App design begins`; **confirmed Final at P11** after evaluation against `docs/ux-audit.md` and build observations.
 - **`anvil init` vs `anvil setup`** — distinct commands. `anvil init` is idempotent scaffolding; `anvil setup` is the interactive wizard. Locked in Draft 5.
 - **Configuration storage** — TOML (`anvil.toml`), with encrypted-at-rest secrets via OS keychain.
 - **Cross-reference keys** — Rust algorithm; stable across renderings.
@@ -1157,7 +1157,8 @@ The following criteria must be satisfied before the repository is made public or
 
 1. The dogfooding test in P11 has produced a Charter and Plan for Anvil v1.1 using the v1 CLI alone (live execution against real AI providers; actual audit-store records preserved).
 2. At least one external, non-self-referential project has completed a full Charter → Plan → Build → Ship cycle using the v1 CLI alone, including at least one Build phase with multi-reviewer rotation (live execution; actual audit-store records preserved).
-3. Release archive produced for the primary platform (Windows x64) with `SHA256SUMS.txt` + signed `SHA256SUMS.txt.asc`; smoke-test script (written at release time, not a P11 deliverable) passes against the release candidate.
+3. The v1.1 Plan from live dogfooding validated as the input for the v1.1 App design.
+4. Release archive produced for the primary platform (Windows x64) with `SHA256SUMS.txt` + signed `SHA256SUMS.txt.asc`; smoke-test script (written at release time, not a P11 deliverable) passes against the release candidate.
 
 **Status: Deferred (attested) — see `docs/examples/coordinator-attestation.md`.**
 

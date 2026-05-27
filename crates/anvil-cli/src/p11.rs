@@ -47,14 +47,14 @@ mod tests {
         let lines: Vec<&str> = plan_doc.lines().collect();
         let section_start = lines
             .iter()
-            .position(|line| line.starts_with("## Locked Required Project-Level Choices"))
+            .position(|line| line.trim() == "## Locked Required Project-Level Choices")
             .expect(
                 "Section '## Locked Required Project-Level Choices' not found in ANVIL_PLAN.md; \
                  check section header",
             );
         let section_end = lines[section_start + 1..]
             .iter()
-            .position(|line| line.starts_with("## "))
+            .position(|line| line.trim().starts_with("## "))
             .map_or(lines.len(), |rel| section_start + 1 + rel);
 
         // Each Required Choices table row for a Final-at-P11 PL looks like:
@@ -110,8 +110,8 @@ mod tests {
     #[test]
     fn test_contract_doc_sync_method() {
         // Pins: docs/contract.md is manually synced from proto/anvil/v1/sidecar.proto in v1.
-        // RPC-name presence smoke test: verifies every RPC name in the proto appears as a
-        // substring in the contract doc. Does NOT check service name, request/response
+        // Smoke test: verifies that (1) every service name and (2) every RPC name from the
+        // proto appear as substrings in the contract doc. Does NOT check request/response
         // types, message fields, field numbers, oneof variants, enum values, or package.
         // Full schema-level CI enforcement is explicitly a v1.1 task.
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -131,6 +131,33 @@ mod tests {
                 .join("sidecar.proto"),
         )
         .expect("proto/anvil/v1/sidecar.proto not found; check workspace layout");
+
+        // Every service name from the proto must appear in the contract doc.
+        let service_names: Vec<&str> = proto
+            .lines()
+            .filter_map(|line| {
+                let t = line.trim();
+                if t.starts_with("service ") {
+                    t.strip_prefix("service ")
+                        .and_then(|r| r.split_whitespace().next())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !service_names.is_empty(),
+            "sidecar.proto defines no services — check parse logic or proto path"
+        );
+
+        for service in &service_names {
+            assert!(
+                contract_doc.contains(service),
+                "docs/contract.md is missing proto service name '{service}'; \
+                 manual sync may have drifted — update contract.md"
+            );
+        }
 
         // All RPC names from the proto must appear in the contract doc.
         let rpc_names: Vec<&str> = proto

@@ -1145,7 +1145,7 @@ The following criteria are satisfied at P11 ship:
 7. The Plan has been reviewed by at least two non-Coder reviewers and converged.
 8. No outstanding hinge tests block Ship.
 9. v1 binaries (`anvil`, `anvil-sidecar`) build correctly for the primary platform (Windows x64); stretch platforms (macOS aarch64/x64, Linux x64 musl-static) ship best-effort. A signed `SHA256SUMS.txt.asc` is published with every release archive. The smoke-test script described in *Open Items / Distribution* passes against the primary-platform release candidate before v1 is declared shipped. The script is written at release time (not in P11); its commands are restricted to commands that exist in the v1 binary (`anvil --version`, `anvil-sidecar --version`, `anvil init`, `anvil hinge list`, etc.).
-10. Representative dogfooding and external pilot artifacts provided with Coordinator attestation (see `docs/examples/coordinator-attestation.md`).
+10. Dogfooding and external pilot documentation complete: representative artifacts in `docs/examples/dogfooding/` and `docs/examples/external-pilot/`, with formal Coordinator attestation in `docs/examples/coordinator-attestation.md`. This criterion satisfies the P11 documentation deliverable; live CLI execution against real AI providers remains a Gate 2 requirement and is not claimed here.
 
 **Status: Complete.**
 

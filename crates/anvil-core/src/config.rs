@@ -29,6 +29,9 @@ pub struct AnvilConfig {
     /// An empty list is valid — no external commands are run on ship.
     #[serde(default)]
     pub transport_actions: Vec<TransportAction>,
+    /// Layer-2 numeric targets for the six Layer-1 evaluation metrics (P10a).
+    #[serde(default)]
+    pub metric_targets: MetricTargets,
 }
 
 impl AnvilConfig {
@@ -43,6 +46,7 @@ impl AnvilConfig {
             reviewer_pool: Vec::new(),
             single_clean_pass_override: false,
             transport_actions: Vec::new(),
+            metric_targets: MetricTargets::default(),
         }
     }
 
@@ -55,6 +59,7 @@ impl AnvilConfig {
         for (key, choice) in &self.choices {
             choice.validate(key)?;
         }
+        self.metric_targets.validate()?;
         Ok(())
     }
 }
@@ -172,6 +177,92 @@ pub struct TransportAction {
     /// Human-readable label shown during execution. Defaults to `command` if absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+/// Layer-2 numeric targets for the six Layer-1 evaluation metrics (P10a).
+///
+/// All fields have defaults; an absent `[metric_targets]` section in `anvil.toml`
+/// uses the values shown below. Override any field to tighten or relax a project's
+/// specific targets.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MetricTargets {
+    /// Minimum acceptable reviewer precision (0.0–1.0). Default: 0.70.
+    #[serde(default = "MetricTargets::default_precision_min")]
+    pub precision_min: f64,
+    /// Maximum acceptable cross-reviewer agreement score (0.0–1.0). Default: 0.90.
+    #[serde(default = "MetricTargets::default_agreement_max")]
+    pub agreement_max: f64,
+    /// Maximum acceptable average human minutes per shipped phase. Default: 120.0.
+    #[serde(default = "MetricTargets::default_human_minutes_max")]
+    pub human_minutes_max: f64,
+    /// Maximum acceptable average review rounds per phase. Default: 5.0.
+    #[serde(default = "MetricTargets::default_round_count_max")]
+    pub round_count_max: f64,
+    /// Maximum acceptable defect escape rate (0.0–1.0). Default: 0.10.
+    #[serde(default = "MetricTargets::default_escape_rate_max")]
+    pub escape_rate_max: f64,
+}
+
+impl Default for MetricTargets {
+    fn default() -> Self {
+        Self {
+            precision_min: Self::default_precision_min(),
+            agreement_max: Self::default_agreement_max(),
+            human_minutes_max: Self::default_human_minutes_max(),
+            round_count_max: Self::default_round_count_max(),
+            escape_rate_max: Self::default_escape_rate_max(),
+        }
+    }
+}
+
+impl MetricTargets {
+    fn default_precision_min() -> f64 {
+        0.70
+    }
+    fn default_agreement_max() -> f64 {
+        0.90
+    }
+    fn default_human_minutes_max() -> f64 {
+        120.0
+    }
+    fn default_round_count_max() -> f64 {
+        5.0
+    }
+    fn default_escape_rate_max() -> f64 {
+        0.10
+    }
+
+    /// Validates that all threshold values are finite and within their acceptable ranges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnvilError::InvalidConfigValue`] for the first field that fails.
+    pub fn validate(&self) -> Result<(), AnvilError> {
+        for (key, val) in [
+            ("metric_targets.precision_min", self.precision_min),
+            ("metric_targets.agreement_max", self.agreement_max),
+            ("metric_targets.escape_rate_max", self.escape_rate_max),
+        ] {
+            if !val.is_finite() || !(0.0..=1.0).contains(&val) {
+                return Err(AnvilError::InvalidConfigValue {
+                    key: key.to_owned(),
+                    reason: format!("must be a finite value between 0.0 and 1.0, got {val}"),
+                });
+            }
+        }
+        for (key, val) in [
+            ("metric_targets.human_minutes_max", self.human_minutes_max),
+            ("metric_targets.round_count_max", self.round_count_max),
+        ] {
+            if !val.is_finite() || val < 0.0 {
+                return Err(AnvilError::InvalidConfigValue {
+                    key: key.to_owned(),
+                    reason: format!("must be a finite non-negative value, got {val}"),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Loads and validates `anvil.toml` from `<root>/anvil.toml`.

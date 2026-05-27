@@ -2,6 +2,7 @@ mod arbiter;
 mod charter;
 mod discuss;
 mod graph;
+mod metrics;
 mod phase;
 mod plan;
 mod session;
@@ -90,6 +91,25 @@ enum Command {
         /// Artifact to scope status counts to (default: charter.md).
         #[arg(long, default_value = "charter.md")]
         artifact: String,
+    },
+    /// Evaluation metrics and alert engine (P10a).
+    #[command(subcommand)]
+    Metrics(MetricsCmd),
+}
+
+#[derive(Subcommand)]
+enum MetricsCmd {
+    /// Display current Layer-1 metric values with target status and alerts.
+    Show {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Display per-metric values across all shipped phases.
+    History {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
     },
 }
 
@@ -434,6 +454,10 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
         },
         Command::Ship { project } => ship::run_project_ship(&project),
         Command::Status { project, artifact } => status::run_status(&project, &artifact),
+        Command::Metrics(cmd) => match cmd {
+            MetricsCmd::Show { project } => metrics::run_metrics_show(&project),
+            MetricsCmd::History { project } => metrics::run_metrics_history(&project),
+        },
     }
 }
 

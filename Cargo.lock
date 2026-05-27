@@ -88,6 +88,7 @@ version = "0.1.0"
 dependencies = [
  "anvil-audit",
  "anvil-core",
+ "anvil-eval",
  "anvil-graph",
  "anvil-ship",
  "anvil-sidecar-client",
@@ -121,6 +122,13 @@ dependencies = [
 [[package]]
 name = "anvil-eval"
 version = "0.1.0"
+dependencies = [
+ "anvil-audit",
+ "anvil-core",
+ "chrono",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "anvil-graph"

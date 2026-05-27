@@ -245,7 +245,7 @@ Resolution: Distribution open item rewritten with concrete v1 release acceptance
 - *Install method:* per-platform release archive (`.zip` Windows, `.tar.gz` macOS/Linux) containing both binaries plus INSTALL.md. No platform-specific installers in v1 (those land in v1.1 with the Tauri bundles).
 - *Signing:* SHA-256 checksums signed via the project's GPG key (same key as the security-disclosure contact). No code-signing certificates in v1; release notes document expected unsigned-binary warnings.
 - *Artifact layout:* `anvil-v1.<minor>.<patch>-<platform>.{zip,tar.gz}` + `SHA256SUMS.txt` + `SHA256SUMS.txt.asc` + `RELEASE_NOTES.md`, published atomically.
-- *Smoke tests:* scripted release-candidate smoke test (extract, version checks, init, setup --headless, charter render, expected hash). Smoke-test script is a v1 deliverable.
+- *Smoke tests:* scripted release-candidate smoke test (extract, version checks, init, setup --headless, charter render, expected hash). Smoke-test script is a v1 deliverable. *(Later corrected: `setup --headless` and `charter render` removed; smoke-test script reclassified as a release-time deliverable, not a P11 code deliverable — see Amendment 8 smoke-test command corrections and the current Distribution Open Item.)*
 
 Acceptance criterion #11 updated to reference the new release acceptance.
 

@@ -178,7 +178,7 @@ pub fn default_choices() -> BTreeMap<String, Choice> {
         "cli_setup_wizard_step_ordering",
         "seven-step interactive wizard via anvil setup",
         "Seven-step wizard maps well to CLI; App wizard may need restructuring.",
-        "v1.1 App design begins; validate against v1 usage feedback",
+        "v1.1 App design begins; validate against Gate 2 live usage feedback",
     );
     p(
         "cli_command_structure",

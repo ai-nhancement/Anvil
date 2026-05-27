@@ -60,10 +60,10 @@ All four phases would go through `anvil phase build → review → ship`:
 
 | Phase | Build | Reviewers | Rounds | Outcome |
 |---|---|---|---|---|
-| P0 | `anvil phase build P0` | GPT-4o, Gemini 2.5 Pro | R1 clean | Ships |
-| P1 | `anvil phase build P1` | GPT-4o, Gemini 2.5 Pro | R1: 4 findings, R2 clean | Ships |
-| P2 | `anvil phase build P2` | GPT-4o, Gemini 2.5 Pro | R1: 2 findings, R2 clean | Ships |
-| P3 | `anvil phase build P3` | GPT-4o, Gemini 2.5 Pro | R1 clean | Ships |
+| P0 | `anvil phase build P0` | GPT-4o, Gemini 2.5 Pro | R1 clean | Would ship |
+| P1 | `anvil phase build P1` | GPT-4o, Gemini 2.5 Pro | R1: 4 findings, R2 clean | Would ship |
+| P2 | `anvil phase build P2` | GPT-4o, Gemini 2.5 Pro | R1: 2 findings, R2 clean | Would ship |
+| P3 | `anvil phase build P3` | GPT-4o, Gemini 2.5 Pro | R1 clean | Would ship |
 
 P1 would require 2 rounds: GPT-4o would likely find a reminder due-date logic bug that Gemini would also flag. Both reviewers agreeing would produce a clear signal that the Coder addressed it correctly in R2.
 

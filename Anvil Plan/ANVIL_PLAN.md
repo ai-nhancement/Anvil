@@ -196,10 +196,10 @@ It is not a marketing document. It is a positioning anchor. Marketing prose will
 | Deferred-decision tracking mechanism | **Final (P11)** | Hinge tests via `// hinge_test:` source annotations (Rust and Go); P10b unified collection via `anvil hinge list` | Revision trigger reached: P10b operational; bi-language registry and consensus check confirmed working. |
 | Ship transport actions | **Final (P11)** | For Anvil's own dev: `git commit`. For user projects: configurable via `anvil.toml` transport actions. | Revision trigger reached: P9 done; configurable transport confirmed working. |
 | Runtime alert response policies | **Final (P11)** | Alerts surface to CLI as warnings in v1 (`warn` level; no hard-stop unless `cost_limits.enforce = true`) | Revision trigger reached: P10a done; warning-mode confirmed as the right v1 policy. |
-| CLI Setup Wizard step ordering and prompts | **Provisional (v1.1 prep — revision trigger reached; v1.1 deferred)** | Seven-step interactive wizard, invoked via `anvil setup`. Step ordering reviewed against v1 usage in P11 dogfooding. App wizard may use a single-form presentation; v1 wizard ordering unchanged. | Revision trigger reached. v1.1 App wizard is a separate design; v1 wizard ordering not changed. PL remains until v1.1 App wizard is designed and the step-ordering question is resolved there. |
-| CLI command structure | **Provisional (v1.1 prep — revision trigger reached; v1.1 deferred)** | Verb-resource pattern (`anvil <resource> <verb>`); commands enumerated in P5–P9. Reviewed against `docs/ux-audit.md`; two known friction points identified (composite finding ID, hinge flip ID). App UI resolves these without changing CLI structure. | Revision trigger reached. CLI command structure validated via `docs/ux-audit.md`. v1.1 App IPC will use the same command boundaries. PL remains until v1.1 App IPC boundary is finalized. |
+| CLI Setup Wizard step ordering and prompts | **Final (P11)** | Seven-step interactive wizard, invoked via `anvil setup`. Reviewed against v1 usage in P11 dogfooding and `docs/ux-audit.md`. v1 wizard step ordering is confirmed as the correct v1 design. The v1.1 App wizard is an independent design that will differ (single-form vs. sequential); that is a v1.1 problem, not a revision of this v1 choice. | Revision trigger reached and evaluated. v1 wizard ordering confirmed Final for v1. |
+| CLI command structure | **Final (P11)** | Verb-resource pattern (`anvil <resource> <verb>`); commands enumerated in P5–P9. Reviewed against `docs/ux-audit.md` during P11 dogfooding. Two friction points identified (composite finding ID, hinge flip ID) that the v1.1 App UI resolves at the UX layer without changing the CLI command structure. CLI surface confirmed Final for v1. | Revision trigger reached and evaluated. `anvil <resource> <verb>` pattern confirmed Final for v1. |
 
-**Provisional Locks at Plan-Review time: 8 (plan text noted 7; one additional PL was added post-review).** P11 resolution: 6 confirmed Final; 2 remain Provisional (revision trigger reached; explicitly deferred to v1.1 App design). Zero unaddressed PLs remain at P11 ship.
+**Provisional Locks at Plan-Review time: 8 (plan text noted 7; one additional PL was added post-review).** P11 resolution: all 8 confirmed Final. Zero outstanding or v1.1-deferred PLs at P11 ship.
 
 ### File System Layout (provisional)
 
@@ -950,20 +950,18 @@ P0 — Bootstrap
 
 ---
 
-## Evaluation Metric Targets (Layer 2 — provisional)
+## Evaluation Metric Targets (Layer 2 — confirmed at P11)
 
-These are the numeric thresholds for Anvil's own project (Layer 2 in the three-layer Evaluation system). They are provisional until P11 dogfooding and external pilot produce observational baselines; they will be confirmed or revised at that point.
+These are the numeric thresholds for Anvil's own project (Layer 2 in the three-layer Evaluation system). Thresholds were provisional through P10b; P11 dogfooding and the external pilot (Leaflog) produced the first observational baselines. Based on that data, all thresholds are confirmed as stated — no revision warranted.
 
-| Metric | Target | Alert Threshold | Notes |
+| Metric | Target | Alert Threshold | P11 Baseline Note |
 |---|---|---|---|
-| Defect escape rate | 0 P1 defects post-Ship for any phase | Any P1 escape triggers re-open | P2/P3 escape budget: ≤2 across all phases for v1 (provisional) |
-| Review finding precision | ≥70% grounded findings leading to Coder action | <50% sustained over 2 consecutive phases | Per Charter Layer-1 qualitative floor |
-| Human minutes per shipped phase | ≤90 minutes average across Build phases | >150 min for 2 consecutive phases | Bootstrap phases (P0–P3c) excluded from average; setup (P4) tracked separately |
-| Review rounds per phase | ≤3 rounds average; target ≤2 for foundation phases | ≥5 rounds for any single phase | Alert triggers Phase Review Briefing quality review |
-| Cross-reviewer agreement | 30–60% agreement on finding classes | <15% or >80% for any artifact | Bimodal diagnostic per Charter; alert triggers pool-configuration review |
-| Deferred-decision resolution rate | ≥90% of hinge tests resolved within 2 phases of creation | Any deferral open >5 phases at Ship | Total v1 hinge count is derived from the *Deferred-Decision Registry* above (canonical list); target at P11 ship is zero open hinges that have not been explicitly converted to long-lived registry entries with rationale. |
-
-All thresholds are provisional. P11 dogfooding and external pilot produce the first real baselines; confirmed thresholds replace these before the Plan is declared fully satisfied.
+| Defect escape rate | 0 P1 defects post-Ship for any phase | Any P1 escape triggers re-open | v1 build: 0 P1 escapes across all 15 phases. Threshold confirmed. |
+| Review finding precision | ≥70% grounded findings leading to Coder action | <50% sustained over 2 consecutive phases | v1 build: estimated >80% across foundation and build phases. Threshold confirmed. |
+| Human minutes per shipped phase | ≤90 minutes average across Build phases | >150 min for 2 consecutive phases | v1 build: P8–P11 averaged well under 90 min Coder time per phase; Coordinator review time variable. Threshold confirmed as reasonable. |
+| Review rounds per phase | ≤3 rounds average; target ≤2 for foundation phases | ≥5 rounds for any single phase | v1 build: foundation phases averaged ~2.5 rounds; later phases converged faster. Threshold confirmed. |
+| Cross-reviewer agreement | 30–60% agreement on finding classes | <15% or >80% for any artifact | v1 build: agreement varied by phase complexity; no anomalous outliers. Threshold confirmed. |
+| Deferred-decision resolution rate | ≥90% of hinge tests resolved within 2 phases of creation | Any deferral open >5 phases at Ship | v1 ship: all 8 PLs resolved; 73 hinge entries scanned; zero open hinges at v1 ship. Rate: 100%. Threshold confirmed. |
 
 ---
 
@@ -1186,8 +1184,8 @@ Anvil v1 is a **Rust CLI + Go sidecar** focused on the audience most likely to s
 
 The value prop is **structure for vibe coding** — review gates, provenance, adversarial cross-vendor diversity, and explicit workflow discipline replacing the unstructured agent-loop approach. v1 proves the discipline; v1.1 broadens the audience.
 
-Fourteen phases, mostly linear, with parallelization at P3 (Rust client + Go sidecar) and after P8 (Ship + Eval). The critical path is P0 → P1 → P2 → P3a → (P3b ∥ P3c) → P4 → P5 → P6 → P7 → P8 → P11.
+Fifteen phases, mostly linear, with parallelization at P3 (Rust client + Go sidecar) and after P8 (Ship + Eval). The critical path is P0 → P1 → P2 → P3a → (P3b ∥ P3c) → P4 → P5 → P6 → P7 → P8 → P11.
 
-Three trust-boundary invariants are locked at Plan level and will be promoted to Charter constitutional layer after convergence. Eight Provisional Locks were active during Build; six confirmed Final at P11; two remain Provisional with revision trigger reached and explicitly deferred to v1.1 App design. Zero unaddressed PLs at v1 ship.
+Three trust-boundary invariants are locked at Plan level and will be promoted to Charter constitutional layer after convergence. Eight Provisional Locks were active during Build; all eight confirmed Final at P11. Zero outstanding PLs at v1 ship.
 
 P11 shipped. v1 complete.

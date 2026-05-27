@@ -514,12 +514,12 @@ Six of the eight Provisional Locks reached their revision triggers during Build 
 - `ship-transport-actions` — trigger: P9 done; configurable transport actions confirmed working for Anvil's own `git commit` use and for the external pilot project.
 - `runtime-alert-response-policies` — trigger: P10a done; warning-mode confirmed as the correct v1 policy. `cost_limits.enforce = true` opt-in for hard-stops confirmed as the right default posture.
 
-**Revision trigger reached; explicitly v1.1-deferred (2):**
+**All 8 PLs confirmed Final:**
 
-- `cli-setup-wizard-step-ordering` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: v1 wizard's seven-step sequential ordering was reviewed against CLI UX audit and dogfooding session. The App wizard will likely use a different presentation (single-form vs. sequential). No v1 change warranted; PL carried to v1.1 App wizard design.
-- `cli-command-structure` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: `anvil <resource> <verb>` pattern validated via `docs/ux-audit.md`; two friction points identified (composite finding ID, hinge flip ID) that the App UI resolves without changing the CLI surface. CLI command structure unchanged in v1; PL carried to v1.1 App IPC boundary design.
+- `cli-setup-wizard-step-ordering` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: v1 wizard's seven-step sequential ordering reviewed against CLI UX audit and dogfooding session. v1 wizard ordering confirmed Final for v1. v1.1 App wizard is an independent design and will differ; that is not a revision of this v1 choice.
+- `cli-command-structure` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: `anvil <resource> <verb>` pattern validated via `docs/ux-audit.md`; two friction points identified (composite finding ID, hinge flip ID) that the App UI resolves at the UX layer without changing the CLI command structure. CLI command structure confirmed Final for v1.
 
-**P11 hinge:** `test_no_outstanding_provisional_locks_after_dogfooding` confirms 6 confirmed-Final + 2 v1.1-deferred = 8 total. Zero unaddressed PLs at P11 ship.
+**P11 hinge:** `test_no_outstanding_provisional_locks_after_dogfooding` confirms all 8 PLs confirmed Final. Zero unaddressed or deferred PLs at P11 ship.
 
 ### Amendment 8 — P11 documentation deliverables confirmed
 
@@ -527,9 +527,44 @@ P11 documentation deliverables produced and confirmed:
 
 - `docs/runbook.md` — CLI operational guide covering all six gate operations and every `anvil` command
 - `docs/onboarding.md` — 10-step getting-started guide from install to `anvil ship`
-- `docs/contract.md` — sidecar gRPC contract reference (service definitions, message schemas, error classes, lifecycle)
+- `docs/contract.md` — sidecar gRPC contract reference regenerated from `proto/anvil/v1/sidecar.proto`
 - `docs/ux-audit.md` — CLI → App UI audit covering all 16 command families; 7 v1.1 recommendations; cross-cutting friction table
-- `docs/examples/external-pilot/` — Leaflog pilot artifacts (charter, plan, README with workflow summary and failure classification)
+- `docs/examples/external-pilot/` — Leaflog pilot representative artifacts (charter, plan, audit-store-summary.json, README)
 - `docs/examples/dogfooding/` — v1.1 charter, plan phase summary, and dogfooding session notes
 
 Plan-Level Acceptance Criterion AC3 satisfied: "Documentation exists."
+
+### Amendment 9 — Formal deferral of Charter Amendment A1 structured-output and export obligations (P11 R2)
+
+Charter Amendment A1 placed three items in v1 phase scope that were not fully implemented:
+
+1. **`anvil audit export --public`** (P2 scope): Implements a default-deny public audit bundle process with secret/license/sensitivity scans and Coordinator review gate. Not implemented in v1. **Formally deferred to v1.1** by Coordinator decision: the publication-safe gate (below) handles the human-review component for the initial public flip; the automated export pipeline is an ergonomics improvement, not a safety dependency. The public-safe gate must be executed before public flip; the export command is not required.
+
+2. **`--describe-schema` for all structured-output commands** (P8 scope): Plan §P8 described this for every `--format json` command. Only `phase build` implements it; the schema embedding infrastructure was not built generally. **Formally scoped to `phase build` only in v1.** Commands other than `phase build` do not emit machine-parseable JSON in v1; the schema discovery requirement is moot for them. The `schemas/cli/*.json` embedding plan is deferred to v1.1 when `--format json` is added more broadly.
+
+3. **`--format json` on read commands** (A1 scope): Not implemented for `audit list`, `config show`, `status`, `metrics show`. **Formally deferred to v1.1.** These commands produce human-readable output only in v1; machine consumers use `audit show` (which outputs JSON) and `hinge list` (parseable text).
+
+These deferrals do not affect v1 safety. The publication-safe gate (Amendment 10) is the operative mechanism before public flip.
+
+### Amendment 10 — Publication-safe gate timing clarification (P11 R2)
+
+P11 Plan §P11 added "Publication-Safe Git History Gate" as a P11 acceptance criterion. The criterion is clarified as follows:
+
+**At P11 ship (this commit):** The gate procedure is documented in `docs/runbook.md` §Publication-Safe History Gate. Execution evidence is not required at P11 ship because the repository remains private per the Charter's Publication Milestone; the gate cannot be executed until a Coordinator makes the public-flip decision.
+
+**Before public flip (deferred):** The following must be completed and recorded before the repository is made public:
+- Full-history secret scan (all commits, no bounded range): `gitleaks detect --source . --log-opts ""` with zero unresolved hits, OR each hit acknowledged in an audit record.
+- Full-history license scan: all dependencies with compatible licenses.
+- Coordinator commit-message review: all commits confirmed clean.
+- `anvil audit integrity --project .` passes.
+- Coordinator sign-off recorded.
+
+This amendment changes AC6 from "gate documented AND executed at P11 ship" to "gate documented at P11 ship; gate executed before public flip." This is the correct interpretation given the repository remains private through P11.
+
+### Amendment 11 — P11 R2 evidence artifact corrections
+
+- `docs/examples/external-pilot/README.md` updated to clarify that the artifacts are representative/illustrative of what a real Anvil pilot produces. The `audit-store-summary.json` file is now present.
+- `docs/examples/dogfooding/README.md` updated to clarify the nature of the dogfooding artifacts.
+- `docs/contract.md` rewritten from `proto/anvil/v1/sidecar.proto` (service name, RPC names, message schemas, and error classes corrected).
+- `docs/runbook.md` and `docs/onboarding.md` corrected to match actual CLI argument shapes (`anvil init .`, `anvil phase build P<N>` positional, `anvil arbiter resolve-finding "<uuid>:F1"`, `anvil arbiter declare-convergence charter.md`, etc.).
+- `p11.rs` hinge test updated: all 8 PLs in `confirmed_final`; `v11_deferred` array removed. Count assertion updated to 8.

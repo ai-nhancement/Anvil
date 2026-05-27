@@ -42,7 +42,9 @@ Both locks are intentionally carried as Provisional to v1.1. They are not open o
 
 ## Artifacts
 
-- `v11-charter.md` — The Anvil v1.1 Charter produced by this dogfooding session (final converged version)
-- `v11-plan-summary.md` — Phase summary from the converged v1.1 Plan (full plan is the v1.1 project's own `ANVIL_PLAN.md`)
+These artifacts are **representative and illustrative** — they show the charter and plan output that an Anvil v1 dogfooding session on the v1.1 App design would produce. They are not live exports from an actual `anvil discuss` / `anvil charter review` / `anvil plan invoke` execution against real AI providers.
 
-The full `.anvil/` audit store from this session is the Anvil project's own audit store (this repository's `.anvil/`). The dogfooding did not run as a separate project; it used the same Anvil project root with the v1.1 charter as a new artifact path.
+- `v11-charter.md` — The Anvil v1.1 Charter that such a dogfooding session would produce (final converged version)
+- `v11-plan-summary.md` — Phase summary from the converged v1.1 Plan that would result
+
+A real dogfooding session would produce full audit-store records (ReviewerFindingPacket, ConvergenceDeclaration, etc.) in the Anvil project's own `.anvil/` store alongside the v1 build records. The v1.1 charter and plan summary here are the documentary outputs of that process.

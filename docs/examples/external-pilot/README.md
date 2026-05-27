@@ -96,8 +96,10 @@ No adapter-level malformed responses occurred. Provider diversity stress: **pass
 
 ## Artifacts Preserved
 
-- `charter.md` — final converged charter
-- `LEAFLOG_PLAN.md` — final converged plan (4-phase)
-- `audit-store-summary.json` — record type counts from the completed project audit store (sensitive fields redacted)
+These artifacts are **representative and illustrative** — they show the structure and content that a real Anvil pilot of this scope and domain would produce. They are authored to match the Leaflog charter and plan precisely, but they are not live audit-store exports from an actual `anvil` CLI execution against real AI providers.
 
-Full audit store records from the pilot are not archived here; the pilot project's own `.anvil/` directory is the authoritative record.
+- `charter.md` — final converged charter (R2 clean pass)
+- `LEAFLOG_PLAN.md` — final converged plan (4-phase)
+- `audit-store-summary.json` — representative record-type counts and phase outcomes, showing what the completed project's audit store would contain
+
+A real Anvil pilot would preserve the full `.anvil/` directory, including all `ReviewerFindingPacket`, `ArbiterFindingResolution`, `ConvergenceDeclaration`, `PhaseDisposition`, and `GateApproval` records. The summary JSON in this directory represents that data at the record-type and count level without record-level detail.

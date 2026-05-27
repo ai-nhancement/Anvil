@@ -37,17 +37,17 @@ anvil-sidecar --version
 
 ```sh
 mkdir my-project && cd my-project
-anvil init
+anvil init .
 ```
 
-This creates `.anvil/` with the project structure. The directory is safe to inspect; do not edit files inside `.anvil/audit-store/` by hand.
+The path argument is required. Use `.` to initialize in the current directory. This creates `.anvil/` with the project structure. The directory is safe to inspect; do not edit files inside `.anvil/audit-store/` by hand.
 
 ---
 
 ## Step 3 — Run Setup
 
 ```sh
-anvil setup
+anvil setup .
 ```
 
 The interactive wizard asks for:
@@ -62,12 +62,13 @@ The interactive wizard asks for:
 
 After the wizard, `anvil.toml` is written and your credentials are stored encrypted in the OS keychain.
 
-**Headless alternative (CI/scripted use):**
+For CI and scripted environments, supply API keys via environment variables — the sidecar reads them automatically when no keychain entry is present:
+
 ```sh
 ANVIL_API_KEY_ANTHROPIC=<key> \
 ANVIL_API_KEY_OPENAI=<key> \
 ANVIL_API_KEY_GOOGLE=<key> \
-anvil setup --headless
+anvil charter review --project .
 ```
 
 ---
@@ -116,19 +117,27 @@ anvil charter findings --project .
 
 ## Step 6 — Curate Findings
 
-For each finding, decide whether to keep it (and fix the charter) or drop it (with reasoning):
+For each finding, decide whether to keep it (and fix the charter) or drop it (with reasoning).
 
+First, get the packet UUID:
 ```sh
-# Keep a finding and note why
-anvil arbiter resolve-finding --packet-id <id> --finding-id F1 \
-    --disposition keep --reason "Valid concern about scope" --project .
-
-# Drop a finding with reasoning
-anvil arbiter resolve-finding --packet-id <id> --finding-id F2 \
-    --disposition drop --reason "Refuted: the charter already covers this in §3" --project .
+anvil audit list reviewer-finding-packet --project .
 ```
 
-Fix the charter to address kept findings, then run `anvil charter review` again for the next round.
+Then resolve each finding using the composite `<packet-uuid>:<finding-id>` form:
+```sh
+# Resolve a finding (keep, drop, or annotate — record your reasoning)
+anvil arbiter resolve-finding "<packet-uuid>:F1" \
+    --reason "Valid concern about scope — will revise §2" \
+    --project .
+
+anvil arbiter resolve-finding "<packet-uuid>:F2" \
+    --reason "Refuted: the charter already covers this in §3" \
+    --chosen-direction "drop" \
+    --project .
+```
+
+Fix the charter to address kept findings, then run `anvil charter review --project .` again for the next round.
 
 ---
 
@@ -137,12 +146,12 @@ Fix the charter to address kept findings, then run `anvil charter review` again 
 When reviewers produce a clean pass (no P1/P2 findings remain), declare convergence:
 
 ```sh
-anvil arbiter declare-convergence \
-    --phase-id charter-R<N> \
-    --round-count <N> \
+anvil arbiter declare-convergence charter.md \
     --reason "Full-pool clean on R3." \
     --project .
 ```
+
+The first argument is the artifact name (e.g. `charter.md`). Round count is computed automatically from audit records.
 
 ---
 
@@ -154,23 +163,23 @@ After charter convergence, generate the project plan:
 anvil plan invoke --project .
 ```
 
-The plan AI generates a phased implementation plan based on your charter. Review, curate, and iterate the same way you did with the charter, using `anvil plan review` and `anvil plan findings`.
+The plan AI generates a phased implementation plan based on your charter. Review, curate, and iterate the same way you did with the charter, using `anvil plan review --project .` and `anvil plan findings --project .`.
 
 ---
 
 ## Step 9 — Build Stage
 
-For each phase:
+For each phase (phase ID is a positional argument, not a flag):
 
 ```sh
 # Build it (the Coder implements the phase)
-anvil phase build --phase-id P0 --project .
+anvil phase build P0 --project .
 
 # Review it
-anvil phase review --phase-id P0 --project .
+anvil phase review P0 --project .
 
 # Ship it when all findings addressed
-anvil phase ship --phase-id P0 --project .
+anvil phase ship P0 --project .
 ```
 
 ---
@@ -188,7 +197,7 @@ The ship gate checks:
 - No unresolved rollbacks
 - Hinge consensus passes (`anvil hinge list --strict`)
 
-If the gate passes, the configured transport actions run (e.g., `git push`, release upload).
+If the gate passes, the configured transport actions run (e.g., `git commit`, release upload).
 
 ---
 
@@ -196,11 +205,11 @@ If the gate passes, the configured transport actions run (e.g., `git push`, rele
 
 **Audit store** — every decision is recorded as an immutable append-only audit record in `.anvil/audit-store/`. Never edit these files.
 
-**Hinge tests** — `// hinge_test: pins=X, intended=Y, phase=Z` comments in your test files track deferred decisions. Use `anvil hinge list` to see them.
+**Hinge tests** — `// hinge_test: pins=X, intended=Y, phase=Z` comments in your test files track deferred decisions. Use `anvil hinge list --project .` to see them.
 
 **Reviewer diversity** — your reviewer pool must have at least two distinct AI model families, neither being Claude (the Coder). This adversarial diversity catches blind spots.
 
-**Provisional Locks** — design decisions captured during setup with explicit revision triggers. Use `anvil audit list --type ProvisionalLock` to see them.
+**Provisional Locks** — design decisions captured during setup with explicit revision triggers. Use `anvil audit list provisional-lock --project .` to see them.
 
 **Rotation** — if no reviewer produces a clean pass by round 5, P2/P3 findings become advisory (non-blocking). Round 6+ are advisory by default.
 

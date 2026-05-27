@@ -96,8 +96,9 @@ mod tests {
         }
 
         // Reverse check: every Plan-table slug must appear in the hard-coded list.
-        // Together with the forward check and the count assertion, this is a full
-        // bidirectional synchronization — neither side can add a slug without the other.
+        // Together with the forward check and the count assertion, this is a runtime
+        // bidirectional synchronization (enforced at `cargo test` time) — neither side
+        // can add a slug without the other, but divergence is only caught when tests run.
         for slug in &plan_slugs {
             assert!(
                 confirmed_final.contains(&slug.as_str()),

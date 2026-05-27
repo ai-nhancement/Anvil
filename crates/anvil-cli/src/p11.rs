@@ -43,10 +43,12 @@ mod tests {
 
         // Each Required Choices table row for a Final-at-P11 PL looks like:
         //   | Choice text (`slug`) | **Final (P11)** | ...
+        // Bold markers are stripped before matching so minor formatting changes
+        // (e.g. "**Final** (P11)" vs "**Final (P11)**") do not silently break extraction.
         // Split by | to get the Choice column, then extract the backtick-enclosed slug.
         let plan_slugs: Vec<String> = plan_doc
             .lines()
-            .filter(|line| line.contains("**Final (P11)**"))
+            .filter(|line| line.replace("**", "").contains("Final (P11)"))
             .filter_map(|line| {
                 let cols: Vec<&str> = line.split('|').collect();
                 cols.get(1).and_then(|col| {
@@ -66,11 +68,23 @@ mod tests {
             confirmed_final.len()
         );
 
+        // Forward check: every hard-coded slug must appear in the Plan table.
         for slug in confirmed_final {
             assert!(
                 plan_slugs.iter().any(|s| s == slug),
                 "slug '{slug}' is in this list but not in ANVIL_PLAN.md Required Choices table; \
                  update the Plan table or remove this slug"
+            );
+        }
+
+        // Reverse check: every Plan-table slug must appear in the hard-coded list.
+        // Together with the forward check and the count assertion, this is a full
+        // bidirectional synchronization — neither side can add a slug without the other.
+        for slug in &plan_slugs {
+            assert!(
+                confirmed_final.contains(&slug.as_str()),
+                "slug '{slug}' is in ANVIL_PLAN.md Required Choices table but not in this list; \
+                 add it here or update the Plan table"
             );
         }
     }

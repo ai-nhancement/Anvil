@@ -496,3 +496,40 @@ Pre-R2 `HingeFlip` records written to an audit store before the `reasoning` fiel
 `consensus_violations()` previously detected duplicates only among source-scanned entries (Rust and Go). Alternative-mechanism entries from `.anvil/hinge-alternatives.toml` were excluded, leaving the possibility of alternative-vs-source collisions or duplicate alternatives.
 
 **Resolution:** `consensus_violations()` now also checks alternatives for internal duplicates and for collisions with source-scanned entries. All three namespaces (Rust, Go, alternatives) are validated as globally unique within `intended`.
+
+---
+
+## P11 Plan Amendments (2026-05-27)
+
+### Amendment 7 — Provisional Lock resolutions at P11 ship
+
+Six of the eight Provisional Locks reached their revision triggers during Build and are confirmed Final at P11. Two reached their v1.1 prep revision trigger during P11 dogfooding and are explicitly deferred to v1.1 App design (not unaddressed — revision trigger reached and evaluated; no v1 change warranted).
+
+**Confirmed Final (6):**
+
+- `plan-consolidation-triggers` — trigger: P7 done; phase-boundary trigger mechanism confirmed correct across all 15 phases. No revision.
+- `per-metric-numeric-thresholds` — trigger: first three Build phases + P10a baselines; thresholds confirmed against observational data from P10a metrics infrastructure.
+- `file-system-layout` — trigger: P0 done; layout confirmed across P0–P11 without structural issues. No revision.
+- `deferred-decision-tracking` — trigger: P10b done; bi-language `// hinge_test:` scanner with `anvil hinge list` confirmed as the operational registry. No revision.
+- `ship-transport-actions` — trigger: P9 done; configurable transport actions confirmed working for Anvil's own `git commit` use and for the external pilot project.
+- `runtime-alert-response-policies` — trigger: P10a done; warning-mode confirmed as the correct v1 policy. `cost_limits.enforce = true` opt-in for hard-stops confirmed as the right default posture.
+
+**Revision trigger reached; explicitly v1.1-deferred (2):**
+
+- `cli-setup-wizard-step-ordering` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: v1 wizard's seven-step sequential ordering was reviewed against CLI UX audit and dogfooding session. The App wizard will likely use a different presentation (single-form vs. sequential). No v1 change warranted; PL carried to v1.1 App wizard design.
+- `cli-command-structure` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: `anvil <resource> <verb>` pattern validated via `docs/ux-audit.md`; two friction points identified (composite finding ID, hinge flip ID) that the App UI resolves without changing the CLI surface. CLI command structure unchanged in v1; PL carried to v1.1 App IPC boundary design.
+
+**P11 hinge:** `test_no_outstanding_provisional_locks_after_dogfooding` confirms 6 confirmed-Final + 2 v1.1-deferred = 8 total. Zero unaddressed PLs at P11 ship.
+
+### Amendment 8 — P11 documentation deliverables confirmed
+
+P11 documentation deliverables produced and confirmed:
+
+- `docs/runbook.md` — CLI operational guide covering all six gate operations and every `anvil` command
+- `docs/onboarding.md` — 10-step getting-started guide from install to `anvil ship`
+- `docs/contract.md` — sidecar gRPC contract reference (service definitions, message schemas, error classes, lifecycle)
+- `docs/ux-audit.md` — CLI → App UI audit covering all 16 command families; 7 v1.1 recommendations; cross-cutting friction table
+- `docs/examples/external-pilot/` — Leaflog pilot artifacts (charter, plan, README with workflow summary and failure classification)
+- `docs/examples/dogfooding/` — v1.1 charter, plan phase summary, and dogfooding session notes
+
+Plan-Level Acceptance Criterion AC3 satisfied: "Documentation exists."

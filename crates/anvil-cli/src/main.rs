@@ -4,6 +4,8 @@ mod discuss;
 mod graph;
 mod hinge;
 mod metrics;
+#[cfg(test)]
+mod p11;
 mod phase;
 mod plan;
 mod session;

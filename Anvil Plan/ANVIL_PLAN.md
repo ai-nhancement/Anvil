@@ -190,16 +190,16 @@ It is not a marketing document. It is a positioning anchor. Marketing prose will
 | v1 deliverable form | Final | **CLI (primary v1 surface).** App is scoped to v1.1; v1 architecture is designed to make the v1.1 App addition non-disruptive (Vault as library, file-system locking in v1, IPC-ready command API). | n/a |
 | Implementation language | Final | **Rust core (Vault) + Go sidecar.** Rust ≥1.80, Go ≥1.22. v1.1 will add Tauri + React + TypeScript for the App; v1 does not include any frontend tooling. | n/a |
 | **Sidecar lifecycle** | **Final** | **Workspace-scoped daemon, CLI-managed.** The `anvil` CLI spawns `anvil-sidecar` as a background process on first invocation that requires model access. The sidecar writes its PID and bound port to `.anvil/run/sidecar.pid` and `.anvil/run/sidecar.port`. Subsequent CLI invocations read those files, probe the `Health` RPC, and restart the daemon if it is not responding. The sidecar auto-exits after a configurable idle timeout (default: 30 minutes; `sidecar.idle_timeout_secs` in `anvil.toml`). Logs go to `.anvil/logs/sidecar.log`; `--verbose` mode passes sidecar stderr to the terminal. Port is a random available loopback port. Binary location: `$PATH` or `sidecar.binary_path` in `anvil.toml`. `anvil sidecar status` and `anvil sidecar stop` provide explicit management. The spawn logic lives in `anvil-core` (not in CLI-specific code) so the v1.1 App can reuse it without rework. | n/a |
-| Plan Consolidation triggers | Provisional | Phase boundary trigger | End of P7 (first Build-stage phase) |
-| Per-metric numeric thresholds | Provisional | See *Evaluation Metric Targets* | First three Build phases ship and produce baseline |
-| File system layout | Provisional | See *File System Layout* sub-section below | P0 scaffolds the actual tree; revisit if layout proves awkward |
-| Deferred-decision tracking mechanism | Provisional | Hinge tests via `cargo test` (Rust) and `go test` (Go); P10 unifies collection | P10 stands up the registry |
-| Ship transport actions | Provisional | For Anvil's own dev: `git commit`. For user projects: configurable. | P9 (Ship + Rollback) |
-| Runtime alert response policies | Provisional | Alerts surface to CLI as warnings in v1 | P10 (Evaluation infrastructure) |
-| CLI Setup Wizard step ordering and prompts | **Provisional (v1.1 prep)** | Seven-step interactive wizard, invoked via `anvil setup` (distinct from `anvil init`; see P4 and *App-Compatibility Design Decisions*). | v1.1 App design begins; validate against v1 usage feedback before App wizard is implemented |
-| CLI command structure | **Provisional (v1.1 prep)** | Verb-resource pattern (`anvil <resource> <verb>`); commands enumerated in P5–P9 | v1.1 App design begins; validate that command structure maps cleanly to App view structure |
+| Plan Consolidation triggers | **Final (P11)** | Phase boundary trigger | Revision trigger reached: P7 done. No structural issues found; trigger mechanism confirmed correct. |
+| Per-metric numeric thresholds | **Final (P11)** | See *Evaluation Metric Targets* | Revision trigger reached: first three Build phases shipped; baselines established from P10a data. Thresholds confirmed. |
+| File system layout | **Final (P11)** | See *File System Layout* sub-section below | Revision trigger reached: P0 scaffolded the actual tree; no structural issues found across all 15 phases. Layout confirmed. |
+| Deferred-decision tracking mechanism | **Final (P11)** | Hinge tests via `// hinge_test:` source annotations (Rust and Go); P10b unified collection via `anvil hinge list` | Revision trigger reached: P10b operational; bi-language registry and consensus check confirmed working. |
+| Ship transport actions | **Final (P11)** | For Anvil's own dev: `git commit`. For user projects: configurable via `anvil.toml` transport actions. | Revision trigger reached: P9 done; configurable transport confirmed working. |
+| Runtime alert response policies | **Final (P11)** | Alerts surface to CLI as warnings in v1 (`warn` level; no hard-stop unless `cost_limits.enforce = true`) | Revision trigger reached: P10a done; warning-mode confirmed as the right v1 policy. |
+| CLI Setup Wizard step ordering and prompts | **Provisional (v1.1 prep — revision trigger reached; v1.1 deferred)** | Seven-step interactive wizard, invoked via `anvil setup`. Step ordering reviewed against v1 usage in P11 dogfooding. App wizard may use a single-form presentation; v1 wizard ordering unchanged. | Revision trigger reached. v1.1 App wizard is a separate design; v1 wizard ordering not changed. PL remains until v1.1 App wizard is designed and the step-ordering question is resolved there. |
+| CLI command structure | **Provisional (v1.1 prep — revision trigger reached; v1.1 deferred)** | Verb-resource pattern (`anvil <resource> <verb>`); commands enumerated in P5–P9. Reviewed against `docs/ux-audit.md`; two known friction points identified (composite finding ID, hinge flip ID). App UI resolves these without changing CLI structure. | Revision trigger reached. CLI command structure validated via `docs/ux-audit.md`. v1.1 App IPC will use the same command boundaries. PL remains until v1.1 App IPC boundary is finalized. |
 
-**Provisional Locks outstanding at Plan-Review time: 7.** Two carry "v1.1 App design begins" as their revision trigger.
+**Provisional Locks at Plan-Review time: 8 (plan text noted 7; one additional PL was added post-review).** P11 resolution: 6 confirmed Final; 2 remain Provisional (revision trigger reached; explicitly deferred to v1.1 App design). Zero unaddressed PLs remain at P11 ship.
 
 ### File System Layout (provisional)
 
@@ -1188,6 +1188,6 @@ The value prop is **structure for vibe coding** — review gates, provenance, ad
 
 Fourteen phases, mostly linear, with parallelization at P3 (Rust client + Go sidecar) and after P8 (Ship + Eval). The critical path is P0 → P1 → P2 → P3a → (P3b ∥ P3c) → P4 → P5 → P6 → P7 → P8 → P11.
 
-Three trust-boundary invariants are locked at Plan level and will be promoted to Charter constitutional layer after convergence. Seven Provisional Locks remain outstanding; two carry explicit "v1.1 App design begins" revision triggers.
+Three trust-boundary invariants are locked at Plan level and will be promoted to Charter constitutional layer after convergence. Eight Provisional Locks were active during Build; six confirmed Final at P11; two remain Provisional with revision trigger reached and explicitly deferred to v1.1 App design. Zero unaddressed PLs at v1 ship.
 
-Next step: Plan Review convergence. Draft 5 represents R1 findings applied.
+P11 shipped. v1 complete.

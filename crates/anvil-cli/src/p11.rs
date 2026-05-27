@@ -1,4 +1,4 @@
-// P11 — Dogfooding and Documentation phase hinge test.
+// P11 — Dogfooding and Documentation phase hinge tests.
 
 #[cfg(test)]
 mod tests {
@@ -6,12 +6,12 @@ mod tests {
     #[test]
     fn test_no_outstanding_provisional_locks_after_dogfooding() {
         // Pins: after P11 dogfooding all 8 Provisional Locks are confirmed Final.
-        // The two v1.1-prep locks reached their revision trigger during P11 and were
-        // evaluated: v1 CLI wizard ordering and command structure are confirmed as the
-        // correct v1 choices; v1.1 App design will produce its own design independently.
-        // "Final" here means the v1 decision is locked — not that v1.1 cannot change it.
-        // Flipping requires a new PL added without resolution OR a confirmed-Final PL
-        // being reopened with a new audit record.
+        // The strings below are the canonical choice_key slugs from the Required Choices
+        // table in ANVIL_PLAN.md; each slug appears in parentheses in that table's
+        // "Choice" column. This test is a naming-convention and count assertion — it
+        // enforces that someone deliberately edits this list whenever a PL is added,
+        // reopened, or re-keyed. It does not read the Plan or audit store at runtime.
+        // "Final" means the v1 decision is locked; v1.1 may independently differ.
         let confirmed_final: &[&str] = &[
             "plan-consolidation-triggers",     // trigger: P7 done
             "per-metric-numeric-thresholds",   // trigger: P10a done, baselines established
@@ -19,8 +19,8 @@ mod tests {
             "deferred-decision-tracking",      // trigger: P10b done, hinge registry operational
             "ship-transport-actions",          // trigger: P9 done, configurable transport works
             "runtime-alert-response-policies", // trigger: P10a done, warning-mode confirmed
-            "cli-setup-wizard-step-ordering",  // trigger: v1.1 prep; v1 wizard confirmed Final
-            "cli-command-structure", // trigger: v1.1 prep; v1 command structure confirmed Final
+            "cli-setup-wizard-step-ordering",  // v1.1-prep trigger reached; v1 wizard Final
+            "cli-command-structure",           // v1.1-prep trigger reached; v1 surface Final
         ];
 
         assert_eq!(
@@ -28,5 +28,16 @@ mod tests {
             8,
             "all 8 Provisional Locks must be confirmed Final at P11 ship"
         );
+    }
+
+    // hinge_test: pins=manual-sync, intended=test_contract_doc_sync_method, phase=P11
+    #[test]
+    fn test_contract_doc_sync_method() {
+        // Pins: docs/contract.md is manually synced from proto/anvil/v1/sidecar.proto in v1.
+        // No automated CI check exists to detect drift between the doc and the proto.
+        // Flipping to "ci-enforced" requires adding a CI step that extracts service/RPC/
+        // message definitions from the proto or generated descriptors and fails on mismatch.
+        // That step is explicitly a v1.1 task (noted in docs/contract.md maintenance note).
+        assert_eq!("manual-sync", "manual-sync");
     }
 }

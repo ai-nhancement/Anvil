@@ -2,7 +2,10 @@
 
 **Version:** anvil.v1  
 **Protocol:** gRPC over local loopback TCP  
-**Schema:** `proto/anvil/v1/sidecar.proto`
+**Schema:** `proto/anvil/v1/sidecar.proto`  
+**Last synced:** 2026-05-27 from `proto/anvil/v1/sidecar.proto` (manual sync)
+
+> **Maintenance note:** This document is manually kept in sync with `proto/anvil/v1/sidecar.proto` and the generated Go bindings in `sidecar/internal/contract/`. There is no automated CI check for drift in v1. Before relying on this document for integration work, verify message names, field numbers, and enum values against the `.proto` directly. Automated drift detection is a v1.1 task.
 
 This document covers the sidecar RPC contract used by the Anvil Vault. It is a reference for contributors extending the CLI or writing alternative clients (including the v1.1 App).
 

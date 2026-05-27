@@ -100,6 +100,6 @@ These artifacts are **representative and illustrative** — they show the struct
 
 - `charter.md` — final converged charter (R2 clean pass)
 - `LEAFLOG_PLAN.md` — final converged plan (4-phase)
-- `audit-store-summary.json` — representative record-type counts and phase outcomes, showing what the completed project's audit store would contain
+- `audit-store-summary.EXAMPLE.json` — representative record-type counts and phase outcomes, showing what the completed project's audit store would contain (`.EXAMPLE` suffix marks the file as synthetic, not a real export)
 
 A real Anvil pilot would preserve the full `.anvil/` directory, including all `ReviewerFindingPacket`, `ArbiterFindingResolution`, `ConvergenceDeclaration`, `PhaseDisposition`, and `GateApproval` records. The summary JSON in this directory represents that data at the record-type and count level without record-level detail.

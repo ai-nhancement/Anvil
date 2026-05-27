@@ -37,7 +37,7 @@ Two Provisional Locks had `revision trigger = v1.1 App design begins`. These are
 
 **`cli-command-structure`** — The `<resource> <verb>` CLI structure was evaluated against App UI mapping. Two friction points identified in `docs/ux-audit.md`: `arbiter resolve-finding` (requires manual ID construction) and `hinge flip` (requires knowing the `intended` ID vs. function name); the App can solve both via UI-mediated selection. **Status: confirmed Final at P11 (v1 decision locked; v1.1 App addresses friction via UI-mediated selection).**
 
-Both v1 decisions are Final. See `ANVIL_PLAN.md` Required Choices table (canonical slugs: `cli-setup-wizard-step-ordering`, `cli-command-structure`) and `p11.rs` hinge test `test_no_outstanding_provisional_locks_after_dogfooding`.
+Both v1 decisions are Final. See `ANVIL_PLAN.md` Required Choices table (canonical slugs: `cli-setup-wizard-step-ordering`, `cli-command-structure`) and `p11.rs` hinge test `test_no_outstanding_provisional_locks_at_p11_gate1`.
 
 ---
 

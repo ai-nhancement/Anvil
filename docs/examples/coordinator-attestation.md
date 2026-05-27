@@ -49,7 +49,7 @@ The build process validated the following items that would constitute a real dog
 - `anvil hinge list --strict --project C:\Anvil` passes with zero consensus violations.
 
 **All 8 Provisional Locks confirmed Final:**
-- The hinge test `test_no_outstanding_provisional_locks_after_dogfooding` asserts the 8 canonical choice_key slugs match the Required Choices table. All 8 are confirmed Final in `ANVIL_PLAN.md`.
+- The hinge test `test_no_outstanding_provisional_locks_at_p11_gate1` asserts the 8 canonical choice_key slugs match the Required Choices table. All 8 are confirmed Final in `ANVIL_PLAN.md`.
 
 **UX friction points documented:**
 - `docs/ux-audit.md` documents real friction observed through the build process (composite finding IDs, blocking wait on `plan invoke`, missing progress output). These are authentic — they come from operating the CLI during the build and review rounds, not from the representative pilot.

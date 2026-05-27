@@ -519,7 +519,7 @@ Six of the eight Provisional Locks reached their revision triggers during Build 
 - `cli-setup-wizard-step-ordering` — Revision trigger: v1.1 App design begins. Trigger reached at P11 build. Evaluation: v1 wizard's seven-step sequential ordering reviewed against CLI UX audit and build observations. v1 wizard ordering confirmed Final for v1. v1.1 App wizard is an independent design and will differ; that is not a revision of this v1 choice.
 - `cli-command-structure` — Revision trigger: v1.1 App design begins. Trigger reached at P11 build. Evaluation: `anvil <resource> <verb>` pattern validated via `docs/ux-audit.md`; two friction points identified (composite finding ID, hinge flip ID) that the App UI resolves at the UX layer without changing the CLI command structure. CLI command structure confirmed Final for v1.
 
-**P11 hinge:** `test_no_outstanding_provisional_locks_after_dogfooding` confirms all 8 PLs confirmed Final. Zero unaddressed or deferred PLs at P11 ship.
+**P11 hinge:** `test_no_outstanding_provisional_locks_at_p11_gate1` confirms all 8 PLs confirmed Final. Zero unaddressed or deferred PLs at P11 ship.
 
 ### Amendment 8 — P11 documentation deliverables confirmed
 

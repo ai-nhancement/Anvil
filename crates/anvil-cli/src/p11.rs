@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    // hinge_test: pins=pl-all-resolved, intended=test_no_outstanding_provisional_locks_after_dogfooding, phase=P11
+    // hinge_test: pins=pl-all-resolved, intended=test_no_outstanding_provisional_locks_at_p11_gate1, phase=P11
     #[test]
-    fn test_no_outstanding_provisional_locks_after_dogfooding() {
+    fn test_no_outstanding_provisional_locks_at_p11_gate1() {
         // The strings below are the canonical choice_key slugs from the Required Choices
         // table in ANVIL_PLAN.md; each slug appears in parentheses in that table's
         // "Choice" column. This list is a deliberate governance artifact: any addition,
@@ -66,7 +66,7 @@ mod tests {
         let plan_slugs: Vec<String> = lines[section_start..section_end]
             .iter()
             .copied()
-            .filter(|line| line.replace("**", "").contains("Final (P11)"))
+            .filter(|line| line.trim().replace("**", "").contains("Final (P11)"))
             .filter_map(|line| {
                 let cols: Vec<&str> = line.trim().split('|').collect();
                 cols.get(1).and_then(|col| {

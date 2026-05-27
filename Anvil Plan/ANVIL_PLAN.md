@@ -820,7 +820,7 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
     - *Failure-class triage:* failures during the pilot are classified before they affect v1 satisfaction. **Pilot-blocking** (must fix before v1 ships): the workflow cannot complete a phase, the audit store loses integrity, the diversity floor is bypassed, the Cross-Reference Integrity check produces false positives or false negatives, *provider-diversity stress fails (e.g., one provider's adapter produces consistently malformed responses that the contract should have caught but didn't)*. **Pilot-informing but not blocking** (logged as v1.x issues): UX friction, suboptimal phrasing in CLI output, missing-but-not-critical commands, performance below targets.
   - The pilot's artifacts (Charter, Plan, dispositions, hardening history, audit-store records) are preserved as a *worked example* in `docs/examples/external-pilot/` for future users. Sensitive parts (if any) are redacted; the workflow itself is left visible.
   - **CLI UX audit:** *(completed)* Each `anvil <resource> <verb>` command walked through and mapped to an equivalent App UI action. Patterns that would not map cleanly flagged. Output stored as `docs/ux-audit.md`; served as the primary input to the two v1.1-prep Provisional Lock evaluations (`cli-setup-wizard-step-ordering` and `cli-command-structure`).
-  - **Provisional Lock resolution:** *(completed)* All 8 PLs confirmed Final at P11. The two v1.1-prep locks (`cli-setup-wizard-step-ordering`, `cli-command-structure`) were evaluated against the CLI UX audit output and actual v1 usage and confirmed Final. See Required Choices table and Amendment 7 in `PLAN_HARDENING_HISTORY.md`.
+  - **Provisional Lock resolution:** *(completed)* All 8 PLs confirmed Final at P11. The two v1.1-prep locks (`cli-setup-wizard-step-ordering`, `cli-command-structure`) were evaluated against the CLI UX audit output and build observations and confirmed Final. See Required Choices table and Amendment 7 in `PLAN_HARDENING_HISTORY.md`.
   - Write `docs/runbook.md`: CLI operational guide covering all six gate operations.
   - Write `docs/onboarding.md`: getting-started for a new user.
   - Write `docs/contract.md`: sidecar contract documentation.
@@ -837,8 +837,8 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
   4. Release archive produced for the primary platform (Windows x64) with `SHA256SUMS.txt` + signed `SHA256SUMS.txt.asc`; smoke-test script (written at release time, not a P11 deliverable) passes against the release candidate. *(Deferred — release-time)*
 - **Dependencies.** All prior phases.
 - **Hinge-test list.**
-  - `test_no_outstanding_provisional_locks_after_dogfooding`
-- **Evaluation-metric impact.** Deferred-decision resolution rate: all Provisional Locks resolved; rate reaches 100% for v1 hinge tests. Baseline values for all six metrics established from v1 usage; used to validate or revise Layer-2 numeric targets (see *Evaluation Metric Targets*).
+  - `test_no_outstanding_provisional_locks_at_p11_gate1`
+- **Evaluation-metric impact.** Deferred-decision resolution rate: all Provisional Locks resolved; rate reaches 100% for v1 hinge tests. Baseline values for all six metrics will be established from Gate 2 live usage; used to validate or revise Layer-2 numeric targets (see *Evaluation Metric Targets*).
 - **Estimated rounds-to-convergence.** 3.
 
 ---
@@ -941,7 +941,7 @@ P0 — Bootstrap
 | `test_hinge_decorator_metadata_required` | Rust | P10b |
 | `test_hinge_comment_metadata_required` | Go | P10b |
 | `test_bi_language_registry_merge` | Rust | P10b |
-| `test_no_outstanding_provisional_locks_after_dogfooding` | Rust | P11 |
+| `test_no_outstanding_provisional_locks_at_p11_gate1` | Rust | P11 |
 | `test_contract_doc_sync_method` | Rust | P11 |
 
 **Named hinges above:** the table lists hinges explicitly named in the Plan for cross-referencing. The full hinge registry (74 annotations as of v1 ship) is the canonical source; it lives in source via `// hinge_test:` comment annotations and is queried by `anvil hinge list --count --project <dir>`. The Plan table is a named subset — a governance act, not an exhaustive list. Adding or removing a row here is a deliberate cross-reference decision. Run `anvil hinge list` for the authoritative count.
@@ -1029,6 +1029,8 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 - **Provider adapter expansion roadmap.** v1 ships three direct-API adapters (Anthropic, OpenAI, Google AI Studio) — the minimum set required to satisfy the family-floor invariant with Claude as Coder. The architecture supports cloud-hosted variants (Azure OpenAI, AWS Bedrock, Google Vertex AI) and additional direct APIs (xAI) as additive adapters that do not modify Vault, contract, or existing adapters. Gateways (DigitalOcean Gradient, OpenRouter) are likewise additive. Which adapters ship in v1.1 vs. later will be informed by live Gate 2 dogfooding and pilot evidence on users' actual provider preferences. The family-floor invariant is unaffected by adapter expansion because it operates on model identity, not on access path. Status: open, prioritization deferred to Gate 2 evidence.
 
 - **External pilot project selection.** Leaflog (a structured changelog and release-notes CLI) selected as the Gate 1 representative pilot scenario and documented in `docs/examples/external-pilot/`. Live execution of the full cycle is deferred to Gate 2. Status: Leaflog selected (Gate 1 complete); live execution deferred to Gate 2.
+
+- **Release-time smoke-test script (Gate 2 AC4).** A smoke-test script covering the primary `anvil` binary commands must be written at release time and must pass against the release candidate. Script scope: v1 binary surface only (install, `anvil init`, `anvil hinge list`, `anvil phase build`, `anvil phase ship`, `anvil ship`); not a P11 deliverable. Status: deferred to Gate 2 / release engineering.
 
 (Two prior Open Items — *Checkpoint/resume for long sidecar streams* and *Global sidecar sharing across workspaces* — were promoted in R5 to the new *v1.1 Design Seeds* appendix below, where they are documented as forward design work with explicit constraints rather than vague post-v1 notes.)
 

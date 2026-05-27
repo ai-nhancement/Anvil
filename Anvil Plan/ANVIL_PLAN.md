@@ -1030,7 +1030,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **External pilot project selection.** Leaflog (a houseplant watering journal CLI) selected as the Gate 1 representative pilot scenario and documented in `docs/examples/external-pilot/`. Live execution of the full cycle is deferred to Gate 2. Status: Leaflog selected (Gate 1 complete); live execution deferred to Gate 2.
 
-- **Release-time smoke-test script (Gate 2 AC4).** A smoke-test script must be written at release time and must pass against the release candidate before Gate 2 AC4 is satisfied. The authoritative scope is the Distribution section's *Smoke tests* bullet: core commands are extract archive, `anvil --version`, `anvil-sidecar --version`, `anvil init <tmp-dir>`, `anvil hinge list --count --project <tmp-dir>`, verify `anvil.toml` created by init; the script must also verify unsigned-binary warning text per OS (Windows SmartScreen, macOS Gatekeeper). The Windows-specific daemon robustness scenarios (logoff, sleep, fast-user-switching, AV quarantine, ungraceful terminal close) are first-week-support tests listed separately in the Distribution section and are not part of the release-archive smoke script. Not a P11 code deliverable. Status: deferred to Gate 2 / release engineering.
+- **Release-time smoke-test script (Gate 2 AC4).** A smoke-test script must be written at release time and must pass against the release candidate before Gate 2 AC4 is satisfied. The authoritative scope is the Distribution section's *Smoke tests* bullet: core commands are extract archive, `anvil --version`, `anvil-sidecar --version`, `anvil init <tmp-dir>`, `anvil hinge list --count --project <tmp-dir>`, verify `anvil.toml` created by init; the script must also verify unsigned-binary warning text per OS (Windows SmartScreen, macOS Gatekeeper, Linux distribution-specific warnings when Linux stretch artifacts are produced). The Windows-specific daemon robustness scenarios (logoff, sleep, fast-user-switching, AV quarantine, ungraceful terminal close) are first-week-support tests listed separately in the Distribution section and are not part of the release-archive smoke script. Not a P11 code deliverable. Status: deferred to Gate 2 / release engineering.
 
 (Two prior Open Items — *Checkpoint/resume for long sidecar streams* and *Global sidecar sharing across workspaces* — were promoted in R5 to the new *v1.1 Design Seeds* appendix below, where they are documented as forward design work with explicit constraints rather than vague post-v1 notes.)
 
@@ -1051,7 +1051,7 @@ This appendix collects items that are explicitly *not* v1 scope but are anticipa
 - The preserved partial state must be auditable — the audit-store carries a `PartialStreamCheckpoint` record (proposed name) that names what was preserved, what the structural-soundness check was, and what the resume request will request *next* (not a re-do).
 - Resume is not "retry from token N" — it is "given this preserved prefix, generate the remaining portion under a fresh idempotency key." This keeps the contract surface clean.
 
-**v1 data points that will inform v1.1.** P11 must record observed mid-stream error rates on Charter/Plan rendering invocations, the typical token-position distribution of those errors, and the user-visible cost (wall-clock seconds wasted, re-invocation token count). If the rate is rare and the cost is small, the seed may not need v1.1 implementation. If the rate is common (e.g., >5% of long renders), v1.1 design begins.
+**v1 data points that will inform v1.1.** Gate 2 live usage observations should include mid-stream error rates on Charter/Plan rendering invocations, the typical token-position distribution of those errors, and the user-visible cost (wall-clock seconds wasted, re-invocation token count). These are not Gate 2 blockers; they are design-input guidance for v1.1. If the rate is rare and the cost is small, the seed may not need v1.1 implementation. If the rate is common (e.g., >5% of long renders), v1.1 design begins.
 
 ### Seed 2: Global sidecar sharing across workspaces
 
@@ -1064,7 +1064,7 @@ This appendix collects items that are explicitly *not* v1 scope but are anticipa
 - Per-workspace audit trail. Any record the shared daemon produces must be attributable to a specific workspace via the `provider_connection_id` or equivalent cross-reference.
 - Backward-compatibility. v1 workspaces (workspace-scoped daemons) must continue to work alongside v1.1's shared-daemon mode. The migration must be opt-in, not forced.
 
-**v1 data points that will inform v1.1.** P11 must record the actual multi-workspace usage patterns of the Coordinator's own development: how many workspaces are active simultaneously, what the daemon resource cost is (memory + connection count), how often the stale-daemon sweep cleans entries. If multi-workspace operation is rare, the seed may stay as a seed indefinitely. If common, v1.1 design begins.
+**v1 data points that will inform v1.1.** Gate 2 live usage observations should capture actual multi-workspace usage patterns: how many workspaces are active simultaneously, what the daemon resource cost is (memory + connection count), how often the stale-daemon sweep cleans entries. These are not Gate 2 blockers; they are design-input guidance for v1.1. If multi-workspace operation is rare, the seed may stay as a seed indefinitely. If common, v1.1 design begins.
 
 ### Seed 3: Cryptographic tamper-proofing of audit store (from R3)
 
@@ -1088,7 +1088,7 @@ This appendix collects items that are explicitly *not* v1 scope but are anticipa
 - The threat model must be explicitly documented (what it defends against; what it does not).
 - The env-var-only mode remains the floor for users who decline the file-based option.
 
-**v1 data points that will inform v1.1.** P11 and post-v1 user feedback on how many users actually hit the no-keychain case, and how many of those find the env-var floor too friction-heavy. If the case is rare, the seed stays seeded.
+**v1 data points that will inform v1.1.** Gate 2 and post-v1 user feedback on how many users actually hit the no-keychain case, and how many of those find the env-var floor too friction-heavy. This is not a Gate 2 blocker; it is design-input guidance for v1.1. If the case is rare, the seed stays seeded.
 
 ### Seed 5: Hard-stop cost-limit policy evolution
 

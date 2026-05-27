@@ -5,13 +5,12 @@ mod tests {
     // hinge_test: pins=pl-all-resolved, intended=test_no_outstanding_provisional_locks_after_dogfooding, phase=P11
     #[test]
     fn test_no_outstanding_provisional_locks_after_dogfooding() {
-        // Pins: after P11 dogfooding all 8 Provisional Locks are confirmed Final.
         // The strings below are the canonical choice_key slugs from the Required Choices
         // table in ANVIL_PLAN.md; each slug appears in parentheses in that table's
-        // "Choice" column. This test is a naming-convention and count assertion — it
-        // enforces that someone deliberately edits this list whenever a PL is added,
-        // reopened, or re-keyed. It does not read the Plan or audit store at runtime.
+        // "Choice" column. This list is a deliberate governance artifact: any addition,
+        // removal, or rename requires a code change here AND a Plan-table update.
         // "Final" means the v1 decision is locked; v1.1 may independently differ.
+        // The runtime check below verifies this list stays in sync with the Plan table.
         let confirmed_final: &[&str] = &[
             "plan-consolidation-triggers",     // trigger: P7 done
             "per-metric-numeric-thresholds",   // trigger: P10a done, baselines established
@@ -28,21 +27,110 @@ mod tests {
             8,
             "all 8 Provisional Locks must be confirmed Final at P11 ship"
         );
+
+        // Runtime verification: extract Final-at-P11 slugs from the Plan table and assert
+        // the hard-coded list matches exactly. Fails if the Plan table is updated without
+        // updating this list, or vice versa.
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap() // crates/
+            .parent()
+            .unwrap(); // workspace root
+
+        let plan_doc = std::fs::read_to_string(
+            workspace_root.join("Anvil Plan").join("ANVIL_PLAN.md"),
+        )
+        .expect("Anvil Plan/ANVIL_PLAN.md not found; check workspace layout");
+
+        // Each Required Choices table row for a Final-at-P11 PL looks like:
+        //   | Choice text (`slug`) | **Final (P11)** | ...
+        // Split by | to get the Choice column, then extract the backtick-enclosed slug.
+        let plan_slugs: Vec<String> = plan_doc
+            .lines()
+            .filter(|line| line.contains("**Final (P11)**"))
+            .filter_map(|line| {
+                let cols: Vec<&str> = line.split('|').collect();
+                cols.get(1).and_then(|col| {
+                    let mut parts = col.split('`');
+                    parts.next(); // text before first backtick
+                    parts.next().map(std::string::ToString::to_string) // the slug
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            plan_slugs.len(),
+            confirmed_final.len(),
+            "ANVIL_PLAN.md Required Choices table has {} Final-at-P11 PLs but this list has {}; \
+             update whichever is stale",
+            plan_slugs.len(),
+            confirmed_final.len()
+        );
+
+        for slug in confirmed_final {
+            assert!(
+                plan_slugs.iter().any(|s| s == slug),
+                "slug '{slug}' is in this list but not in ANVIL_PLAN.md Required Choices table; \
+                 update the Plan table or remove this slug"
+            );
+        }
     }
 
     // hinge_test: pins=manual-sync, intended=test_contract_doc_sync_method, phase=P11
     #[test]
     fn test_contract_doc_sync_method() {
         // Pins: docs/contract.md is manually synced from proto/anvil/v1/sidecar.proto in v1.
-        // No automated CI check exists to detect drift between the doc and the proto.
-        // Flipping to "ci-enforced" requires adding a CI step that extracts service/RPC/
-        // message definitions from the proto or generated descriptors and fails on mismatch.
-        // That step is explicitly a v1.1 task (noted in docs/contract.md maintenance note).
-        let contract_doc = include_str!("../../../docs/contract.md");
+        // This test verifies all RPC names defined in the proto appear in the contract doc
+        // and that the maintenance note is present. Full schema-level CI enforcement
+        // (message fields, field numbers, enum values) is explicitly a v1.1 task.
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap() // crates/
+            .parent()
+            .unwrap(); // workspace root
+
+        let contract_doc =
+            std::fs::read_to_string(workspace_root.join("docs").join("contract.md"))
+                .expect("docs/contract.md not found; check workspace layout");
+
+        let proto = std::fs::read_to_string(
+            workspace_root
+                .join("proto")
+                .join("anvil")
+                .join("v1")
+                .join("sidecar.proto"),
+        )
+        .expect("proto/anvil/v1/sidecar.proto not found; check workspace layout");
+
+        // All RPC names from the proto must appear in the contract doc.
+        let rpc_names: Vec<&str> = proto
+            .lines()
+            .filter_map(|line| {
+                let t = line.trim();
+                t.strip_prefix("rpc ")
+                    .and_then(|r| r.split('(').next())
+                    .map(str::trim)
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        assert!(
+            !rpc_names.is_empty(),
+            "sidecar.proto defines no RPCs — check parse logic or proto path"
+        );
+
+        for rpc in &rpc_names {
+            assert!(
+                contract_doc.contains(rpc),
+                "docs/contract.md is missing proto RPC '{rpc}'; \
+                 manual sync may have drifted — update contract.md"
+            );
+        }
+
         assert!(
             contract_doc.contains("Automated drift detection is a v1.1 task"),
-            "docs/contract.md must retain the maintenance note; if it was removed, \
-             update this test to reflect the new sync approach"
+            "docs/contract.md must retain the maintenance note; \
+             if removed, update this test to reflect the new sync approach"
         );
     }
 }

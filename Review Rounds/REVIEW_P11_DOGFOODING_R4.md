@@ -137,8 +137,8 @@ This distinguishes the two reviewer passes that both reviewed the R1 state.
 | AC5 | Hinge test asserts PL count and slugs match Required Choices table | **PASS** |
 | AC6 | Publication-safety gate documented; execution deferred to actual public flip | **PASS** |
 | AC7 | `docs/ux-audit.md` covers CLI→App friction and v1.1 recommendations | **PASS** |
-| AC2 (plan-level) | Dogfooding cycle via v1 CLI | **PASS (attested)** — representative artifacts + Coordinator attestation in `docs/examples/coordinator-attestation.md`; live evidence committed before public ship |
-| AC3 (plan-level) | External pilot via v1 CLI with multi-reviewer rotation | **PASS (attested)** — same attestation; Leaflog representative artifacts in `docs/examples/external-pilot/` |
+| AC2 (plan-level) | Dogfooding cycle via v1 CLI | **Deferred (attested)** — live evidence required before public ship; Coordinator attestation in `docs/examples/coordinator-attestation.md` documents what was validated and the commitment |
+| AC3 (plan-level) | External pilot via v1 CLI with multi-reviewer rotation | **Deferred (attested)** — same attestation; Leaflog representative artifacts in `docs/examples/external-pilot/` |
 
 ---
 

@@ -44,6 +44,9 @@ jobs:
       - name: Format check (Rust)
         run: cargo fmt --all -- --check
 
+      - name: Hinge consensus check (strict)
+        run: cargo run -q -p anvil-cli -- hinge list --strict --project .
+
       - name: cargo audit (dependency vulnerability scan)
         run: |
           cargo install cargo-audit --quiet

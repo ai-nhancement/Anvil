@@ -327,6 +327,10 @@ pub struct HingeFlip {
     pub hinge_test_name: String,
     pub old_value: String,
     pub new_value: String,
+    /// Non-empty human justification required by `anvil hinge flip --reason`.
+    /// Pre-R2 records without this field deserialize as an empty string.
+    #[serde(default)]
+    pub reasoning: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +618,7 @@ impl HingeFlip {
         hinge_test_name: String,
         old_value: String,
         new_value: String,
+        reasoning: String,
         cross_references: Vec<String>,
     ) -> Self {
         Self {
@@ -623,6 +628,7 @@ impl HingeFlip {
             hinge_test_name,
             old_value,
             new_value,
+            reasoning,
         }
     }
 }
@@ -761,5 +767,24 @@ mod tests {
         let json = serde_json::to_string(&vr).expect("serialize");
         let parsed: VerifierResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.source_packet_id, "pkt-abc");
+    }
+
+    #[test]
+    fn test_hinge_flip_stores_reasoning() {
+        let record = HingeFlip::new(
+            "my-hinge".to_owned(),
+            "v1".to_owned(),
+            "v2".to_owned(),
+            "justified because the invariant changed in P10b".to_owned(),
+            vec![],
+        );
+        assert_eq!(
+            record.reasoning, "justified because the invariant changed in P10b",
+            "HingeFlip must persist the reason provided by the caller"
+        );
+        assert!(!record.id.is_empty());
+        assert_eq!(record.hinge_test_name, "my-hinge");
+        assert_eq!(record.old_value, "v1");
+        assert_eq!(record.new_value, "v2");
     }
 }

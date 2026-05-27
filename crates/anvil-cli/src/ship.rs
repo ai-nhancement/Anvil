@@ -7,6 +7,7 @@ use std::path::Path;
 
 use anvil_audit::AuditStore;
 use anvil_core::{config::load_config, error::AnvilError, plan::parse_planner_contract};
+use anvil_hinge::scan_workspace;
 use anvil_ship::{
     check_all_phases_shipped, check_unresolved_rollbacks, execute_transport,
     parse_transport_actions,
@@ -28,6 +29,20 @@ pub fn run_project_ship(project_root: &Path) -> Result<(), AnvilError> {
     // sees all blockers in a single message rather than having to fix-and-retry.
     let readiness = check_all_phases_shipped(&store, &contract)?;
     let unresolved = check_unresolved_rollbacks(&store, &contract)?;
+
+    // Hinge consensus check — block ship on any cross-language violation (P10b AC3).
+    let hinge_registry = scan_workspace(project_root)?;
+    let hinge_violations = hinge_registry.consensus_violations();
+    if !hinge_violations.is_empty() {
+        let details = hinge_violations
+            .iter()
+            .map(|v| format!("{}: {}", v.intended, v.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AnvilError::ProjectShipBlocked(format!(
+            "hinge consensus violations — {details}"
+        )));
+    }
 
     if !readiness.is_ready() || !unresolved.is_empty() {
         let mut parts = Vec::new();
@@ -156,5 +171,41 @@ mod tests {
 
         // Should succeed (no transport actions configured in the default config).
         run_project_ship(tmp.path()).unwrap();
+    }
+
+    #[test]
+    fn test_project_ship_blocked_by_hinge_consensus_violation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = init_project(&tmp);
+        let contract = make_contract(&["P0"]);
+        write_contract(&tmp, &contract);
+
+        // Ship phase so readiness passes.
+        let gate = GateApproval::new("phase-P0-ship".to_owned(), "coordinator".to_owned(), vec![]);
+        store.append(&gate).unwrap();
+        let disposition = PhaseDisposition::new("P0".to_owned(), "shipped".to_owned(), vec![]);
+        store.append(&disposition).unwrap();
+
+        // Synthetic cross-language hinge with a phase mismatch.
+        let crates_src = tmp.path().join("crates/test_crate/src");
+        std::fs::create_dir_all(&crates_src).unwrap();
+        std::fs::write(
+            crates_src.join("lib.rs"),
+            "// hinge_test: pins=v1, intended=cross-check, phase=P0\n#[test]\nfn test_cross() {}\n",
+        )
+        .unwrap();
+        let sidecar_dir = tmp.path().join("sidecar");
+        std::fs::create_dir_all(&sidecar_dir).unwrap();
+        std::fs::write(
+            sidecar_dir.join("cross_test.go"),
+            "// hinge_test: pins=v1, intended=cross-check, phase=P1\nfunc TestCross(t *testing.T) {}\n",
+        )
+        .unwrap();
+
+        let err = run_project_ship(tmp.path()).unwrap_err();
+        assert!(
+            matches!(&err, AnvilError::ProjectShipBlocked(msg) if msg.contains("hinge consensus")),
+            "consensus violation must block ship: {err}"
+        );
     }
 }

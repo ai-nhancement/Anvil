@@ -87,18 +87,33 @@ impl HingeRegistry {
     pub fn consensus_violations(&self) -> Vec<ConsensusViolation> {
         let mut rust_map: HashMap<&str, &HingeEntry> = HashMap::new();
         let mut go_map: HashMap<&str, &HingeEntry> = HashMap::new();
+        let mut violations = Vec::new();
+
         for entry in &self.entries {
             match entry.source {
                 HingeSource::Rust => {
-                    rust_map.insert(entry.intended.as_str(), entry);
+                    if rust_map.contains_key(entry.intended.as_str()) {
+                        violations.push(ConsensusViolation {
+                            intended: entry.intended.clone(),
+                            reason: "duplicate intended ID in Rust sources".to_owned(),
+                        });
+                    } else {
+                        rust_map.insert(entry.intended.as_str(), entry);
+                    }
                 }
                 HingeSource::Go => {
-                    go_map.insert(entry.intended.as_str(), entry);
+                    if go_map.contains_key(entry.intended.as_str()) {
+                        violations.push(ConsensusViolation {
+                            intended: entry.intended.clone(),
+                            reason: "duplicate intended ID in Go sources".to_owned(),
+                        });
+                    } else {
+                        go_map.insert(entry.intended.as_str(), entry);
+                    }
                 }
             }
         }
 
-        let mut violations = Vec::new();
         for (intended, rust_entry) in &rust_map {
             if let Some(go_entry) = go_map.get(intended) {
                 if rust_entry.phase != go_entry.phase {
@@ -112,6 +127,29 @@ impl HingeRegistry {
                 }
             }
         }
+
+        // Check for duplicate alternative entries and source-vs-alternative collisions.
+        let mut alt_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for alt in &self.alternatives {
+            if !alt_set.insert(alt.intended.as_str()) {
+                violations.push(ConsensusViolation {
+                    intended: alt.intended.clone(),
+                    reason: "duplicate intended ID in alternative entries".to_owned(),
+                });
+            }
+        }
+        for alt in &self.alternatives {
+            if rust_map.contains_key(alt.intended.as_str())
+                || go_map.contains_key(alt.intended.as_str())
+            {
+                violations.push(ConsensusViolation {
+                    intended: alt.intended.clone(),
+                    reason: "intended ID collides between alternative entry and source hinge"
+                        .to_owned(),
+                });
+            }
+        }
+
         violations
     }
 }
@@ -160,10 +198,19 @@ fn scan_rust_file(path: &Path, entries: &mut Vec<HingeEntry>) -> Result<(), Anvi
             let mut fn_name: Option<String> = None;
             for line in &lines[i + 1..end] {
                 let trimmed = line.trim();
-                if trimmed == "#[test]" {
+                if trimmed == "#[test]"
+                    || trimmed.starts_with("#[tokio::test")
+                    || trimmed.starts_with("#[test_case")
+                    || trimmed.starts_with("#[rstest")
+                {
                     saw_test = true;
                 } else if saw_test {
-                    if let Some(rest) = trimmed.strip_prefix("fn ") {
+                    let fn_start = trimmed
+                        .strip_prefix("pub async fn ")
+                        .or_else(|| trimmed.strip_prefix("async fn "))
+                        .or_else(|| trimmed.strip_prefix("pub fn "))
+                        .or_else(|| trimmed.strip_prefix("fn "));
+                    if let Some(rest) = fn_start {
                         if let Some(name_str) = rest.split('(').next() {
                             let name_str = name_str.trim();
                             if !name_str.is_empty() {
@@ -274,6 +321,16 @@ pub fn scan_workspace(root: &Path) -> Result<HingeRegistry, AnvilError> {
         walk_files_with_ext(&sidecar_dir, "go", &mut go_files)?;
         for file in &go_files {
             scan_go_file(file, &mut entries)?;
+        }
+    }
+
+    // Top-level integration test directory (planned layout: tests/hinge/).
+    let tests_dir = root.join("tests");
+    if tests_dir.exists() {
+        let mut rs_files = Vec::new();
+        walk_files_with_ext(&tests_dir, "rs", &mut rs_files)?;
+        for file in &rs_files {
+            scan_rust_file(file, &mut entries)?;
         }
     }
 
@@ -393,5 +450,131 @@ mod tests {
             registry.consensus_violations().is_empty(),
             "matching phases must produce no violations"
         );
+    }
+
+    #[test]
+    fn test_scanner_recognizes_async_fn_after_tokio_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("async_test.rs");
+        std::fs::write(
+            &path,
+            "// hinge_test: pins=v1, intended=async-hinge, phase=P10b\n\
+             #[tokio::test]\n\
+             async fn test_async_something() {}\n",
+        )
+        .unwrap();
+        let mut entries = Vec::new();
+        scan_rust_file(&path, &mut entries).unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "async fn must be recognized after #[tokio::test]"
+        );
+        assert_eq!(entries[0].intended, "async-hinge");
+        assert_eq!(entries[0].fn_name, "test_async_something");
+    }
+
+    #[test]
+    fn test_scanner_skips_unbound_annotation_above_non_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("const_file.rs");
+        std::fs::write(
+            &path,
+            "// hinge_test: pins=v1, intended=const-hinge, phase=P10b\n\
+             pub const SOME_VALUE: u32 = 5;\n",
+        )
+        .unwrap();
+        let mut entries = Vec::new();
+        scan_rust_file(&path, &mut entries).unwrap();
+        assert!(
+            entries.is_empty(),
+            "annotation above a non-test declaration must be silently skipped"
+        );
+    }
+
+    #[test]
+    fn test_scan_workspace_includes_tests_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let tests_dir = root.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(
+            tests_dir.join("hinge_test.rs"),
+            "// hinge_test: pins=v1, intended=tests-dir-hinge, phase=P10b\n\
+             #[test]\n\
+             fn test_from_tests_dir() {}\n",
+        )
+        .unwrap();
+        let registry = scan_workspace(root.path()).unwrap();
+        assert_eq!(
+            registry.entries.len(),
+            1,
+            "entries from top-level tests/ directory must be scanned"
+        );
+        assert_eq!(registry.entries[0].intended, "tests-dir-hinge");
+    }
+
+    #[test]
+    fn test_duplicate_intended_within_language_is_a_violation() {
+        // Pins: duplicate intended IDs within the same language make flip status and
+        // old_value selection ambiguous. consensus_violations must catch them.
+        let registry = HingeRegistry {
+            entries: vec![
+                HingeEntry {
+                    intended: "dup-hinge".to_owned(),
+                    pins: "option-a".to_owned(),
+                    phase: "P5".to_owned(),
+                    source: HingeSource::Rust,
+                    file: PathBuf::from("foo.rs"),
+                    fn_name: "test_foo".to_owned(),
+                },
+                HingeEntry {
+                    intended: "dup-hinge".to_owned(),
+                    pins: "option-b".to_owned(),
+                    phase: "P5".to_owned(),
+                    source: HingeSource::Rust,
+                    file: PathBuf::from("bar.rs"),
+                    fn_name: "test_bar".to_owned(),
+                },
+            ],
+            alternatives: Vec::new(),
+        };
+        let violations = registry.consensus_violations();
+        assert_eq!(
+            violations.len(),
+            1,
+            "duplicate Rust intended ID must produce one violation"
+        );
+        assert!(
+            violations[0].reason.contains("duplicate"),
+            "violation reason must mention duplication: {}",
+            violations[0].reason
+        );
+    }
+
+    #[test]
+    fn test_alternative_collision_with_source_entry_is_a_violation() {
+        let registry = HingeRegistry {
+            entries: vec![HingeEntry {
+                intended: "shared-id".to_owned(),
+                pins: "v1".to_owned(),
+                phase: "P5".to_owned(),
+                source: HingeSource::Rust,
+                file: PathBuf::from("foo.rs"),
+                fn_name: "test_foo".to_owned(),
+            }],
+            alternatives: vec![AlternativeEntry {
+                intended: "shared-id".to_owned(),
+                pins: "alt-v1".to_owned(),
+                phase: "P5".to_owned(),
+                mechanism: "manual review".to_owned(),
+            }],
+        };
+        let violations = registry.consensus_violations();
+        assert_eq!(
+            violations.len(),
+            1,
+            "source-vs-alternative collision must produce one violation"
+        );
+        assert!(violations[0].reason.contains("collides"));
     }
 }

@@ -780,21 +780,21 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
 
 - **Goal.** Bi-language hinge-test framework, unified registry persisted to audit store, and `anvil hinge` CLI surface.
 - **Action list.**
-  - `#[hinge_test]` proc-macro (Rust): extracts test name, current pinned value, intended final value, and phase from annotations; emits `HingeFlip` records to the audit store when flipped.
-  - `// hinge_test:` doc-comment parser (Go): equivalent extraction at test collection time.
-  - Unified registry: merges Rust and Go hinge metadata into a single queryable view persisted to the audit store.
+  - `// hinge_test:` source-comment parser (Rust): `scan_workspace()` reads `// hinge_test: pins=X, intended=Y, phase=Z` annotations in `.rs` files and extracts the three required fields. *(Amended P10b R2: source-comment scanner replaces the `#[hinge_test]` proc-macro originally planned; flips are recorded by `anvil hinge flip`, not at test-collection time.)*
+  - `// hinge_test:` doc-comment parser (Go): equivalent extraction from `.go` files by `scan_workspace()`.
+  - Unified registry: merges Rust and Go hinge metadata into a single queryable view. Registry state persists through source-file git history; the audit store records flip events (`HingeFlip`) only. *(Amended P10b R1: source files are the persistent registry for v1; audit-store snapshots are deferred.)*
   - `anvil hinge list` — shows all open hinge tests with pinned and intended states, triggering phase, and flip history.
-  - `anvil hinge flip <id>` — records a `HingeFlip` audit record with reasoning; updates the registry.
+  - `anvil hinge flip <id>` — records a `HingeFlip` audit record with reasoning (including the reason argument); exits non-zero if reasoning or new-value is empty.
   - Alternative-mechanism support: flagged registry entries for stacks without a test harness (per Charter *Deferred Decisions Are Tracked* invariant).
-  - **Registry consensus check (R4 addition).** For hinges that should exist in both languages (typically cross-cutting contract hinges like `test_proto_package_version`, `test_error_class_count`, `test_handshake_required_fields`), the unified registry runs a *consensus check*: same hinge name → same pinned value, same intended value, same phase. **Asymmetric states are `BlockShip` violations.** Failure modes the check catches: same hinge declared in both languages with different pinned values (e.g., Rust says `pins=anvil.v1`, Go says `pins=anvil.v2` — schema drift); same hinge declared with different intended states (one side has accepted a migration the other hasn't); hinge declared in one language but missing from the other when the registry's metadata flags it as a *cross-language* hinge. The check runs as part of `anvil hinge list --strict` and is invoked automatically by the Ship gate; CI runs it on every build.
+  - **Registry consensus check (R4 addition, amended P10b R1).** The unified registry runs a *consensus check*: for any `intended` ID that appears in both Rust and Go entries, the `phase` values must match — **phase mismatch is a `BlockShip` violation**. Cross-language `pins` differences are permitted (the same logical invariant may have different language-specific expressions, e.g., `binary-entry-point` pins `"anvil"` in Rust and `"anvil-sidecar"` in Go). Duplicate `intended` IDs within a single language are also `BlockShip` violations (they make flip status ambiguous). Detection of missing counterparts (hinge in one language, absent in the other) requires per-hinge cross-language metadata not present in v1 — deferred. The check runs as part of `anvil hinge list --strict` and is invoked automatically by the Ship gate.
 - **Deliverable.** Hinge tests are first-class queryable objects. Flipping a hinge creates an auditable record. Both Rust and Go hinge metadata are unified in one registry.
 - **Acceptance criteria.**
-  1. `#[hinge_test]` decorator extracts name, pinned value, intended value, and phase at collection time.
-  2. Go `// hinge_test:` parser extracts equivalent metadata.
-  3. Bi-language registry merges both without collision; persists across runs.
-  4. `anvil hinge list` shows the registry's current state with correct metadata. (Per R3's pin convention, the count is derived from the registry rather than asserted as prose; `anvil hinge list --count` returns the current total.)
-  4a. `anvil hinge list --strict` runs the consensus check; asymmetric cross-language hinges are reported as `BlockShip` and exit non-zero.
-  5. `anvil hinge flip <id>` creates a `HingeFlip` audit record with non-empty reasoning; exits non-zero if reasoning is empty.
+  1. Rust `// hinge_test:` source-comment annotation is parsed from source files by `scan_workspace()`; extracts pinned value, intended value, and phase. *(Amended P10b R2: source-comment scanner is the v1 mechanism; `#[hinge_test]` proc-macro is deferred.)*
+  2. Go `// hinge_test:` source-comment annotation is parsed equivalently.
+  3. Bi-language registry merges both without collision; persists across runs (source files are the persistence layer; flip history is in the audit store).
+  4. `anvil hinge list` shows the registry's current state with correct metadata. (Per R3's pin convention, the count is derived from the registry rather than asserted as prose; `anvil hinge list --count` returns the current total.) `--strict` may be run on a bare checkout without `anvil.toml`.
+  4a. `anvil hinge list --strict` runs the consensus check; phase mismatches and same-language duplicate IDs are reported as `BlockShip` and exit non-zero. Ship gate invokes this automatically.
+  5. `anvil hinge flip <id>` creates a `HingeFlip` audit record with non-empty `reasoning` field persisted to the audit store; exits non-zero if reasoning or new-value is empty.
   6. Alternative-mechanism entries (non-test-harness deferred decisions) queryable alongside hinge tests.
 - **Dependencies.** P2 (audit). Parallelizable with P9 and P10a.
 - **Hinge-test list.**

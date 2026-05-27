@@ -10,24 +10,44 @@ pub fn run_hinge_list(project: &Path, strict: bool, count_only: bool) -> Result<
 
     let total = registry.entries.len() + registry.alternatives.len();
 
+    // Run strict consensus check before any I/O so that `--strict` works on a bare
+    // checkout without `anvil.toml`, and so `--strict --count` does not bypass it.
+    if strict {
+        let violations = registry.consensus_violations();
+        if !violations.is_empty() {
+            eprintln!();
+            eprintln!(
+                "[BLOCK-SHIP] Cross-language consensus violations ({}):",
+                violations.len()
+            );
+            for v in &violations {
+                eprintln!("  {} — {}", v.intended, v.reason);
+            }
+            std::process::exit(1);
+        }
+    }
+
     if count_only {
         println!("{total}");
         return Ok(());
     }
 
-    // Read flip history to determine which entries have been flipped.
-    let store = AuditStore::open(project)?;
-    let flipped: std::collections::HashSet<String> = store
-        .list(RecordType::HingeFlip)?
-        .iter()
-        .filter_map(|e| {
-            store
-                .get(&e.id)
-                .ok()
-                .and_then(|v| serde_json::from_value::<HingeFlip>(v).ok())
-        })
-        .map(|f| f.hinge_test_name)
-        .collect();
+    // Flip status requires an initialized project; treat uninitialized as no recorded flips.
+    let flipped: std::collections::HashSet<String> = match AuditStore::open(project) {
+        Ok(store) => store
+            .list(RecordType::HingeFlip)?
+            .iter()
+            .filter_map(|e| {
+                store
+                    .get(&e.id)
+                    .ok()
+                    .and_then(|v| serde_json::from_value::<HingeFlip>(v).ok())
+            })
+            .map(|f| f.hinge_test_name)
+            .collect(),
+        Err(AnvilError::NotInitialized(_)) => std::collections::HashSet::new(),
+        Err(e) => return Err(e),
+    };
 
     if total == 0 {
         println!("No hinge entries found.");
@@ -63,21 +83,6 @@ pub fn run_hinge_list(project: &Path, strict: bool, count_only: bool) -> Result<
         );
     }
 
-    if strict {
-        let violations = registry.consensus_violations();
-        if !violations.is_empty() {
-            eprintln!();
-            eprintln!(
-                "[BLOCK-SHIP] Cross-language consensus violations ({}):",
-                violations.len()
-            );
-            for v in &violations {
-                eprintln!("  {} — {}", v.intended, v.reason);
-            }
-            std::process::exit(1);
-        }
-    }
-
     Ok(())
 }
 
@@ -90,6 +95,12 @@ pub fn run_hinge_flip(
     if reason.trim().is_empty() {
         return Err(AnvilError::EmptyReasoning {
             command: "hinge flip",
+        });
+    }
+    if new_value.trim().is_empty() {
+        return Err(AnvilError::InvalidConfigValue {
+            key: "new-value".to_owned(),
+            reason: "must not be empty for hinge flip".to_owned(),
         });
     }
 
@@ -113,6 +124,7 @@ pub fn run_hinge_flip(
         hinge_test_name,
         old_value.clone(),
         new_value.to_owned(),
+        reason.to_owned(),
         Vec::new(),
     );
     let store = AuditStore::open(project)?;
@@ -121,4 +133,46 @@ pub fn run_hinge_flip(
     println!("Flipped '{id}': {old_value} → {new_value}");
     println!("Reason: {reason}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hinge_list_strict_succeeds_without_audit_store() {
+        // --strict must work on a bare checkout without anvil.toml.
+        // With no hinge entries in a temp dir, there are no violations, so it returns Ok.
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No anvil.toml, no crates/, no sidecar/ — scan_workspace returns an empty registry.
+        run_hinge_list(tmp.path(), true, true).unwrap();
+    }
+
+    #[test]
+    fn test_hinge_list_count_with_strict_runs_strict_check() {
+        // --count --strict must run the strict check, not bypass it.
+        // With a clean empty workspace, both succeed; the test verifies no panic/exit.
+        let tmp = tempfile::TempDir::new().unwrap();
+        run_hinge_list(tmp.path(), true, true).unwrap();
+    }
+
+    #[test]
+    fn test_flip_rejects_empty_reason() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = run_hinge_flip(tmp.path(), "some-id", "v2", "").unwrap_err();
+        assert!(
+            matches!(err, AnvilError::EmptyReasoning { .. }),
+            "empty reason must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_flip_rejects_empty_new_value() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = run_hinge_flip(tmp.path(), "some-id", "", "valid reason").unwrap_err();
+        assert!(
+            matches!(err, AnvilError::InvalidConfigValue { .. }),
+            "empty new_value must be rejected: {err}"
+        );
+    }
 }

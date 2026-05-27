@@ -704,7 +704,7 @@ mod tests {
         }
     }
 
-    // hinge_test: pins=rfp_vr_pairing_struct, intended=pairing-check, phase=P5
+    // hinge_test: pins=rfp_vr_pairing_struct, intended=pairing-check-struct, phase=P5
     #[test]
     fn test_rfp_vr_pairing_struct() {
         // Pins: VerifierResult carries source_packet_id for RFP/VR pairing in run_charter_findings.
@@ -746,7 +746,7 @@ mod tests {
         assert_eq!(vr.source_packet_id, source_id);
     }
 
-    // hinge_test: pins=rfp_vr_pairing_mismatch_errors, intended=pairing-check, phase=P5
+    // hinge_test: pins=rfp_vr_pairing_mismatch_errors, intended=pairing-check-mismatch, phase=P5
     #[test]
     fn test_rfp_vr_pairing_mismatch_returns_error() {
         // Pins: load_and_pair must fail with a remediation hint when VR.source_packet_id

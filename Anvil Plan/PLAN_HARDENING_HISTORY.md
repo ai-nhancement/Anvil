@@ -430,3 +430,69 @@ Full reasoning and audit cross-references in `PLAN_CONVERGENCE.md`.
 The Plan is now the approved constitutional input to the Build stage. P0 (Bootstrap) is unblocked. Future Build-stage discovery that requires Plan-level changes is handled via Plan amendment through the standard amendment cycle.
 
 This hardening-history file's role is unchanged: it remains the legislative record of how the Plan got to its current state. Plan amendments post-convergence will continue to append hardening notes here, paired with disposition documents.
+
+---
+
+## P10b R1 Plan Amendments (2026-05-27)
+
+Two design decisions made during P10b implementation require explicit Plan amendments to resolve contradictions between the approved Plan text and the implementation.
+
+### Amendment 1 — Phase-only consensus is the v1 invariant (F2)
+
+**Prior Plan text (§P10b, line 789):**
+> same hinge name → same pinned value, same intended value, same phase. Asymmetric states are BlockShip violations.
+
+**Problem:** The existing codebase contains cross-language hinges where `pins` legitimately differ: the same logical invariant has a different language-specific expression. For example, `binary-entry-point` pins `"anvil"` in Rust (the CLI binary name) and `"anvil-sidecar"` in Go (the sidecar binary name) — both are correct for their runtime. Enforcing `pins` equality across languages would produce false violations.
+
+**Resolution:** Phase-only consensus is the v1 invariant. The updated rule:
+> same hinge name in both Rust and Go → same `phase`. Phase mismatch is a `BlockShip` violation; `pins` differences across languages are permitted and expected. Duplicate `intended` IDs within the same language are also `BlockShip` violations (they make flip status and old_value selection ambiguous).
+
+Detection of *missing counterparts* (hinge present in one language but absent from the other) requires explicit cross-language metadata not present in v1 annotations; this is deferred to a future hardening round.
+
+**Implementation:** `HingeRegistry::consensus_violations()` in `crates/anvil-hinge/src/lib.rs`.
+
+### Amendment 2 — Source files are the persistent hinge registry (F5)
+
+**Prior Plan text (§P10b, line 785):**
+> Unified registry: merges Rust and Go hinge metadata into a single queryable view persisted to the audit store.
+
+**Problem:** The implementation uses a source-scanner approach: `// hinge_test:` comment annotations in `.rs` and `.go` files are parsed on demand. The "persistence" is source-file git history, not audit-store records. Only flip events (`HingeFlip`) are written to the audit store.
+
+**Resolution:** Source files are the persistent registry for v1. The audit store records flip events only. This is weaker than the original "persisted to the audit store" wording but consistent with the source-scanner design (which was adopted in place of a proc-macro to avoid rewriting all existing annotations and to support Go). Registry snapshots at flip or ship time are deferred to a future hardening round.
+
+**Implementation:** `scan_workspace()` in `crates/anvil-hinge/src/lib.rs`; `HingeFlip` records in `crates/anvil-audit/src/records.rs`.
+
+---
+
+## P10b R2 Plan Amendments (2026-05-27)
+
+### Amendment 3 — Source-comment scanner replaces `#[hinge_test]` proc-macro for Rust (F1)
+
+**Prior Plan text (§P10b, action list item 1 and AC1):**
+> `#[hinge_test]` proc-macro (Rust): extracts test name, current pinned value, intended final value, and phase from annotations; emits `HingeFlip` records to the audit store when flipped.
+> AC1: `#[hinge_test]` decorator extracts name, pinned value, intended value, and phase at collection time.
+
+**Problem:** The R1 round acknowledged the source-comment scanner but R2 left the proc-macro language in the action list and AC1. The implementation uses `// hinge_test:` structured comment annotations for Rust, identical to the Go mechanism — there is no proc-macro.
+
+**Resolution:** AC1 and action list item 1 updated to describe the `// hinge_test:` source-comment scanner. The proc-macro is deferred (no firm schedule). Flips are recorded by `anvil hinge flip`, not at test-collection time.
+
+### Amendment 4 — CI runs strict hinge consensus check (F2)
+
+**Prior hardening-history language (R4 entry):**
+> CI runs the check on every build; Ship gate invokes it automatically.
+
+R1 was implemented without a CI step on the claim that the workflow file was outside the workspace. R2 review confirmed `.github/workflows/ci.yml` is in the workspace.
+
+**Resolution:** A `Hinge consensus check (strict)` step is added to the Rust CI job after the format check, before `cargo audit`. The step runs `cargo run -q -p anvil-cli -- hinge list --strict --project .`. CI now enforces the R4 invariant.
+
+### Amendment 5 — `HingeFlip.reasoning` backward compatibility (F6)
+
+Pre-R2 `HingeFlip` records written to an audit store before the `reasoning` field was added would silently fail to deserialize in `run_hinge_list`, causing historical flips to disappear from flip-status views.
+
+**Resolution:** `HingeFlip.reasoning` is annotated `#[serde(default)]`, so records without the field deserialize with an empty string rather than failing. This preserves historical flip status while marking legacy records as having no captured reasoning.
+
+### Amendment 6 — Alternative entries included in duplicate/collision detection (F5)
+
+`consensus_violations()` previously detected duplicates only among source-scanned entries (Rust and Go). Alternative-mechanism entries from `.anvil/hinge-alternatives.toml` were excluded, leaving the possibility of alternative-vs-source collisions or duplicate alternatives.
+
+**Resolution:** `consensus_violations()` now also checks alternatives for internal duplicates and for collisions with source-scanned entries. All three namespaces (Rust, Go, alternatives) are validated as globally unique within `intended`.

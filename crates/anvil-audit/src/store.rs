@@ -451,6 +451,60 @@ mod tests {
     }
 
     #[test]
+    fn test_all_record_type_dirs_covered_by_layout_dirs() {
+        // Bijection invariant: AUDIT_RECORD_DIR_NAMES and ALL_RECORD_TYPES must be in
+        // exact 1-to-1 correspondence via dir_name() / from_dir_name().
+        //
+        // Forward: every RecordType::dir_name() is in AUDIT_RECORD_DIR_NAMES
+        //   → project::init creates a subdirectory for every record type.
+        // Reverse: every AUDIT_RECORD_DIR_NAMES entry is a valid RecordType dir name
+        //   → no orphan directories are created for non-existent record types.
+        // Count: lengths must match → no hidden extras or omissions.
+        use anvil_core::project::AUDIT_RECORD_DIR_NAMES;
+        for rt in ALL_RECORD_TYPES {
+            assert!(
+                AUDIT_RECORD_DIR_NAMES.contains(&rt.dir_name()),
+                "RecordType {rt:?} dir '{}' is missing from AUDIT_RECORD_DIR_NAMES",
+                rt.dir_name()
+            );
+        }
+        for name in AUDIT_RECORD_DIR_NAMES {
+            assert!(
+                RecordType::from_dir_name(name).is_some(),
+                "AUDIT_RECORD_DIR_NAMES entry '{name}' has no corresponding RecordType variant"
+            );
+        }
+        assert_eq!(
+            AUDIT_RECORD_DIR_NAMES.len(),
+            ALL_RECORD_TYPES.len(),
+            "AUDIT_RECORD_DIR_NAMES and ALL_RECORD_TYPES must have the same number of entries"
+        );
+    }
+
+    #[test]
+    fn test_plan_consolidation_record_appended_after_project_init() {
+        // Regression: audit-store/plan-consolidation was absent from LAYOUT_DIRS, causing
+        // run_plan_consolidate to fail on freshly initialized projects with a directory-not-found
+        // IO error. The test helper init_test_store creates all dirs manually and masked this.
+        use crate::records::PlanConsolidationRecord;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        anvil_core::project::init(tmp.path()).expect("project init");
+        let store = AuditStore::open(tmp.path()).expect("open");
+        let record = PlanConsolidationRecord::new(
+            "1.0.0".to_owned(),
+            "1.1.0".to_owned(),
+            "regression-test".to_owned(),
+            vec![1],
+            "prior plan text".to_owned(),
+            vec![],
+        );
+        store
+            .append(&record)
+            .expect("plan-consolidation append must succeed after project init");
+    }
+
+    #[test]
     fn test_integrity_detects_id_mismatch() {
         let (_tmp, store) = init_test_store();
         let record = make_gate_approval("original-id");

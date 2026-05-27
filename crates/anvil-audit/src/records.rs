@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 
 use anvil_core::pipeline::{CurationDisposition, FindingsPacket, VerifiedFinding};
 
+/// The only value of `PhaseDisposition.disposition` recognized as shipped state by the
+/// shipped-state query (`latest_shipped_disposition_at`).
+///
+/// `PhaseDisposition` is an open audit record: future disposition values (e.g., a
+/// hypothetical `"superseded"`) are possible, but they will not satisfy the shipped-state
+/// check. Use this constant at both the construction site (`run_phase_ship`) and the
+/// query site to ensure they stay in sync.
+pub const DISPOSITION_SHIPPED: &str = "shipped";
+
 /// All 15 audit record types (11 Charter-required + 4 Plan-extensions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -382,13 +391,53 @@ pub struct ProvisionalLock {
     pub hypothesis: String,
 }
 
+/// Audit record written when a phase is re-opened via `anvil phase reopen` (P9).
+///
+/// One `RollbackEvent` is written per invalidated phase: one for the re-opened
+/// phase itself (`target_phase == invalidated_phase`) plus one per transitive
+/// dependent. The `rotation_reset_phases` list mirrors the full set of phases
+/// whose rotation was reset, enforcing the R4 addition that *every* invalidated
+/// dependent's reviewer rotation resets to position 0 (so the full pool's
+/// diversity reviews the fix, not just whichever reviewer was next in the prior
+/// rotation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollbackEvent {
     pub id: String,
     pub created_at: DateTime<Utc>,
     pub cross_references: Vec<String>,
+    /// The phase the user explicitly re-opened (same across the set of records
+    /// produced by one reopen command).
     pub target_phase: String,
+    /// The specific phase this record invalidates. For the re-opened phase this
+    /// equals `target_phase`; for transitive dependents this is the dependent's ID.
+    pub invalidated_phase: String,
+    /// All phases whose rotation is reset by this reopen (target plus all
+    /// transitive dependents). Identical across the sibling records produced by
+    /// one reopen command. Pinned by `test_rollback_resets_rotation_on_dependents`.
+    pub rotation_reset_phases: Vec<String>,
     pub reason: String,
+}
+
+impl RollbackEvent {
+    /// Constructs a `RollbackEvent` for one invalidated phase.
+    #[must_use]
+    pub fn new(
+        target_phase: String,
+        invalidated_phase: String,
+        rotation_reset_phases: Vec<String>,
+        reason: String,
+        cross_references: Vec<String>,
+    ) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: Utc::now(),
+            cross_references,
+            target_phase,
+            invalidated_phase,
+            rotation_reset_phases,
+            reason,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

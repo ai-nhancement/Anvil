@@ -6,6 +6,7 @@ mod phase;
 mod plan;
 mod session;
 mod setup;
+mod ship;
 mod status;
 mod utils;
 
@@ -75,6 +76,12 @@ enum Command {
     /// Phase dependency graph queries.
     #[command(subcommand)]
     Graph(GraphCmd),
+    /// Ship the project (requires all phases shipped; executes configured transport actions).
+    Ship {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
     /// Show project workflow status (rotation position, round count, advisory findings, pool clean check).
     Status {
         /// Project directory (defaults to current directory).
@@ -227,6 +234,20 @@ enum PhaseCmd {
     Findings {
         /// Phase ID to curate findings for (e.g. `P8`).
         id: String,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: std::path::PathBuf,
+    },
+    /// Re-open a phase, invalidating it and all transitive dependents (P9).
+    Reopen {
+        /// Phase ID to re-open (e.g. `P8`).
+        id: String,
+        /// Reason for re-opening (recorded in all `RollbackEvent` audit records).
+        #[arg(long)]
+        reason: String,
+        /// Skip the confirmation prompt (for CI / non-interactive use).
+        #[arg(long, short = 'y')]
+        yes: bool,
         /// Project directory (defaults to current directory).
         #[arg(long, default_value = ".")]
         project: std::path::PathBuf,
@@ -398,6 +419,12 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
             PhaseCmd::Review { id, project } => phase::run_phase_review(&project, &id),
             PhaseCmd::Ship { id, project } => phase::run_phase_ship(&project, &id),
             PhaseCmd::Findings { id, project } => phase::run_phase_findings(&project, &id),
+            PhaseCmd::Reopen {
+                id,
+                reason,
+                yes,
+                project,
+            } => phase::run_phase_reopen(&project, &id, &reason, yes),
         },
         Command::Graph(cmd) => match cmd {
             GraphCmd::Show { project } => graph::run_graph_show(&project),
@@ -405,6 +432,7 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
                 graph::run_graph_blast_radius(&project, &phase_id)
             }
         },
+        Command::Ship { project } => ship::run_project_ship(&project),
         Command::Status { project, artifact } => status::run_status(&project, &artifact),
     }
 }

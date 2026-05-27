@@ -669,9 +669,9 @@ async fn connectivity_checks(
 
 /// Report directories that will be created at commit time (no disk writes here).
 fn step6_store(workspace: &Path) {
-    let to_create = anvil_core::project::LAYOUT_DIRS
+    let to_create = anvil_core::project::layout_dirs()
         .iter()
-        .filter(|&&d| !workspace.join(d).exists())
+        .filter(|d| !workspace.join(d).exists())
         .count();
     if to_create > 0 {
         println!("  {to_create} director(y/ies) will be initialized at commit.");
@@ -1045,13 +1045,13 @@ mod tests {
     // Concurrent-write protection via OS-level exclusive lock is a future requirement.
     #[test]
     fn test_workspace_runtime_dir_in_layout() {
-        use anvil_core::project::LAYOUT_DIRS;
+        let dirs = anvil_core::project::layout_dirs();
         assert!(
-            LAYOUT_DIRS.contains(&".anvil/run"),
+            dirs.iter().any(|d| d == ".anvil/run"),
             ".anvil/run must be in the project layout (sidecar runtime files)"
         );
         assert!(
-            LAYOUT_DIRS.contains(&".anvil"),
+            dirs.iter().any(|d| d == ".anvil"),
             ".anvil must be in the project layout"
         );
     }

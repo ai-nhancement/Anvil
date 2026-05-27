@@ -25,6 +25,10 @@ pub struct AnvilConfig {
     /// condition even when the pool has more than one member (P6).
     #[serde(default)]
     pub single_clean_pass_override: bool,
+    /// Ordered list of transport actions executed by `anvil ship` (P9).
+    /// An empty list is valid — no external commands are run on ship.
+    #[serde(default)]
+    pub transport_actions: Vec<TransportAction>,
 }
 
 impl AnvilConfig {
@@ -38,6 +42,7 @@ impl AnvilConfig {
             model_bindings: Vec::new(),
             reviewer_pool: Vec::new(),
             single_clean_pass_override: false,
+            transport_actions: Vec::new(),
         }
     }
 
@@ -141,6 +146,32 @@ pub struct ModelBinding {
     pub model_identity: String,
     /// Name of the provider connection to route through.
     pub provider_connection: String,
+}
+
+/// Kind of transport action supported by the Ship gate (P9).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportKind {
+    /// Run a shell command in the project root directory.
+    #[default]
+    Shell,
+}
+
+/// One configured transport action executed by `anvil ship` (P9).
+///
+/// Actions are executed in declaration order. The first failure aborts the sequence.
+/// An empty `transport_actions` list is valid — `anvil ship` succeeds without running
+/// any external command (gates are still enforced).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TransportAction {
+    /// Execution strategy (only `shell` in v1).
+    #[serde(default)]
+    pub kind: TransportKind,
+    /// Command string passed to the system shell.
+    pub command: String,
+    /// Human-readable label shown during execution. Defaults to `command` if absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Loads and validates `anvil.toml` from `<root>/anvil.toml`.

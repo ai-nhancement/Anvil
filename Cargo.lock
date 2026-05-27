@@ -89,6 +89,7 @@ dependencies = [
  "anvil-audit",
  "anvil-core",
  "anvil-graph",
+ "anvil-ship",
  "anvil-sidecar-client",
  "chrono",
  "clap",
@@ -139,6 +140,15 @@ version = "0.1.0"
 [[package]]
 name = "anvil-ship"
 version = "0.1.0"
+dependencies = [
+ "anvil-audit",
+ "anvil-core",
+ "anvil-graph",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "anvil-sidecar-client"

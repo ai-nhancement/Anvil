@@ -132,4 +132,16 @@ pub enum AnvilError {
 
     #[error("phase '{phase_id}' cannot ship: {reason}")]
     PhaseShipBlocked { phase_id: String, reason: String },
+
+    #[error("project ship blocked: {0}")]
+    ProjectShipBlocked(String),
+
+    #[error("phase '{0}' not declared in the Plan contract")]
+    UnknownPhase(String),
+
+    #[error("rollback cancelled by user")]
+    RollbackCancelled,
+
+    #[error("transport action '{action}' failed: {reason}")]
+    TransportFailed { action: String, reason: String },
 }

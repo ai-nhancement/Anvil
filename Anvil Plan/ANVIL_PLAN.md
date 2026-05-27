@@ -724,6 +724,12 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
   - `RollbackEvent` audit records reference re-opened phase and all invalidated dependents.
   - **Rotation reset on rollback (R4 addition).** Re-opening a phase resets the reviewer rotation for that phase to position 0 (first reviewer in the pool). All invalidated dependent phases also reset their rotation. This ensures that a late-stage fix is reviewed by the *full pool's diversity*, not just whichever reviewer happened to be next in the prior rotation. Without this reset, a phase rolled back at rotation position 3 of a 4-reviewer pool would re-ship after one clean pass from reviewer 4 — which trivially satisfies the rotation but misses three-quarters of the diversity the pool exists to provide. The `RollbackEvent` record includes `rotation_reset_phases: string[]` listing the affected phase IDs; the hinge `test_rollback_resets_rotation_on_dependents` enforces the reset semantics.
 - **Deliverable.** Project can ship; phases can be re-opened with full transitive invalidation and audit trail.
+- **Implementation note (P9 R3).** "Shipped state" is determined solely by the presence of a
+  `PhaseDisposition` record (disposition == `"shipped"`) newer than the latest `RollbackEvent`.
+  The `phase-{id}-ship` `GateApproval` is retained as audit provenance but is not used for the
+  readiness check. This was chosen over the gate-only approach to close a partial-failure gap:
+  `run_phase_ship` appends the gate then the disposition; if the disposition write fails, the
+  gate-only check would incorrectly report the phase as shipped.
 - **Acceptance criteria.**
   1. `anvil ship` succeeds only when all phases are in shipped state; exits non-zero with a named list of unshipped phases otherwise.
   2. `anvil ship` executes configured transport actions in declared order; transport failure surfaces as a typed error, not a silent no-op.

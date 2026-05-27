@@ -10,7 +10,7 @@ use std::path::Path;
 use anvil_audit::{
     records::{
         ArbiterFindingResolution, CuratedFindingsRecord, GateApproval, PhaseDisposition,
-        ReviewerFindingPacket, RotationLog, VerifierResult,
+        ReviewerFindingPacket, RotationLog, VerifierResult, DISPOSITION_SHIPPED,
     },
     AuditStore, CrossRefKey, RecordType,
 };
@@ -231,6 +231,7 @@ pub fn run_phase_review(project_root: &Path, phase_id: &str) -> Result<(), Anvil
 
     let all_rfp_entries = store.list(RecordType::ReviewerFindingPacket)?;
     let phase_rfps = filter_rfps_by_artifact(&store, &all_rfp_entries, &artifact_ref_prefix);
+    // Global round number — used for briefing file path and display (never resets).
     let round_number = u32::try_from(phase_rfps.len()).unwrap_or(u32::MAX) + 1;
 
     let pool: Vec<String> = if config.reviewer_pool.is_empty() {
@@ -239,12 +240,17 @@ pub fn run_phase_review(project_root: &Path, phase_id: &str) -> Result<(), Anvil
         config.reviewer_pool.clone()
     };
 
-    // F1: Use round_number (1-indexed) for rotation, matching Charter/Plan convention.
-    let reviewer_name = rotation_select(&pool, round_number)
+    // Epoch-based rotation round — resets to 1 after each rollback (P9).
+    // After `anvil phase reopen`, rotation_offset returns 0, so reviewer pool[0]
+    // is selected again, enforcing full-pool diversity on the fix.
+    let rotation_round = anvil_ship::rotation_offset_for_phase(phase_id, &store)? + 1;
+
+    // F1: Use rotation_round (1-indexed within current epoch) for reviewer selection.
+    let reviewer_name = rotation_select(&pool, rotation_round)
         .ok_or(AnvilError::ReviewerPoolEmpty)?
         .to_owned();
-    let prev_reviewer: Option<String> = if round_number > 1 {
-        rotation_select(&pool, round_number - 1).map(ToOwned::to_owned)
+    let prev_reviewer: Option<String> = if rotation_round > 1 {
+        rotation_select(&pool, rotation_round - 1).map(ToOwned::to_owned)
     } else {
         None
     };
@@ -364,8 +370,8 @@ pub fn run_phase_review(project_root: &Path, phase_id: &str) -> Result<(), Anvil
     let rotation_log = RotationLog::new(
         prev_reviewer,
         reviewer_name.clone(),
-        format!("round-robin selection for phase {phase_id} R{round_number}"),
-        round_number,
+        format!("round-robin selection for phase {phase_id} R{round_number} (epoch round {rotation_round})"),
+        rotation_round,
         cross_refs,
     );
     store.append(&rotation_log)?;
@@ -661,8 +667,11 @@ pub fn run_phase_ship(project_root: &Path, phase_id: &str) -> Result<(), AnvilEr
         "coordinator".to_owned(),
         vec![cross_ref.clone()],
     );
-    let disposition =
-        PhaseDisposition::new(phase_id.to_owned(), "shipped".to_owned(), vec![cross_ref]);
+    let disposition = PhaseDisposition::new(
+        phase_id.to_owned(),
+        DISPOSITION_SHIPPED.to_owned(),
+        vec![cross_ref],
+    );
     store.append(&gate)?;
     store.append(&disposition)?;
 
@@ -914,6 +923,112 @@ async fn invoke_model(
             "sidecar invoke returned unexpected result variant",
         ))),
     }
+}
+
+// ── anvil phase reopen ─────────────────────────────────────────────────────────
+
+/// Runs `anvil phase reopen <phase_id>`.
+///
+/// Computes the transitive blast radius via the dependency graph, shows the full set
+/// of phases that will be invalidated, prompts the user to confirm, then calls
+/// [`anvil_ship::execute_rollback`] to write one `RollbackEvent` per affected phase.
+///
+/// # Errors
+///
+/// Returns [`AnvilError::RollbackCancelled`] if the user declines the confirmation,
+/// [`AnvilError::UnknownPhase`] if `phase_id` is not in the Plan contract, or
+/// [`AnvilError`] on audit-store or I/O failure.
+pub fn run_phase_reopen(
+    project_root: &Path,
+    phase_id: &str,
+    reason: &str,
+    yes: bool,
+) -> Result<(), AnvilError> {
+    if reason.trim().is_empty() {
+        return Err(AnvilError::EmptyReasoning {
+            command: "phase reopen --reason",
+        });
+    }
+    let store = AuditStore::open(project_root)?;
+
+    let contract = load_plan_contract_for_reopen(project_root)?;
+    let graph = anvil_graph::phase_graph::PhaseDepGraph::build_from_contract(&contract);
+
+    // AC3 — Compute and display the full blast radius.
+    let plan = anvil_ship::compute_rollback_plan(phase_id, &graph, &contract)?;
+
+    println!("Re-opening phase '{}'.", plan.target_phase);
+    if plan.all_invalidated.is_empty() {
+        println!("  No dependent phases will be invalidated.");
+    } else {
+        println!(
+            "  {} dependent phase(s) will also be invalidated:",
+            plan.all_invalidated.len()
+        );
+        for dep in &plan.all_invalidated {
+            println!("    - {dep}");
+        }
+    }
+    println!(
+        "  Reviewer rotation resets to position 0 for: {}",
+        plan.all_reset_phases.join(", ")
+    );
+    println!();
+
+    // AC4 — User must explicitly confirm (skip when --yes is passed for CI).
+    if !yes {
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt(format!(
+                "Confirm re-open of '{}' and {} invalidation(s)?",
+                plan.target_phase,
+                plan.all_reset_phases.len()
+            ))
+            .default(false)
+            .interact()
+            .map_err(|_| AnvilError::RollbackCancelled)?;
+
+        if !confirmed {
+            eprintln!("Rollback cancelled.");
+            return Err(AnvilError::RollbackCancelled);
+        }
+    }
+
+    // AC5 — Write RollbackEvent records.
+    // On append failure, a partial set of records may have been written. The
+    // error message instructs the user to re-run the same command to complete the
+    // invalidation (idempotent: duplicate RollbackEvent records are harmless).
+    anvil_ship::execute_rollback(&plan, &store, reason).map_err(|e| {
+        AnvilError::Io(std::io::Error::other(format!(
+            "rollback write failed — partial invalidation may exist; \
+             re-run `anvil phase reopen {phase_id} --reason <reason>` to complete: {e}"
+        )))
+    })?;
+
+    println!("✓ Phase '{phase_id}' re-opened.");
+    println!(
+        "  {} RollbackEvent record(s) written.",
+        plan.all_reset_phases.len()
+    );
+    println!("  Phases invalidated: {}", plan.all_reset_phases.join(", "));
+    println!();
+    // AC8 (v1): Amendment triage is a human judgment call. The CLI surfaces the decision
+    // point; enforcing it via a gate or audit record is out of scope for v1.
+    println!("Next steps:");
+    println!("  1. Amend Charter or Plan if the root cause requires it.");
+    println!("  2. Run `anvil phase build {phase_id}` to start the next build round.");
+    Ok(())
+}
+
+fn load_plan_contract_for_reopen(
+    project_root: &Path,
+) -> Result<anvil_core::plan::PlannerContract, AnvilError> {
+    let contract_path = project_root.join(".anvil/plan_contract.json");
+    let json = std::fs::read_to_string(&contract_path).map_err(|_| {
+        AnvilError::Io(std::io::Error::other(
+            "plan_contract.json not found — run `anvil plan invoke` first",
+        ))
+    })?;
+    anvil_core::plan::parse_planner_contract(&json)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -1184,6 +1299,27 @@ mod tests {
             count_phase_briefing_rounds(&store, "P8").unwrap(),
             2,
             "P9 gate must not increment P8 count"
+        );
+    }
+
+    #[test]
+    fn test_phase_reopen_empty_reason_rejected() {
+        // Empty reason must be caught before any IO — no project setup required.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = run_phase_reopen(tmp.path(), "P1", "", false).unwrap_err();
+        assert!(
+            matches!(err, AnvilError::EmptyReasoning { .. }),
+            "empty reason must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn test_phase_reopen_whitespace_reason_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let err = run_phase_reopen(tmp.path(), "P1", "   ", false).unwrap_err();
+        assert!(
+            matches!(err, AnvilError::EmptyReasoning { .. }),
+            "whitespace-only reason must be rejected: {err}"
         );
     }
 

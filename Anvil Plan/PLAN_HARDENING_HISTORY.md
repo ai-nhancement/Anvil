@@ -503,7 +503,7 @@ Pre-R2 `HingeFlip` records written to an audit store before the `reasoning` fiel
 
 ### Amendment 7 — Provisional Lock resolutions at P11 ship
 
-Six of the eight Provisional Locks reached their revision triggers during Build and are confirmed Final at P11. Two reached their v1.1 prep revision trigger during P11 dogfooding and are explicitly deferred to v1.1 App design (not unaddressed — revision trigger reached and evaluated; no v1 change warranted).
+Six of the eight Provisional Locks reached their revision triggers during Build and are confirmed Final at P11. Two reached their v1.1 prep revision trigger during P11 build and are explicitly deferred to v1.1 App design (not unaddressed — revision trigger reached and evaluated via UX audit and build observations; no v1 change warranted).
 
 **Confirmed Final (6):**
 
@@ -516,8 +516,8 @@ Six of the eight Provisional Locks reached their revision triggers during Build 
 
 **All 8 PLs confirmed Final:**
 
-- `cli-setup-wizard-step-ordering` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: v1 wizard's seven-step sequential ordering reviewed against CLI UX audit and dogfooding session. v1 wizard ordering confirmed Final for v1. v1.1 App wizard is an independent design and will differ; that is not a revision of this v1 choice.
-- `cli-command-structure` — Revision trigger: v1.1 App design begins. Trigger reached during P11 dogfooding. Evaluation: `anvil <resource> <verb>` pattern validated via `docs/ux-audit.md`; two friction points identified (composite finding ID, hinge flip ID) that the App UI resolves at the UX layer without changing the CLI command structure. CLI command structure confirmed Final for v1.
+- `cli-setup-wizard-step-ordering` — Revision trigger: v1.1 App design begins. Trigger reached at P11 build. Evaluation: v1 wizard's seven-step sequential ordering reviewed against CLI UX audit and build observations. v1 wizard ordering confirmed Final for v1. v1.1 App wizard is an independent design and will differ; that is not a revision of this v1 choice.
+- `cli-command-structure` — Revision trigger: v1.1 App design begins. Trigger reached at P11 build. Evaluation: `anvil <resource> <verb>` pattern validated via `docs/ux-audit.md`; two friction points identified (composite finding ID, hinge flip ID) that the App UI resolves at the UX layer without changing the CLI command structure. CLI command structure confirmed Final for v1.
 
 **P11 hinge:** `test_no_outstanding_provisional_locks_after_dogfooding` confirms all 8 PLs confirmed Final. Zero unaddressed or deferred PLs at P11 ship.
 

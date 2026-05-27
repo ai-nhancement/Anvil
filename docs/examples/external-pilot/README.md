@@ -16,7 +16,7 @@ Leaflog was selected because it satisfies every pilot rubric requirement:
 | Criterion | Status |
 |---|---|
 | Scope ceiling (3–7 phases) | 4 phases in the Plan |
-| Timebox (≤14 days) | Completed in 6 days |
+| Timebox (≤14 days) | Representative 6-day timebox |
 | External user | Project idea and domain requirements from a non-Coordinator friend |
 | Domain unrelated to Anvil | Houseplant care — completely unrelated to workflow tools |
 | Provider diversity stress | Coder: Claude (Anthropic direct); Reviewers: GPT-4o (OpenAI direct) + Gemini 2.5 Pro (Google AI Studio direct) |
@@ -79,12 +79,11 @@ P1 would require 2 rounds: GPT-4o would likely find a reminder due-date logic bu
 
 ## Failure Classification
 
-No pilot-blocking failures occurred.
+No pilot-blocking failures are expected in the representative flow.
 
-**Pilot-informing (logged as v1.x issues):**
-- `anvil charter findings` did not show the composite finding ID needed for `anvil arbiter resolve-finding`. The Coordinator had to run `anvil audit list ReviewerFindingPacket` to get the packet UUID and manually construct `<uuid>:F1`. Friction: ~90 seconds per round. *(Logged as UX gap #1 in `docs/ux-audit.md`)*
-- `anvil charter review` blocked silently for ~45 seconds with no progress output. The friend assumed the CLI had crashed. *(Logged as UX gap #2)*
-- The `--yes` flag on `anvil phase reopen` is not documented in the CLI's `--help` output — it appears only as `-y` in the Clap short form. The Coordinator found it via `--help` but the friend would not have. *(Logged as UX gap #3)*
+**Pilot-informing (representative UX friction expected from build observations, to be confirmed in live run):**
+- `anvil charter findings` does not show the composite finding ID needed for `anvil arbiter resolve-finding`. The Coordinator would need to run `anvil audit list ReviewerFindingPacket` to get the packet UUID and manually construct `<uuid>:F1`. Friction: ~90 seconds per round. *(Logged as UX gap #1 in `docs/ux-audit.md`)*
+- `anvil charter review` blocks silently for ~45 seconds with no progress output; a non-expert user may assume the CLI has crashed. *(Logged as UX gap #2 in `docs/ux-audit.md`)*
 
 ---
 
@@ -102,8 +101,8 @@ No adapter-level malformed responses are anticipated. Provider diversity stress:
 
 These artifacts are **representative and illustrative** — they show the structure and content that a real Anvil pilot of this scope and domain would produce. They are authored to match the Leaflog charter and plan precisely, but they are not live audit-store exports from an actual `anvil` CLI execution against real AI providers.
 
-- `charter.md` — final converged charter (R2 clean pass)
-- `LEAFLOG_PLAN.md` — final converged plan (4-phase)
+- `charter.md` — representative final/converged charter (R2 clean pass shape)
+- `LEAFLOG_PLAN.md` — representative final/converged plan (4-phase shape)
 - `audit-store-summary.EXAMPLE.json` — representative record-type counts and phase outcomes, showing what the completed project's audit store would contain (`.EXAMPLE` suffix marks the file as synthetic, not a real export)
 
 A real Anvil pilot would preserve the full `.anvil/` directory, including all `ReviewerFindingPacket`, `ArbiterFindingResolution`, `ConvergenceDeclaration`, `PhaseDisposition`, and `GateApproval` records. The summary JSON in this directory represents that data at the record-type and count level without record-level detail.

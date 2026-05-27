@@ -1,6 +1,6 @@
 # Leaflog Charter
 
-**Version:** R2 (final, converged)  
+**Version:** R2 (representative final/converged form — not a live `anvil charter review` output)  
 **Date:** 2026-05-21  
 **Owner:** [friend's first name redacted]  
 **Pilot coordinator:** jvcan

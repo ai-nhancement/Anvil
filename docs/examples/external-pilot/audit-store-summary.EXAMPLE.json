@@ -1,8 +1,8 @@
 {
-  "note": "Representative audit-store summary. Shows the record-type counts produced by a complete Leaflog Charter → Plan → Build → Ship cycle. Actual record IDs are not preserved here; the pilot project's own .anvil/ directory is the authoritative store.",
+  "note": "Representative audit-store summary. Shows the record-type counts and phase outcomes that a complete Leaflog Charter → Plan → Build → Ship cycle would produce. Not a live export; actual record IDs are not present. Pilot project's own .anvil/ directory will be the authoritative store after Gate 2.",
   "project": "Leaflog",
-  "pilot_period": "2026-05-20 through 2026-05-26",
-  "outcome": "shipped",
+  "pilot_period": "2026-05-20 through 2026-05-26 (representative timebox)",
+  "outcome": "representative_shipped_shape",
   "record_counts": {
     "ReviewerFindingPacket": 10,
     "ArbiterFindingResolution": 14,
@@ -30,6 +30,6 @@
     { "intended": "list-output-width", "pins": "80-col", "phase": "P1", "flipped": false },
     { "intended": "remind-upcoming-window", "pins": "2-day-window", "phase": "P2", "flipped": false }
   ],
-  "integrity_check": "pass",
-  "provider_diversity_stress": "pass"
+  "integrity_check": "representative_pass_shape",
+  "provider_diversity_stress": "pending_live_validation"
 }

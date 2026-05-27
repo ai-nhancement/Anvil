@@ -1,7 +1,7 @@
 # Leaflog — Implementation Plan
 
 **Date:** 2026-05-21  
-**Status:** Approved (R1 converged; hardening applied)  
+**Status:** Representative (approved, R1 converged form — not a live `anvil plan invoke` output)  
 **Phases:** 4 (P0, P1, P2, P3)
 
 ---

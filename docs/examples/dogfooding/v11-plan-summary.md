@@ -1,10 +1,10 @@
 # Anvil v1.1 Plan — Phase Summary
 
 **Date:** 2026-05-26  
-**Status:** Converged (R1 clean pass via dogfooding session)  
+**Status:** Representative (shows converged shape expected from a live dogfooding session; not a live `anvil plan invoke` output)  
 **Full plan:** Lives in the Anvil v1.1 project's own `ANVIL_PLAN.md` (not yet started)
 
-This summary is the phase-level output of the `anvil plan invoke` dogfooding run.
+This summary shows the representative phase-level output expected from an `anvil plan invoke` dogfooding run against real AI providers.
 
 ---
 

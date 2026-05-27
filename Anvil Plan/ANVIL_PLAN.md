@@ -196,8 +196,8 @@ It is not a marketing document. It is a positioning anchor. Marketing prose will
 | Deferred-decision tracking mechanism (`deferred-decision-tracking`) | **Final (P11)** | Hinge tests via `// hinge_test:` source annotations (Rust and Go); P10b unified collection via `anvil hinge list` | Revision trigger reached: P10b operational; bi-language registry and consensus check confirmed working. |
 | Ship transport actions (`ship-transport-actions`) | **Final (P11)** | For Anvil's own dev: `git commit`. For user projects: configurable via `anvil.toml` transport actions. | Revision trigger reached: P9 done; configurable transport confirmed working. |
 | Runtime alert response policies (`runtime-alert-response-policies`) | **Final (P11)** | Alerts surface to CLI as warnings in v1 (`warn` level; no hard-stop unless `cost_limits.enforce = true`) | Revision trigger reached: P10a done; warning-mode confirmed as the right v1 policy. |
-| CLI Setup Wizard step ordering and prompts (`cli-setup-wizard-step-ordering`) | **Final (P11)** | Seven-step interactive wizard, invoked via `anvil setup`. Reviewed against v1 usage in P11 dogfooding and `docs/ux-audit.md`. v1 wizard step ordering is confirmed as the correct v1 design. The v1.1 App wizard is an independent design that will differ; that is a v1.1 problem, not a revision of this v1 choice. | v1.1-prep trigger reached and evaluated at P11. v1 wizard ordering confirmed Final. |
-| CLI command structure (`cli-command-structure`) | **Final (P11)** | Verb-resource pattern (`anvil <resource> <verb>`); commands enumerated in P5–P9. Reviewed against `docs/ux-audit.md` during P11 dogfooding. Two friction points identified that the v1.1 App UI resolves at the UX layer without changing the CLI structure. Confirmed Final for v1. | v1.1-prep trigger reached and evaluated at P11. `anvil <resource> <verb>` pattern confirmed Final. |
+| CLI Setup Wizard step ordering and prompts (`cli-setup-wizard-step-ordering`) | **Final (P11)** | Seven-step interactive wizard, invoked via `anvil setup`. Reviewed against build observations and `docs/ux-audit.md`. v1 wizard step ordering is confirmed as the correct v1 design. The v1.1 App wizard is an independent design that will differ; that is a v1.1 problem, not a revision of this v1 choice. | v1.1-prep trigger reached and evaluated at P11. v1 wizard ordering confirmed Final. |
+| CLI command structure (`cli-command-structure`) | **Final (P11)** | Verb-resource pattern (`anvil <resource> <verb>`); commands enumerated in P5–P9. Reviewed against `docs/ux-audit.md` during P11 build. Two friction points identified that the v1.1 App UI resolves at the UX layer without changing the CLI structure. Confirmed Final for v1. | v1.1-prep trigger reached and evaluated at P11. `anvil <resource> <verb>` pattern confirmed Final. |
 
 **Provisional Locks at Plan-Review time: 8 (plan text noted 7; one additional PL was added post-review).** P11 resolution: all 8 confirmed Final. The `choice_key` slug in parentheses for each row is canonical and matches the P11 hinge test. Zero outstanding PLs at P11 ship.
 
@@ -825,14 +825,16 @@ Fifteen phases. P0–P3c are foundations (Vault library, audit store, contract, 
   - Write `docs/onboarding.md`: getting-started for a new user.
   - Write `docs/contract.md`: sidecar contract documentation.
 - **Deliverable.** Documentation complete. All Provisional Locks resolved. Dogfooding and external pilot: representative artifacts provided with Coordinator attestation (`docs/examples/coordinator-attestation.md`); live CLI execution against real AI providers deferred to before public ship.
-- **Acceptance criteria.**
-  1. At least one Charter → Plan cycle completes via `anvil` CLI alone for the Anvil v1.1 App design. *(Deferred with attestation — see `docs/examples/coordinator-attestation.md`.)*
-  2. At least one external, non-self-referential project completes a full Charter → Plan → Build → Ship cycle via `anvil` CLI alone. *(Deferred with attestation — see `docs/examples/coordinator-attestation.md`.)*
-  3. The external pilot includes at least one Build phase that goes through multi-reviewer rotation. *(Deferred with attestation — see AC2.)*
-  4. Every Provisional Lock confirmed (→ Final) or revised (with new audit record). No outstanding Provisional Locks at P11 ship.
-  5. Runbook covers all six gate operations.
-  6. Onboarding guide can be followed by a new user without consulting the runbook.
-  7. The v1.1 Plan that comes out of dogfooding is the input for the v1.1 App design.
+- **Acceptance criteria — Gate 1 (satisfied at P11 ship):**
+  1. Every Provisional Lock confirmed (→ Final) or revised (with new audit record). No outstanding Provisional Locks at P11 ship.
+  2. Runbook covers all P11 Coordinator workflows and gate operations.
+  3. Onboarding guide can be followed by a new user without consulting the runbook.
+  4. Representative dogfooding artifacts (v1.1 charter + plan summary) and external pilot artifacts in `docs/examples/`, with formal Coordinator attestation (`docs/examples/coordinator-attestation.md`). Documentation deliverable complete; live CLI execution against real AI providers is a Gate 2 requirement.
+- **Acceptance criteria — Gate 2 (deferred; required before public ship):**
+  1. At least one Charter → Plan cycle completes via `anvil` CLI alone for the Anvil v1.1 App design (live execution against real AI providers; actual audit-store records preserved). *(Deferred with attestation)*
+  2. At least one external, non-self-referential project completes a full Charter → Plan → Build → Ship cycle via `anvil` CLI alone (live execution; actual audit-store records preserved). *(Deferred with attestation)*
+  3. The external pilot includes at least one Build phase that goes through multi-reviewer rotation (live execution). *(Deferred — see AC2)*
+  4. The v1.1 Plan from live dogfooding validated as the input for the v1.1 App design. *(Deferred — see AC1)*
 - **Dependencies.** All prior phases.
 - **Hinge-test list.**
   - `test_no_outstanding_provisional_locks_after_dogfooding`
@@ -1024,7 +1026,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **Auto-update.** Out of v1 scope.
 
-- **Provider adapter expansion roadmap.** v1 ships three direct-API adapters (Anthropic, OpenAI, Google AI Studio) — the minimum set required to satisfy the family-floor invariant with Claude as Coder. The architecture supports cloud-hosted variants (Azure OpenAI, AWS Bedrock, Google Vertex AI) and additional direct APIs (xAI) as additive adapters that do not modify Vault, contract, or existing adapters. Gateways (DigitalOcean Gradient, OpenRouter) are likewise additive. Which adapters ship in v1.1 vs. later is informed by P11 dogfooding and pilot feedback on users' actual provider preferences. The family-floor invariant is unaffected by adapter expansion because it operates on model identity, not on access path. Status: open, prioritization deferred to post-P11 evidence.
+- **Provider adapter expansion roadmap.** v1 ships three direct-API adapters (Anthropic, OpenAI, Google AI Studio) — the minimum set required to satisfy the family-floor invariant with Claude as Coder. The architecture supports cloud-hosted variants (Azure OpenAI, AWS Bedrock, Google Vertex AI) and additional direct APIs (xAI) as additive adapters that do not modify Vault, contract, or existing adapters. Gateways (DigitalOcean Gradient, OpenRouter) are likewise additive. Which adapters ship in v1.1 vs. later will be informed by live Gate 2 dogfooding and pilot evidence on users' actual provider preferences. The family-floor invariant is unaffected by adapter expansion because it operates on model identity, not on access path. Status: open, prioritization deferred to Gate 2 evidence.
 
 - **External pilot project selection.** The specific project used for the P11 external pilot is not pre-selected in the Plan; it is chosen during P11 based on what is available and small enough to complete within the phase. Status: open, resolved in P11.
 
@@ -1034,7 +1036,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 ## v1.1 Design Seeds
 
-This appendix collects items that are explicitly *not* v1 scope but are anticipated v1.1 design work. Each is recorded here with the problem statement, the constraints established at Plan-level (which the v1.1 design must preserve), and the v1 data points expected to inform the design (typically: observational data from P11 dogfooding and pilot). The intent is that these survive as deliberate design seeds rather than as undifferentiated post-v1 notes.
+This appendix collects items that are explicitly *not* v1 scope but are anticipated v1.1 design work. Each is recorded here with the problem statement, the constraints established at Plan-level (which the v1.1 design must preserve), and the v1 data points expected to inform the design (typically: live Gate 2 evidence from P11 dogfooding and pilot runs). The intent is that these survive as deliberate design seeds rather than as undifferentiated post-v1 notes.
 
 ### Seed 1: Checkpoint/resume for long sidecar streams
 
@@ -1136,7 +1138,7 @@ The v1 build progresses through two distinct gates, separating implementation co
 
 The following criteria are satisfied at P11 ship:
 
-1. All 15 phases (P0, P1, P2, P3a, P3b, P3c, P4, P5, P6, P7, P8, P9, P10a, P10b, P11) have shipped per the per-phase acceptance criteria.
+1. All 15 phases (P0, P1, P2, P3a, P3b, P3c, P4, P5, P6, P7, P8, P9, P10a, P10b, P11) have shipped per their Gate-1-applicable per-phase acceptance criteria. P11's live dogfooding and external pilot criteria are Gate 2 requirements listed below.
 2. All Provisional Locks are resolved (confirmed Final or explicitly revised with audit record).
 3. The 6 Layer-1 product health metrics are being collected automatically.
 4. Layer-2 numeric thresholds provisionally confirmed from v1 build and test data (live P11 dogfooding and pilot baselines required before final confirmation — deferred to Gate 2).
@@ -1144,7 +1146,7 @@ The following criteria are satisfied at P11 ship:
 6. `convergence-declaration` log shows the rotation paths actually taken.
 7. The Plan has been reviewed by at least two non-Coder reviewers and converged.
 8. No outstanding hinge tests block Ship.
-9. v1 binaries (`anvil`, `anvil-sidecar`) build correctly for the primary platform (Windows x64); stretch platforms (macOS aarch64/x64, Linux x64 musl-static) ship best-effort. A signed `SHA256SUMS.txt.asc` is published with every release archive. The smoke-test script described in *Open Items / Distribution* passes against the primary-platform release candidate before v1 is declared shipped. The script is written at release time (not in P11); its commands are restricted to commands that exist in the v1 binary (`anvil --version`, `anvil-sidecar --version`, `anvil init`, `anvil hinge list`, etc.).
+9. v1 binaries (`anvil`, `anvil-sidecar`) build and test correctly for the primary platform (Windows x64); stretch platforms (macOS aarch64/x64, Linux x64 musl-static) ship best-effort. Validated by `cargo test --workspace` and `go test ./...` passing on the primary platform.
 10. Dogfooding and external pilot documentation complete: representative artifacts in `docs/examples/dogfooding/` and `docs/examples/external-pilot/`, with formal Coordinator attestation in `docs/examples/coordinator-attestation.md`. This criterion satisfies the P11 documentation deliverable; live CLI execution against real AI providers remains a Gate 2 requirement and is not claimed here.
 
 **Status: Complete.**
@@ -1155,6 +1157,7 @@ The following criteria must be satisfied before the repository is made public or
 
 1. The dogfooding test in P11 has produced a Charter and Plan for Anvil v1.1 using the v1 CLI alone (live execution against real AI providers; actual audit-store records preserved).
 2. At least one external, non-self-referential project has completed a full Charter → Plan → Build → Ship cycle using the v1 CLI alone, including at least one Build phase with multi-reviewer rotation (live execution; actual audit-store records preserved).
+3. Release archive produced for the primary platform (Windows x64) with `SHA256SUMS.txt` + signed `SHA256SUMS.txt.asc`; smoke-test script (written at release time, not a P11 deliverable) passes against the release candidate.
 
 **Status: Deferred (attested) — see `docs/examples/coordinator-attestation.md`.**
 
@@ -1185,7 +1188,7 @@ This Plan is for **v1 (CLI)**. The v1.1 work — adding the Tauri + React + Type
 The v1 → v1.1 transition is a deliberate review point, not an implicit re-decision. Two Provisional Locks carried `revision trigger = v1.1 App design begins` and were evaluated at P11:
 
 - *CLI Setup Wizard step ordering and prompts* (`cli-setup-wizard-step-ordering`) — evaluated against v1 usage feedback and `docs/ux-audit.md`. **Confirmed Final at P11.** The v1 seven-step sequential wizard is the locked v1 design; the v1.1 App wizard is an independent design.
-- *CLI command structure* (`cli-command-structure`) — evaluated against `docs/ux-audit.md` and P11 dogfooding. **Confirmed Final at P11.** The `anvil <resource> <verb>` pattern is the locked v1 design; the v1.1 App IPC boundary is an independent design.
+- *CLI command structure* (`cli-command-structure`) — evaluated against `docs/ux-audit.md` and build observations. **Confirmed Final at P11.** The `anvil <resource> <verb>` pattern is the locked v1 design; the v1.1 App IPC boundary is an independent design.
 
 Eight decisions in *App-Compatibility Design Decisions* are consciously made for App coexistence. These are the starting constraints for the v1.1 design; they may be revised by the v1.1 Charter process but not unilaterally.
 

@@ -152,6 +152,8 @@ mod tests {
         );
 
         for service in &service_names {
+            // Substring match is intentional — this is a smoke test, not a schema validator.
+            // Structured proto-vs-doc checking is a v1.1 task.
             assert!(
                 contract_doc.contains(service),
                 "docs/contract.md is missing proto service name '{service}'; \

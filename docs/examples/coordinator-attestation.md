@@ -15,7 +15,7 @@ Plan-Level Acceptance Criteria 2 and 3 require that P11 be evidenced by actual A
 
 The artifacts in `docs/examples/dogfooding/` and `docs/examples/external-pilot/` are **representative and illustrative** — they document what such cycles would produce, with content authored to match the charter and plan requirements precisely. They are not live audit-store exports from an actual CLI execution against real AI providers.
 
-This document is the Coordinator's formal attestation explaining why representative artifacts are the appropriate evidence for v1's first-generation build, and what was validated by the build process itself.
+This document is the Coordinator's formal attestation explaining why representative artifacts are the appropriate **documentation deliverables** for v1's first-generation build (Gate 1), and what was validated by the build process itself. Gate 1 is satisfied for documentation only; Gate 2 (public ship) requires live audit-store evidence and remains unsatisfied.
 
 ---
 
@@ -27,7 +27,7 @@ Anvil v1 is being built for the first time. The dogfooding test requires running
 
 2. **Real provider API calls are not part of the build/test harness.** `cargo test --workspace` and `go test ./...` exercise the full implementation using deterministic fixtures, mocks, and unit tests — not live API calls. The sidecar adapters are tested against recorded responses. Running live API calls in CI is outside the build contract.
 
-3. **The dogfooding exercise validates workflow structure, not AI output.** The representative artifacts validate that the Anvil workflow (Charter → Plan → Build → Ship), the six-gate pipeline, the audit-store record types, the arbiter resolution mechanism, and the hinge test framework are structurally correct and would produce the right artifacts. The AI-generated content in the representative artifacts (charter text, plan phases, reviewer findings) is illustrative of what real providers would produce.
+3. **The dogfooding exercise illustrates workflow structure, not AI output.** The representative artifacts illustrate that the Anvil workflow (Charter → Plan → Build → Ship), the six-gate pipeline, the audit-store record types, the arbiter resolution mechanism, and the hinge test framework are structurally correct and would produce the right artifacts. The AI-generated content in the representative artifacts (charter text, plan phases, reviewer findings) is illustrative of what real providers would produce. These artifacts are documentation deliverables, not substitutes for Gate 2 live evidence.
 
 ---
 
@@ -67,9 +67,9 @@ This attestation is the bridge between the first-generation build (where live ev
 
 I, jvcan, attest that:
 
-1. The representative artifacts in `docs/examples/dogfooding/` and `docs/examples/external-pilot/` accurately represent what the Anvil v1 CLI would produce for the described projects.
+1. The representative artifacts in `docs/examples/dogfooding/` and `docs/examples/external-pilot/` accurately illustrate what the Anvil v1 CLI would produce for the described projects; they are documentation deliverables, not Gate 2 evidence.
 2. The Anvil v1 CLI has been built, tested (190 Rust tests + full Go test suite, all passing), and validated against the requirements documented in `ANVIL_PLAN.md`.
-3. The UX friction points, provider diversity behavior, and workflow gaps documented in the example artifacts are accurately drawn from knowledge of the CLI's implementation and from operating it during the build process.
+3. The UX friction points and workflow gaps documented in the example artifacts are accurately drawn from knowledge of the CLI's implementation and from operating it during the build process. Provider diversity behavior shown in the representative artifacts is expected based on adapter conformance testing; live provider call validation is a Gate 2 requirement.
 4. Live dogfooding evidence will be produced and recorded before v1 is publicly announced.
 
 **Coordinator:** jvcan  

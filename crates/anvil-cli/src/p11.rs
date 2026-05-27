@@ -37,10 +37,9 @@ mod tests {
             .parent()
             .unwrap(); // workspace root
 
-        let plan_doc = std::fs::read_to_string(
-            workspace_root.join("Anvil Plan").join("ANVIL_PLAN.md"),
-        )
-        .expect("Anvil Plan/ANVIL_PLAN.md not found; check workspace layout");
+        let plan_doc =
+            std::fs::read_to_string(workspace_root.join("Anvil Plan").join("ANVIL_PLAN.md"))
+                .expect("Anvil Plan/ANVIL_PLAN.md not found; check workspace layout");
 
         // Each Required Choices table row for a Final-at-P11 PL looks like:
         //   | Choice text (`slug`) | **Final (P11)** | ...
@@ -80,18 +79,18 @@ mod tests {
     #[test]
     fn test_contract_doc_sync_method() {
         // Pins: docs/contract.md is manually synced from proto/anvil/v1/sidecar.proto in v1.
-        // This test verifies all RPC names defined in the proto appear in the contract doc
-        // and that the maintenance note is present. Full schema-level CI enforcement
-        // (message fields, field numbers, enum values) is explicitly a v1.1 task.
+        // RPC-name coverage check: verifies every RPC name in the proto appears as a
+        // substring in the contract doc. This does NOT check service name, request/response
+        // types, message fields, field numbers, oneof variants, enum values, or package.
+        // Full schema-level CI enforcement is explicitly a v1.1 task.
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap() // crates/
             .parent()
             .unwrap(); // workspace root
 
-        let contract_doc =
-            std::fs::read_to_string(workspace_root.join("docs").join("contract.md"))
-                .expect("docs/contract.md not found; check workspace layout");
+        let contract_doc = std::fs::read_to_string(workspace_root.join("docs").join("contract.md"))
+            .expect("docs/contract.md not found; check workspace layout");
 
         let proto = std::fs::read_to_string(
             workspace_root

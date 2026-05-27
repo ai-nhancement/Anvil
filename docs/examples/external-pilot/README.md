@@ -2,8 +2,10 @@
 
 **Project:** Leaflog — a houseplant watering journal CLI  
 **Pilot period:** 2026-05-20 through 2026-05-26 (6 calendar days; 14-day timebox)  
-**Outcome:** Full Charter → Plan → Build → Ship cycle completed  
+**Representative outcome:** Full cycle shape documented; live execution deferred (see `docs/examples/coordinator-attestation.md`)  
 **Pilot coordinator:** jvcan (operating the Anvil CLI on behalf of a friend's project idea)
+
+> **Representative artifacts — not a live CLI execution.** The artifacts below show the structure and content a real Anvil pilot of this scope would produce. They are not live audit-store exports from an actual CLI execution against real AI providers.
 
 ---
 

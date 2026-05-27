@@ -456,11 +456,11 @@ Fifteen new choices, all Final. Open-source-related: Open-source license = Apach
 ### New Charter Sections (full text in the amendment document; key commitments here)
 
 - **Contract Inventory** — six public contracts enumerated with owner / versioning policy / migration policy: Vault library API, audit-store record schemas, artifact specification document, sidecar wire protocol, structured CLI output, machine-readable error codes. Major bumps to any of these require Charter amendment.
-- **Public vs Private Audit Records** — all audit records private by default. `recommended_visibility` metadata is non-binding guidance. Public publication requires per-record explicit Coordinator approval through `anvil audit export --public` with secret scan + license scan + sensitivity labels + manual Coordinator review + cryptographic seal.
+- **Public vs Private Audit Records** — all audit records private by default. `recommended_visibility` metadata is non-binding guidance. Public publication requires per-record explicit Coordinator approval through `anvil audit export --public` with secret scan + license scan + sensitivity labels + manual Coordinator review + cryptographic seal. *(The `anvil audit export --public` command is deferred to v1.1 — Plan Amendment 9. In v1, the publication-safe gate in `docs/runbook.md` covers the manual review component for the initial public flip.)*
 - **Publication-Safe Git History Gate** — runs before the repo flips public: full-history secret scan + full-history license scan + Coordinator commit-message review + exceptional history-rewrite allowance.
 - **Embedding Invariants** — six non-negotiable rules for the v1.2 embedded surface (Vault authority, no gate bypass, typed API, audit records mandatory, per-embedder auth, multi-tenant isolation).
-- **Structured CLI Output Stability** — per-command JSON Schemas in `schemas/cli/`, `schema_version` in every output, stable error codes, `--describe-schema` flag mandatory, compatibility test suite in CI.
-- **Repo-Readiness Acceptance Gates** — twelve concrete deliverables (LICENSE, NOTICE, README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, GOVERNANCE, optional TRADEMARK, CI policy checks, release signing workflow, SBOM generation, public-safe audit bundle self-validation) the publication milestone cannot fire without.
+- **Structured CLI Output Stability** — per-command JSON Schemas in `schemas/cli/`, `schema_version` in every output, stable error codes, `--describe-schema` flag mandatory, compatibility test suite in CI. *(v1 scope per Plan Amendment 9: `--describe-schema` is implemented on `phase build` only; `schemas/cli/` and broad `--format json` are deferred to v1.1.)*
+- **Repo-Readiness Acceptance Gates** — twelve concrete deliverables (LICENSE, NOTICE, README, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, GOVERNANCE, optional TRADEMARK, CI policy checks, release signing workflow, SBOM generation, public-safe audit bundle self-validation) the publication milestone cannot fire without. *(Public-safe audit bundle self-validation is deferred to v1.1 pending `anvil audit export --public` — Plan Amendment 9. The eleven other deliverables are implemented in v1.)*
 - **Per-Item Disposition Mechanism + Cross-Document Convergence** — review-process rules for future composed amendments and cross-document concurrent reviews.
 
 ### Audit-store record types updated
@@ -469,7 +469,7 @@ The Charter's *Audit-Store Minimum Schema* invariant lists eleven required types
 
 ### Downstream
 
-Plan Draft 7 is the required next workstream: reconcile record-type counts from 13 to 16; produce the impact matrix promised in the amendment; integrate the publication-safe-history gate into P11 acceptance; add the public-export bundle to P2; add `--describe-schema` to P5–P10a; update P0 to include repo-readiness gate work. `ARTIFACT_SPECIFICATIONS.md` continues its own R1 review as a separate workstream.
+Plan Draft 7 was completed through the Build stage (P0–P11). Record-type count reconciled to 15 — three A1-contemplated types (`PublicVisibilityPolicy`, `PublicExportApproval`, `EmergencyFreezeDeclaration`) formally deferred to v1.1 (Plan Amendment 12); two Build-phase types (`CuratedFindings`, `PlanConsolidation`) added. Publication-safe-history gate integrated into P11 acceptance (Plan Amendment 10). `--describe-schema` scoped to `phase build` only in v1 (Plan Amendment 9). `anvil audit export --public` deferred to v1.1 (Plan Amendment 9). `ARTIFACT_SPECIFICATIONS.md` proceeded as a separate workstream.
 
 ---
 

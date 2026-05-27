@@ -1,6 +1,8 @@
 # Dogfooding: Anvil v1.1 App Design
 
-**Session:** Anvil v1.1 charter and plan — produced using the Anvil v1 CLI  
+> **Representative artifacts — not a live CLI execution.** The artifacts below are illustrative of what an Anvil v1 dogfooding session would produce. They are not live exports from an actual `anvil discuss` / `anvil charter review` / `anvil plan invoke` execution against real AI providers. See `docs/examples/coordinator-attestation.md`.
+
+**Session:** Anvil v1.1 charter and plan — representative of output expected from the Anvil v1 CLI (live execution deferred; see coordinator-attestation.md)  
 **Date:** 2026-05-26  
 **Operator:** jvcan (Coordinator)  
 **CLI version:** v1.0.0 (the build produced by P0–P11)
@@ -9,7 +11,7 @@
 
 ## What This Is
 
-This directory contains the outputs from running Anvil v1's own CLI against the v1.1 design problem: designing the Tauri + React + TypeScript desktop App that will accompany the v1 CLI.
+This directory contains representative artifacts showing what an Anvil v1 dogfooding session on the v1.1 App design problem would produce. The actual dogfooding session — running the CLI against real AI providers — is deferred to before public ship (see `docs/examples/coordinator-attestation.md`).
 
 The dogfooding exercise is the Plan's primary acceptance test: "Anvil v1 can manage the Anvil v1.1 design (Charter through Plan) without manual orchestration."
 

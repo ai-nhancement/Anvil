@@ -90,6 +90,7 @@ dependencies = [
  "anvil-core",
  "anvil-eval",
  "anvil-graph",
+ "anvil-hinge",
  "anvil-ship",
  "anvil-sidecar-client",
  "chrono",
@@ -144,6 +145,11 @@ dependencies = [
 [[package]]
 name = "anvil-hinge"
 version = "0.1.0"
+dependencies = [
+ "anvil-core",
+ "serde",
+ "toml",
+]
 
 [[package]]
 name = "anvil-ship"

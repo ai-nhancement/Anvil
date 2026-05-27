@@ -30,3 +30,31 @@ func TestSidecarEntryPointExists(t *testing.T) {
 		t.Errorf("expected binary name anvil-sidecar; got %s", binaryName)
 	}
 }
+
+// hinge_test: pins=comment-parser, intended=test_hinge_comment_metadata_required, phase=P10b
+func TestHingeCommentMetadataRequired(t *testing.T) {
+	// Pins: a valid // hinge_test: annotation must supply all of pins, intended, and phase.
+	// Flipping requires changing the annotation format and updating the Rust scanner together.
+	sample := "// hinge_test: pins=v1, intended=my-hinge, phase=P5"
+	fields := map[string]bool{"pins": false, "intended": false, "phase": false}
+	rest, ok := strings.CutPrefix(strings.TrimSpace(sample), "// hinge_test:")
+	if !ok {
+		t.Fatal("sample is not a hinge_test comment")
+	}
+	for _, part := range strings.Split(rest, ",") {
+		part = strings.TrimSpace(part)
+		for key := range fields {
+			if strings.HasPrefix(part, key+"=") {
+				val := strings.TrimSpace(strings.TrimPrefix(part, key+"="))
+				if val != "" {
+					fields[key] = true
+				}
+			}
+		}
+	}
+	for key, found := range fields {
+		if !found {
+			t.Errorf("hinge_test annotation missing required field %q", key)
+		}
+	}
+}

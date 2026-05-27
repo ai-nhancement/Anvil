@@ -6,5 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Anvil hinge-test framework"
 
+[dependencies]
+anvil-core = { path = "../anvil-core" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
 [lints]
 workspace = true

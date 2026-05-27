@@ -2,6 +2,7 @@ mod arbiter;
 mod charter;
 mod discuss;
 mod graph;
+mod hinge;
 mod metrics;
 mod phase;
 mod plan;
@@ -95,6 +96,9 @@ enum Command {
     /// Evaluation metrics and alert engine (P10a).
     #[command(subcommand)]
     Metrics(MetricsCmd),
+    /// Hinge-test registry management (P10b).
+    #[command(subcommand)]
+    Hinge(HingeCmd),
 }
 
 #[derive(Subcommand)]
@@ -107,6 +111,36 @@ enum MetricsCmd {
     },
     /// Display per-metric values across all shipped phases.
     History {
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum HingeCmd {
+    /// List all hinge-test entries with pinned values, intended IDs, and flip status.
+    List {
+        /// Run cross-language consensus check; exit non-zero if violations exist.
+        #[arg(long)]
+        strict: bool,
+        /// Print only the total entry count and exit.
+        #[arg(long)]
+        count: bool,
+        /// Project directory (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+    /// Record a `HingeFlip` audit entry for the given hinge intended ID.
+    Flip {
+        /// Canonical hinge ID (the `intended` field of the annotation).
+        id: String,
+        /// New pinned value to record (replaces the current `pins` value).
+        #[arg(long)]
+        new_value: String,
+        /// Non-empty reasoning for the flip decision.
+        #[arg(long)]
+        reason: String,
         /// Project directory (defaults to current directory).
         #[arg(long, default_value = ".")]
         project: PathBuf,
@@ -358,6 +392,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
     match cli.command {
         Command::Init { path } => cmd_init(&path),
@@ -457,6 +492,19 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
         Command::Metrics(cmd) => match cmd {
             MetricsCmd::Show { project } => metrics::run_metrics_show(&project),
             MetricsCmd::History { project } => metrics::run_metrics_history(&project),
+        },
+        Command::Hinge(cmd) => match cmd {
+            HingeCmd::List {
+                strict,
+                count,
+                project,
+            } => hinge::run_hinge_list(&project, strict, count),
+            HingeCmd::Flip {
+                id,
+                new_value,
+                reason,
+                project,
+            } => hinge::run_hinge_flip(&project, &id, &new_value, &reason),
         },
     }
 }

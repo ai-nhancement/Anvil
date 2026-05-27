@@ -15,6 +15,7 @@ anvil-core = { path = "../anvil-core" }
 anvil-audit = { path = "../anvil-audit" }
 anvil-eval = { path = "../anvil-eval" }
 anvil-graph = { path = "../anvil-graph" }
+anvil-hinge = { path = "../anvil-hinge" }
 anvil-ship = { path = "../anvil-ship" }
 anvil-sidecar-client = { path = "../anvil-sidecar-client" }
 clap = { version = "4", features = ["derive"] }

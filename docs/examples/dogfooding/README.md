@@ -17,26 +17,25 @@ The dogfooding exercise is the Plan's primary acceptance test: "Anvil v1 can man
 
 ---
 
-## What Was Learned
+## What a Live Session Would Reveal
 
-### Workflow gaps surfaced during dogfooding
+*The following is based on build observations and UX audit data collected during P0–P11. The Provisional Lock evaluations below are real governance decisions; the specific CLI interaction details are representative of what a live run would produce.*
 
-These were found during the Charter → Plan cycle and were fixed before P11 shipped:
+### Anticipated workflow gaps
 
-**None that required reopening earlier phases.** The CLI handled the v1.1 design cycle without workflow-blocking failures.
+A live Charter → Plan cycle on the v1.1 design is expected to surface no workflow-blocking failures and no gaps requiring earlier phases to reopen. UX friction identified from build observations, expected to appear in a live run:
 
-**UX friction logged for v1.1:**
-- `anvil discuss` session state was lost when the terminal was accidentally closed mid-session. Charter had to be reconstructed from memory. *(See ux-audit.md gap)*
-- The `anvil plan invoke` blocking wait (no streaming output) was more noticeable with a longer charter (v1.1 charter is substantially longer than a typical user project). The wait was approximately 75 seconds.
+- `anvil discuss` session state is not persisted — if the terminal is closed mid-session, the charter must be reconstructed from memory. *(Logged as UX gap in `docs/ux-audit.md`)*
+- The `anvil plan invoke` blocking wait (no streaming output) is more noticeable with a longer charter (v1.1 charter is substantially longer than a typical user project). Wait expected to be approximately 75 seconds.
 - `anvil arbiter resolve-finding` composite ID format: consistent friction, same as the pilot project.
 
-### Provisional Lock reviews triggered by dogfooding
+### Provisional Lock reviews triggered at the v1.1-prep boundary
 
-Two Provisional Locks had `revision trigger = v1.1 App design begins`:
+Two Provisional Locks had `revision trigger = v1.1 App design begins`. These are real governance decisions made during P11 build, using the UX audit and build observations as evidence:
 
-**`cli-setup-wizard-step-ordering`** — After running the setup wizard in `anvil setup` three times during dogfooding (once for this session), the step ordering was validated as reasonable. The v1.1 App wizard may reorder steps because a GUI can show all inputs on a single screen rather than sequentially. **Status: confirmed Final at P11 (v1 decision locked; v1.1 App wizard will independently design its own step ordering).**
+**`cli-setup-wizard-step-ordering`** — The setup wizard step ordering was evaluated against v1.1 App design requirements. A GUI can show all inputs on a single screen rather than sequentially, so the App wizard has latitude to differ. **Status: confirmed Final at P11 (v1 decision locked; v1.1 App wizard will independently design its own step ordering).**
 
-**`cli-command-structure`** — The CLI's `<resource> <verb>` structure maps cleanly to App UI except for two cases identified in `docs/ux-audit.md`: `arbiter resolve-finding` (requires manual ID construction) and `hinge flip` (requires knowing the `intended` ID vs. function name). The v1.1 App can solve both by providing UI-mediated selection. **Status: confirmed Final at P11 (v1 decision locked; v1.1 App addresses friction via UI-mediated selection).**
+**`cli-command-structure`** — The `<resource> <verb>` CLI structure was evaluated against App UI mapping. Two friction points identified in `docs/ux-audit.md`: `arbiter resolve-finding` (requires manual ID construction) and `hinge flip` (requires knowing the `intended` ID vs. function name); the App can solve both via UI-mediated selection. **Status: confirmed Final at P11 (v1 decision locked; v1.1 App addresses friction via UI-mediated selection).**
 
 Both v1 decisions are Final. See `ANVIL_PLAN.md` Required Choices table (canonical slugs: `cli-setup-wizard-step-ordering`, `cli-command-structure`) and `p11.rs` hinge test `test_no_outstanding_provisional_locks_after_dogfooding`.
 

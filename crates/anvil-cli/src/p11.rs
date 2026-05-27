@@ -41,13 +41,30 @@ mod tests {
             std::fs::read_to_string(workspace_root.join("Anvil Plan").join("ANVIL_PLAN.md"))
                 .expect("Anvil Plan/ANVIL_PLAN.md not found; check workspace layout");
 
+        // Scope extraction to the "## Locked Required Project-Level Choices" section so
+        // unrelated table rows elsewhere in the Plan cannot match. Fail fast with a clear
+        // message if the section header is ever renamed.
+        let lines: Vec<&str> = plan_doc.lines().collect();
+        let section_start = lines
+            .iter()
+            .position(|line| line.starts_with("## Locked Required Project-Level Choices"))
+            .expect(
+                "Section '## Locked Required Project-Level Choices' not found in ANVIL_PLAN.md; \
+                 check section header",
+            );
+        let section_end = lines[section_start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map_or(lines.len(), |rel| section_start + 1 + rel);
+
         // Each Required Choices table row for a Final-at-P11 PL looks like:
         //   | Choice text (`slug`) | **Final (P11)** | ...
         // Bold markers are stripped before matching so minor formatting changes
         // (e.g. "**Final** (P11)" vs "**Final (P11)**") do not silently break extraction.
         // Split by | to get the Choice column, then extract the backtick-enclosed slug.
-        let plan_slugs: Vec<String> = plan_doc
-            .lines()
+        let plan_slugs: Vec<String> = lines[section_start..section_end]
+            .iter()
+            .copied()
             .filter(|line| line.replace("**", "").contains("Final (P11)"))
             .filter_map(|line| {
                 let cols: Vec<&str> = line.split('|').collect();
@@ -93,8 +110,8 @@ mod tests {
     #[test]
     fn test_contract_doc_sync_method() {
         // Pins: docs/contract.md is manually synced from proto/anvil/v1/sidecar.proto in v1.
-        // RPC-name coverage check: verifies every RPC name in the proto appears as a
-        // substring in the contract doc. This does NOT check service name, request/response
+        // RPC-name presence smoke test: verifies every RPC name in the proto appears as a
+        // substring in the contract doc. Does NOT check service name, request/response
         // types, message fields, field numbers, oneof variants, enum values, or package.
         // Full schema-level CI enforcement is explicitly a v1.1 task.
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

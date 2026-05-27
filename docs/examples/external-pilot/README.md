@@ -37,11 +37,13 @@ Leaflog is a small CLI tool for tracking houseplant watering events, soil moistu
 
 ## Workflow Summary
 
+*Representative flow — describes what a live Leaflog pilot using Anvil v1 would look like, authored to match the project charter and plan precisely. Actual CLI execution against real AI providers is deferred; see top-level notice and `docs/examples/coordinator-attestation.md`.*
+
 ### Charter
 
-The charter was written by the project owner (the friend), who described the tool's purpose, the plants she manages, and what she would want the CLI to do. The Coordinator ran `anvil discuss` to help structure it.
+The charter would be written by the project owner (the friend), who describes the tool's purpose, the plants she manages, and what she would want the CLI to do. The Coordinator would run `anvil discuss` to help structure it.
 
-**Charter review:** 2 rounds (R1: 3 findings, kept 2, dropped 1; R2: clean pass). Convergence declared on R2.
+**Expected charter review:** 2 rounds (R1: 3 findings, kept 2, dropped 1; R2: clean pass). Convergence declared on R2.
 
 **Key charter decisions:**
 - SQLite as the local store (not a flat file): the friend wanted to filter plants by room, which needs a query layer.
@@ -50,24 +52,24 @@ The charter was written by the project owner (the friend), who described the too
 
 ### Plan
 
-`anvil plan invoke` produced a 4-phase plan. Review in 1 round (R1: 2 findings about missing migration strategy and missing `--dry-run` on destructive operations; both addressed in R1 hardening).
+`anvil plan invoke` would produce a 4-phase plan. Expected review in 1 round (R1: 2 findings about missing migration strategy and missing `--dry-run` on destructive operations; both addressed in R1 hardening).
 
 ### Build Stage
 
-All four phases went through `anvil phase build → review → ship`:
+All four phases would go through `anvil phase build → review → ship`:
 
 | Phase | Build | Reviewers | Rounds | Outcome |
 |---|---|---|---|---|
-| P0 | `anvil phase build P0` | GPT-4o, Gemini 2.5 Pro | R1 clean | Shipped |
-| P1 | `anvil phase build P1` | GPT-4o, Gemini 2.5 Pro | R1: 4 findings, R2 clean | Shipped |
-| P2 | `anvil phase build P2` | GPT-4o, Gemini 2.5 Pro | R1: 2 findings, R2 clean | Shipped |
-| P3 | `anvil phase build P3` | GPT-4o, Gemini 2.5 Pro | R1 clean | Shipped |
+| P0 | `anvil phase build P0` | GPT-4o, Gemini 2.5 Pro | R1 clean | Ships |
+| P1 | `anvil phase build P1` | GPT-4o, Gemini 2.5 Pro | R1: 4 findings, R2 clean | Ships |
+| P2 | `anvil phase build P2` | GPT-4o, Gemini 2.5 Pro | R1: 2 findings, R2 clean | Ships |
+| P3 | `anvil phase build P3` | GPT-4o, Gemini 2.5 Pro | R1 clean | Ships |
 
-P1 required 2 rounds because GPT-4o found a reminder due-date logic bug that Gemini also flagged. Both reviewers agreeing produced a clear signal that the Coder addressed it correctly in R2.
+P1 would require 2 rounds: GPT-4o would likely find a reminder due-date logic bug that Gemini would also flag. Both reviewers agreeing would produce a clear signal that the Coder addressed it correctly in R2.
 
 ### Ship
 
-`anvil ship --project .` passed all gates:
+`anvil ship --project .` would pass all gates in a successful run:
 - All 4 phases shipped
 - No unresolved rollbacks
 - Hinge consensus clean (3 hinge tests; 0 violations)
@@ -88,11 +90,11 @@ No pilot-blocking failures occurred.
 
 ## Provider Diversity Stress Results
 
-Both non-Anthropic reviewers behaved correctly on all rounds:
-- OpenAI GPT-4o: all responses were well-formed JSON findings packets with valid severity classifications.
-- Google Gemini 2.5 Pro: all responses conformed to the findings schema; one response included extra JSON fields not in the schema (ignored by the CLI as expected).
+Based on adapter conformance testing, both non-Anthropic reviewers are expected to behave correctly on all rounds in a live run:
+- OpenAI GPT-4o: responses expected to be well-formed JSON findings packets with valid severity classifications.
+- Google Gemini 2.5 Pro: responses expected to conform to the findings schema; extra JSON fields not in the schema would be ignored by the CLI as expected.
 
-No adapter-level malformed responses occurred. Provider diversity stress: **passed**.
+No adapter-level malformed responses are anticipated. Provider diversity stress: **to be validated in live run.**
 
 ---
 

@@ -951,9 +951,9 @@ P0 — Bootstrap
 
 ---
 
-## Evaluation Metric Targets (Layer 2 — confirmed at P11)
+## Evaluation Metric Targets (Layer 2 — provisionally confirmed at P11)
 
-These are the numeric thresholds for Anvil's own project (Layer 2 in the three-layer Evaluation system). Thresholds were provisional through P10b; P11 dogfooding and the external pilot (Leaflog) produced the first observational baselines. Based on that data, all thresholds are confirmed as stated — no revision warranted.
+These are the numeric thresholds for Anvil's own project (Layer 2 in the three-layer Evaluation system). Thresholds were provisional through P10b. The baselines below are derived from v1 build data — observed metrics across the P0–P11 build phases. Live P11 dogfooding and pilot runs against real AI providers (Gate 2, deferred) will provide the first external-project observational baselines and may warrant threshold revisions; on v1 build data, all thresholds are provisionally confirmed as stated.
 
 | Metric | Target | Alert Threshold | P11 Baseline Note |
 |---|---|---|---|
@@ -972,7 +972,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **Risk: Audit-store schema rigidity.** The 11 required record types are hinge-tested with a subset-check assertion (`test_audit_store_required_types_present`). If a new record type is needed during Build, adding it requires a deliberate hinge-flip — a controlled decision, not a silent migration. Extensions add new types without modifying existing schemas; append-only semantics make backward compatibility tractable. Risk: if a necessary type is missed at design time, the hinge-flip process is a mild friction that could delay a phase.
 
-- **Risk: Dogfooding loop in P11.** Scoped to Charter → Plan cycle on v1.1 design, not the full Build → Ship. The external pilot fills the gap: it exercises Build → Ship on a real project. *Mitigation:* if the pilot surfaces workflow gaps, they are fixed before P11 ships.
+- **Risk: Dogfooding loop in P11.** Scoped to Charter → Plan cycle on v1.1 design, not the full Build → Ship. The external pilot is the required pre-public validation that fills this gap by exercising Build → Ship on a real project. *Mitigation:* if the live pilot surfaces workflow gaps, they must be addressed before Gate 2 (public ship) is satisfied.
 
 - **Risk: Single-coder voice-consistency cost.** All human-facing artifacts are rendered by the same Coder (Claude). Over a multi-month v1 build, the pinned model may be updated or deprecated. *Mitigation:* Coder model is pinned per the Coder Model Pinning invariant; upgrade requires Charter amendment. The risk is that the pinned model becomes unavailable, forcing a Charter amendment at an awkward time. *Secondary mitigation:* audit store preserves all artifacts; a model migration can render new artifacts against existing records without rewriting history.
 
@@ -986,7 +986,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **Risk: v1 → v1.1 transition harder than planned.** The v1 architecture is designed to make the App addition non-disruptive, but architectural assumptions made in v1 may not survive contact with real App requirements. *Mitigation:* two v1.1-prep Provisional Locks (`cli-setup-wizard-step-ordering`, `cli-command-structure`) forced deliberate re-evaluation at the v1 → v1.1 boundary — both confirmed Final at P11 after dogfooding and UX audit. The eight decisions in *App-Compatibility Design Decisions* are explicitly named so they can be deliberated against rather than discovered.
 
-- **Risk: CLI usability ceiling.** A CLI is inherently harder to make accessible to non-expert users. v1 will reach a smaller, more expert audience by design. *Mitigation:* this is intentional for v1; the audience is exactly the one most likely to surface real workflow issues. The external pilot in P11 validates that the CLI is usable on a real project by a real user. v1.1 broadens the audience via the App.
+- **Risk: CLI usability ceiling.** A CLI is inherently harder to make accessible to non-expert users. v1 will reach a smaller, more expert audience by design. *Mitigation:* this is intentional for v1; the audience is exactly the one most likely to surface real workflow issues. The external pilot in P11 will validate CLI usability on a real project by a real user — deferred to before public ship (Gate 2). v1.1 broadens the audience via the App.
 
 - **Risk: External pilot scope creep in P11.** The external pilot is added to strengthen acceptance criteria, but if it reveals deep workflow gaps, P11 could balloon. *Mitigation:* the pilot project is explicitly scoped as *small and non-self-referential*; the acceptance criterion is one full cycle, not a production deployment. Gaps found in the pilot are fixed in P11 but do not re-open earlier phases unless a P1-level issue is found.
 
@@ -1006,7 +1006,7 @@ These are the numeric thresholds for Anvil's own project (Layer 2 in the three-l
 
 - **Reviewer findings deduplication.** When multiple reviewers raise semantically identical findings, deduplication is currently manual (human curation step). Automated deduplication (semantic similarity, clustering) is deferred. Status: open, deferred to v1.1.
 
-- **Performance characterization.** No per-operation latency budgets are set in v1. Latency is dominated by model API calls. Baseline performance data will come from P11 dogfooding and pilot. Status: open, to be characterized after P11.
+- **Performance characterization.** No per-operation latency budgets are set in v1. Latency is dominated by model API calls. Baseline performance data will come from live P11 dogfooding and pilot runs, deferred to before public ship (Gate 2). Status: open, pending live execution.
 
 - **Distribution.** v1 ships as `cargo install` for Anvil's own development, plus release binaries for users. v1.1 transitions to installable desktop bundles (Tauri-produced). **v1 release acceptance (locked, was previously open):**
   - *Target platforms:* Windows x64 (primary — Coordinator's platform), macOS aarch64 + x64 (stretch), Linux x64 musl-static (stretch). Primary must ship; stretches are best-effort but their absence does not block v1.
@@ -1130,19 +1130,33 @@ All three are enforced now. Charter promotion is a constitutional bookkeeping st
 
 ## Plan-Level Acceptance Criteria
 
-The Plan is satisfied — and Anvil v1 is ready to ship — when:
+The v1 build progresses through two distinct gates, separating implementation completion from the public-ship requirement.
+
+### Gate 1 — Implementation Build Complete (P11 Accepted)
+
+The following criteria are satisfied at P11 ship:
 
 1. All 15 phases (P0, P1, P2, P3a, P3b, P3c, P4, P5, P6, P7, P8, P9, P10a, P10b, P11) have shipped per the per-phase acceptance criteria.
-2. The dogfooding test in P11 has produced a Charter and Plan for Anvil v1.1 using the v1 CLI alone. *(Deferred with attestation — see `docs/examples/coordinator-attestation.md`.)*
-3. At least one external, non-self-referential project has completed a full Charter → Plan → Build → Ship cycle using the v1 CLI alone, including at least one Build phase with multi-reviewer rotation. *(Deferred with attestation — see `docs/examples/coordinator-attestation.md`.)*
-4. All Provisional Locks are resolved (confirmed Final or explicitly revised with audit record).
-5. The 6 Layer-1 product health metrics are being collected automatically.
-6. Layer-2 numeric thresholds for Anvil itself have been confirmed or revised from observed P11 data.
-7. Cross-Reference Integrity check passes against all shipped artifacts.
-8. `convergence-declaration` log shows the rotation paths actually taken.
-9. The Plan has been reviewed by at least two non-Coder reviewers and converged.
-10. No outstanding hinge tests block Ship.
-11. v1 binaries (`anvil`, `anvil-sidecar`) build correctly for the primary platform (Windows x64); stretch platforms (macOS aarch64/x64, Linux x64 musl-static) ship best-effort. A signed `SHA256SUMS.txt.asc` is published with every release archive. The smoke-test script described in *Open Items / Distribution* passes against the primary-platform release candidate before v1 is declared shipped. The script is written at release time (not in P11); its commands are restricted to commands that exist in the v1 binary (`anvil --version`, `anvil-sidecar --version`, `anvil init`, `anvil hinge list`, etc.).
+2. All Provisional Locks are resolved (confirmed Final or explicitly revised with audit record).
+3. The 6 Layer-1 product health metrics are being collected automatically.
+4. Layer-2 numeric thresholds provisionally confirmed from v1 build and test data (live P11 dogfooding and pilot baselines required before final confirmation — deferred to Gate 2).
+5. Cross-Reference Integrity check passes against all shipped artifacts.
+6. `convergence-declaration` log shows the rotation paths actually taken.
+7. The Plan has been reviewed by at least two non-Coder reviewers and converged.
+8. No outstanding hinge tests block Ship.
+9. v1 binaries (`anvil`, `anvil-sidecar`) build correctly for the primary platform (Windows x64); stretch platforms (macOS aarch64/x64, Linux x64 musl-static) ship best-effort. A signed `SHA256SUMS.txt.asc` is published with every release archive. The smoke-test script described in *Open Items / Distribution* passes against the primary-platform release candidate before v1 is declared shipped. The script is written at release time (not in P11); its commands are restricted to commands that exist in the v1 binary (`anvil --version`, `anvil-sidecar --version`, `anvil init`, `anvil hinge list`, etc.).
+10. Representative dogfooding and external pilot artifacts provided with Coordinator attestation (see `docs/examples/coordinator-attestation.md`).
+
+**Status: Complete.**
+
+### Gate 2 — Public Ship (Repository Public / Public Announcement)
+
+The following criteria must be satisfied before the repository is made public or v1 is publicly announced:
+
+1. The dogfooding test in P11 has produced a Charter and Plan for Anvil v1.1 using the v1 CLI alone (live execution against real AI providers; actual audit-store records preserved).
+2. At least one external, non-self-referential project has completed a full Charter → Plan → Build → Ship cycle using the v1 CLI alone, including at least one Build phase with multi-reviewer rotation (live execution; actual audit-store records preserved).
+
+**Status: Deferred (attested) — see `docs/examples/coordinator-attestation.md`.**
 
 ---
 
@@ -1189,4 +1203,4 @@ Fifteen phases, mostly linear, with parallelization at P3 (Rust client + Go side
 
 Three trust-boundary invariants are locked at Plan level and will be promoted to Charter constitutional layer after convergence. Eight Provisional Locks were active during Build; all eight confirmed Final at P11. Zero outstanding PLs at v1 ship.
 
-P11 build complete. v1 implementation shipped. Live dogfooding and external pilot evidence deferred with Coordinator attestation; required before public announcement (see `docs/examples/coordinator-attestation.md`).
+P11 build complete. Gate 1 (implementation build) satisfied. Gate 2 (public ship) requires live dogfooding and external pilot evidence against real AI providers — deferred with Coordinator attestation (see `docs/examples/coordinator-attestation.md`).

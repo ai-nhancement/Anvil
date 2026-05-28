@@ -1,5 +1,7 @@
 # Anvil
 
+![Anvil logo](anvil_logo.png)
+
 **Structure for vibe coding.** Anvil is a human-gated workflow tool for AI-assisted development: adversarial cross-vendor review at every gate, provenance on every artifact, and explicit workflow discipline replacing unstructured agent loops.
 
 > **Status:** Pre-release (P0 Bootstrap). Repository is private through v1 implementation.

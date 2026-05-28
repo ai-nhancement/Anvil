@@ -243,7 +243,9 @@ pub fn parse_phase_briefing_contract(response: &str) -> Result<PhaseBriefingCont
         }
     }
 
-    Err(AnvilError::ModelResponseMissingPacket("phase_briefing".to_owned()))
+    Err(AnvilError::ModelResponseMissingPacket(
+        "phase_briefing".to_owned(),
+    ))
 }
 
 /// Extracts the `<phase_disposition>` markdown block from a model response.

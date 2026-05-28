@@ -768,7 +768,11 @@ fn curate_findings_interactive(
         let (action, annotation, advisory_disposition) = if non_interactive {
             if f.advisory {
                 println!("  Advisory disposition: Accept-Advisory (non-interactive default)");
-                (CurationAction::Keep, None, Some(AdvisoryDispositionType::AcceptAdvisory))
+                (
+                    CurationAction::Keep,
+                    None,
+                    Some(AdvisoryDispositionType::AcceptAdvisory),
+                )
             } else {
                 println!("  Action: Keep (non-interactive default)");
                 (CurationAction::Keep, None, None)

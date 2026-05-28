@@ -439,9 +439,10 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
         Command::Discuss { project } => discuss::run_discuss(&project),
         Command::Charter(cmd) => match cmd {
             CharterCmd::Review { project } => charter::run_charter_review(&project),
-            CharterCmd::Findings { project, non_interactive } => {
-                charter::run_charter_findings(&project, non_interactive)
-            }
+            CharterCmd::Findings {
+                project,
+                non_interactive,
+            } => charter::run_charter_findings(&project, non_interactive),
         },
         Command::Arbiter(cmd) => match cmd {
             ArbiterCmd::DeclareConvergence {
@@ -466,9 +467,10 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
         Command::Plan(cmd) => match cmd {
             PlanCmd::Invoke { project } => plan::run_plan_invoke(&project),
             PlanCmd::Review { project } => plan::run_plan_review(&project),
-            PlanCmd::Findings { project, non_interactive } => {
-                plan::run_plan_findings(&project, non_interactive)
-            }
+            PlanCmd::Findings {
+                project,
+                non_interactive,
+            } => plan::run_plan_findings(&project, non_interactive),
             PlanCmd::Consolidate { trigger, project } => {
                 plan::run_plan_consolidate(&project, &trigger)
             }
@@ -488,9 +490,11 @@ fn run(cli: Cli) -> Result<(), anvil_core::error::AnvilError> {
             }
             PhaseCmd::Review { id, project } => phase::run_phase_review(&project, &id),
             PhaseCmd::Ship { id, project } => phase::run_phase_ship(&project, &id),
-            PhaseCmd::Findings { id, project, non_interactive } => {
-                phase::run_phase_findings(&project, &id, non_interactive)
-            }
+            PhaseCmd::Findings {
+                id,
+                project,
+                non_interactive,
+            } => phase::run_phase_findings(&project, &id, non_interactive),
             PhaseCmd::Reopen {
                 id,
                 reason,

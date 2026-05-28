@@ -90,6 +90,7 @@ fn phase_gate_exists(store: &AuditStore, gate_name: &str) -> Result<bool, AnvilE
 /// # Errors
 ///
 /// Returns [`AnvilError`] on config, sidecar, validation, or audit-store failure.
+#[allow(clippy::too_many_lines)]
 pub fn run_phase_build(
     project_root: &Path,
     phase_id: &str,

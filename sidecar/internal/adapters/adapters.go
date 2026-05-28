@@ -46,9 +46,8 @@ var Known = map[config.ProviderType]ProviderAdapter{
 // a terminal stream-error event was successfully sent.
 var errStreamTerminated = fmt.Errorf("stream terminated by error event")
 
-// P4a: 120-second client timeout caps any per-request context deadline longer than 120s.
-// Remove or raise this timeout and let context deadlines govern entirely.
-var httpClient = &http.Client{Timeout: 120 * time.Second}
+// Let the gRPC context deadline govern; 600s hard cap prevents runaway requests.
+var httpClient = &http.Client{Timeout: 600 * time.Second}
 
 // doHTTP executes an HTTP request with context propagation. The caller must close resp.Body.
 func doHTTP(ctx context.Context, method, url string, headers map[string]string, body []byte) (*http.Response, error) {

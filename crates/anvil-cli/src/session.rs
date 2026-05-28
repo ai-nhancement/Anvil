@@ -125,7 +125,10 @@ pub(crate) fn ensure_sidecar_running(
         }
     }
 
-    // Not running — spawn.
+    // Not running — remove stale runtime files so wait_for_port_file doesn't read a dead port.
+    let _ = std::fs::remove_file(&pid_path);
+    let _ = std::fs::remove_file(&port_path);
+
     let binary = sidecar_util::find_sidecar_binary(config.sidecar.binary_path.as_deref())?;
 
     let config_json = build_sidecar_config_json(config);

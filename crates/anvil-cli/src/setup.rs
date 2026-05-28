@@ -954,11 +954,14 @@ fn resolve_api_key(conn: &WizardConnection) -> String {
 
 /// Run a future on a single-threaded Tokio runtime (for use in sync CLI context).
 pub(crate) fn with_tokio<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime build must succeed")
-        .block_on(f)
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let rt = RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime build must succeed")
+    });
+    rt.block_on(f)
 }
 
 use sha2::Digest as _;

@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-audit"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anvil-core",
  "chrono",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anvil-audit",
  "anvil-core",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "serde",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-eval"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anvil-audit",
  "anvil-core",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-graph"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anvil-audit",
  "anvil-core",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-hinge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anvil-core",
  "serde",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-ship"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anvil-audit",
  "anvil-core",
@@ -167,7 +167,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-sidecar-client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "prost",
  "tokio",

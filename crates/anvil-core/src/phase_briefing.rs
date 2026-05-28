@@ -194,18 +194,56 @@ pub fn validate_phase_briefing_contract(
 /// Returns [`AnvilError::ModelResponseMissingPacket`] if the tags are absent,
 /// or [`AnvilError::ModelResponseBadJson`] if the JSON is structurally invalid.
 pub fn parse_phase_briefing_contract(response: &str) -> Result<PhaseBriefingContract, AnvilError> {
+    // Try the canonical <phase_briefing>...</phase_briefing> tags first.
     let start_tag = "<phase_briefing>";
     let end_tag = "</phase_briefing>";
-    let start = response
-        .find(start_tag)
-        .ok_or_else(|| AnvilError::ModelResponseMissingPacket("phase_briefing".to_owned()))?;
-    let end = response
-        .find(end_tag)
-        .ok_or_else(|| AnvilError::ModelResponseMissingPacket("phase_briefing".to_owned()))?;
-    let json = response[start + start_tag.len()..end].trim();
-    serde_json::from_str(json).map_err(|e| AnvilError::ModelResponseBadJson {
-        reason: e.to_string(),
-    })
+    if let (Some(start), Some(end)) = (response.find(start_tag), response.find(end_tag)) {
+        let json = response[start + start_tag.len()..end].trim();
+        return serde_json::from_str(json).map_err(|e| AnvilError::ModelResponseBadJson {
+            reason: e.to_string(),
+        });
+    }
+
+    // Fallback: try to extract a JSON object from a ```json ... ``` fence.
+    if let Some(fence_start) = response.find("```json") {
+        let after_fence = &response[fence_start + 7..];
+        if let Some(fence_end) = after_fence.find("```") {
+            let json = after_fence[..fence_end].trim();
+            if let Ok(v) = serde_json::from_str::<PhaseBriefingContract>(json) {
+                return Ok(v);
+            }
+        }
+    }
+
+    // Fallback: find the first top-level JSON object that deserializes correctly.
+    let mut depth = 0i32;
+    let mut obj_start = None;
+    let bytes = response.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'{' => {
+                if depth == 0 {
+                    obj_start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(s) = obj_start {
+                        let candidate = &response[s..=i];
+                        if let Ok(v) = serde_json::from_str::<PhaseBriefingContract>(candidate) {
+                            return Ok(v);
+                        }
+                    }
+                    obj_start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Err(AnvilError::ModelResponseMissingPacket("phase_briefing".to_owned()))
 }
 
 /// Extracts the `<phase_disposition>` markdown block from a model response.

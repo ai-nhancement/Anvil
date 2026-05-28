@@ -352,7 +352,10 @@ struct CurationResult {
 }
 
 #[allow(clippy::too_many_lines)]
-fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResult, AnvilError> {
+fn curate_findings(
+    verified_findings: &[VerifiedFinding],
+    non_interactive: bool,
+) -> Result<CurationResult, AnvilError> {
     let mut actions: BTreeMap<String, CurationAction> = BTreeMap::new();
     let mut disposition_map: BTreeMap<String, DispositionLabel> = BTreeMap::new();
     let mut dispositions: Vec<CurationDisposition> = Vec::new();
@@ -378,7 +381,19 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
         );
         println!();
 
-        let (action, annotation, advisory_disposition) = if f.advisory {
+        let (action, annotation, advisory_disposition) = if non_interactive {
+            if f.advisory {
+                println!("  Advisory disposition: Accept-Advisory (non-interactive default)");
+                (
+                    CurationAction::Keep,
+                    None,
+                    Some(AdvisoryDispositionType::AcceptAdvisory),
+                )
+            } else {
+                println!("  Action: Keep (non-interactive default)");
+                (CurationAction::Keep, None, None)
+            }
+        } else if f.advisory {
             // Advisory findings use the advisory disposition flow instead of Keep/Drop/Annotate.
             let adv_idx = Select::new()
                 .with_prompt("  Advisory disposition")
@@ -453,22 +468,27 @@ fn curate_findings(verified_findings: &[VerifiedFinding]) -> Result<CurationResu
         };
 
         if !f.advisory && matches!(action, CurationAction::Keep) {
-            let label_idx = Select::new()
-                .with_prompt("  Disposition label")
-                .items(&[
-                    "Fixed",
-                    "Locked in Charter (pending Plan)",
-                    "Refuted",
-                    "Deferred",
-                ])
-                .default(0)
-                .interact()
-                .map_err(|_| AnvilError::SetupCancelled)?;
-            let label = match label_idx {
-                1 => DispositionLabel::LockedPendingPlan,
-                2 => DispositionLabel::Refuted,
-                3 => DispositionLabel::Deferred,
-                _ => DispositionLabel::Fixed,
+            let label = if non_interactive {
+                println!("  Disposition label: Locked in Charter (non-interactive default)");
+                DispositionLabel::LockedPendingPlan
+            } else {
+                let label_idx = Select::new()
+                    .with_prompt("  Disposition label")
+                    .items(&[
+                        "Fixed",
+                        "Locked in Charter (pending Plan)",
+                        "Refuted",
+                        "Deferred",
+                    ])
+                    .default(0)
+                    .interact()
+                    .map_err(|_| AnvilError::SetupCancelled)?;
+                match label_idx {
+                    1 => DispositionLabel::LockedPendingPlan,
+                    2 => DispositionLabel::Refuted,
+                    3 => DispositionLabel::Deferred,
+                    _ => DispositionLabel::Fixed,
+                }
             };
             disposition_map.insert(f.id.clone(), label);
         }
@@ -504,7 +524,17 @@ struct NarrativeInputs {
     bottom_line: String,
 }
 
-fn collect_narrative() -> Result<NarrativeInputs, AnvilError> {
+fn collect_narrative(non_interactive: bool) -> Result<NarrativeInputs, AnvilError> {
+    if non_interactive {
+        return Ok(NarrativeInputs {
+            narrative_summary: String::new(),
+            corrections: String::new(),
+            residual_notes: String::new(),
+            reproducibility: String::new(),
+            bottom_line: String::new(),
+        });
+    }
+
     println!("\n── Disposition document inputs ──────────────────────────────────────────────\n");
 
     Ok(NarrativeInputs {
@@ -543,7 +573,7 @@ fn collect_narrative() -> Result<NarrativeInputs, AnvilError> {
 /// # Errors
 ///
 /// Returns [`AnvilError`] on audit-store, file I/O, or input failure.
-pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
+pub fn run_charter_findings(project_root: &Path, non_interactive: bool) -> Result<(), AnvilError> {
     let store = AuditStore::open(project_root)?;
     let (rfp, vr) = load_and_pair(&store)?;
 
@@ -563,7 +593,7 @@ pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
         disposition_map,
         dispositions,
         advisory_dispositions,
-    } = curate_findings(verified_findings)?;
+    } = curate_findings(verified_findings, non_interactive)?;
 
     let NarrativeInputs {
         narrative_summary,
@@ -571,7 +601,7 @@ pub fn run_charter_findings(project_root: &Path) -> Result<(), AnvilError> {
         residual_notes,
         reproducibility,
         bottom_line,
-    } = collect_narrative()?;
+    } = collect_narrative(non_interactive)?;
 
     // Advisory gate check BEFORE any file writes (F4).
     let missing_advisory: Vec<String> = check_advisory_gate(&dispositions, &rfp.packet.findings);

@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PhaseBriefingContract",
+  "description": "The typed JSON contract the Coder produces inside <phase_briefing> tags. Maps to the 7 required sections of the Phase Review Briefing Template (Artifact Specifications §Phase Review Briefing Template).",
+  "type": "object",
+  "required": [
+    "phase_id",
+    "scope",
+    "spec_section",
+    "status",
+    "files_changed",
+    "compliance_items",
+    "what_to_review",
+    "test_areas",
+    "how_to_activate",
+    "next_phase"
+  ],
+  "properties": {
+    "phase_id": {
+      "type": "string",
+      "description": "Phase ID (e.g. 'P8').",
+      "minLength": 1
+    },
+    "scope": {
+      "type": "string",
+      "description": "One-line description of what this briefing covers (Header block).",
+      "minLength": 1
+    },
+    "spec_section": {
+      "type": "string",
+      "description": "Which Plan section is being implemented (e.g. '§P8').",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "description": "Document status per Artifact Specifications Standard Vocabularies.",
+      "enum": ["Draft", "Awaiting Review", "In Revision", "Convergent", "Approved", "Superseded"]
+    },
+    "files_changed": {
+      "type": "array",
+      "description": "What Was Built — file-level changes (section 2). At least one entry required.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["file", "action", "purpose"],
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "File path relative to project root."
+          },
+          "action": {
+            "type": "string",
+            "enum": ["CREATE", "MODIFY", "DELETE"],
+            "description": "Type of change."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "Why this file was changed."
+          },
+          "lines": {
+            "type": "integer",
+            "description": "Approximate line delta (optional)."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "compliance_items": {
+      "type": "array",
+      "description": "Architecture Compliance — invariant to evidence mapping (section 3). At least one entry required.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["invariant", "evidence"],
+        "properties": {
+          "invariant": {
+            "type": "string",
+            "description": "The architectural invariant being satisfied."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "How the implementation satisfies the invariant."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "what_to_review": {
+      "type": "array",
+      "description": "What to Review — numbered questions for the reviewer (section 4). At least one entry required.",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "test_areas": {
+      "type": "array",
+      "description": "Test Coverage Summary — per-area coverage table (section 5). At least one entry required.",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["area", "tests_added", "coverage_status"],
+        "properties": {
+          "area": {
+            "type": "string",
+            "description": "Functional area being tested."
+          },
+          "tests_added": {
+            "type": "string",
+            "description": "Test names or description of tests added."
+          },
+          "coverage_status": {
+            "type": "string",
+            "description": "e.g. Covered, Partial, Deferred."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "how_to_activate": {
+      "type": "string",
+      "description": "How to Activate for Testing — runbook-style instructions (section 6).",
+      "minLength": 1
+    },
+    "next_phase": {
+      "type": "string",
+      "description": "Next Phase — preview of what ships after this phase (section 7).",
+      "minLength": 1
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,18 @@
+[package]
+name = "anvil-hinge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Anvil hinge-test framework"
+
+[dependencies]
+anvil-core = { path = "../anvil-core" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,3 @@
+[toolchain]
+# Floor: Rust stable ≥1.80 (hinge test_rust_toolchain_version_floor, phase P0)
+channel = "stable"

@@ -1,0 +1,242 @@
+syntax = "proto3";
+
+package anvil.v1;
+
+option go_package = "github.com/ai-nhancement/Anvil/sidecar/internal/contract;contract";
+
+// Sidecar service: model-adapter bridge between the Vault and vendor APIs.
+//
+// CONNECT-TIME CONTRACT: Handshake must be the first RPC called on every
+// connection. The sidecar rejects all other RPCs until a successful Handshake
+// has completed for the current connection.
+//
+// NO-COMMIT-ON-PARTIAL-OUTPUT INVARIANT (Plan-Level Trust-Boundary Invariant #1):
+// InvokeStreaming may emit Token events for live terminal display (ephemeral UX).
+// Only the FinalResult event is authoritative for commit purposes. On any Error
+// event mid-stream, the Vault must discard all accumulated stream state from its
+// commit path and surface only the typed error. There is no best-effort commit.
+// Relevant ErrorClass values: ERROR_CLASS_TRANSPORT, ERROR_CLASS_SCHEMA_VIOLATION,
+// ERROR_CLASS_ADAPTER_BUG, ERROR_CLASS_TIMEOUT, ERROR_CLASS_CANCELLED.
+service Sidecar {
+  // Handshake negotiates the protocol version and detects config-epoch drift.
+  // Must be called before any other RPC.
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  // Invoke sends a single request and waits for the full response.
+  rpc Invoke(InvokeRequest) returns (InvokeResponse);
+
+  // InvokeStreaming sends a request and receives a stream of events.
+  // Token events are ephemeral (display only); FinalResult is authoritative.
+  // See NO-COMMIT-ON-PARTIAL-OUTPUT INVARIANT above.
+  rpc InvokeStreaming(InvokeRequest) returns (stream InvokeStreamEvent);
+
+  // Cancel requests cancellation of an in-flight call identified by idempotency_key.
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+
+  // Health checks whether the sidecar daemon is alive and ready.
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // ReloadConfig atomically swaps the sidecar's in-memory provider config.
+  // Called by the Vault when a config-epoch mismatch is detected at Handshake time.
+  rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);
+}
+
+// ── Handshake ─────────────────────────────────────────────────────────────────
+
+message HandshakeRequest {
+  // Canonical protocol version the Vault prefers (e.g. "v1").
+  string core_protocol_version = 1;
+  // All protocol versions the Vault supports, in preference order.
+  repeated string supported_versions = 2;
+  // SHA-256 of the Vault's active provider-config content.
+  // Compared against sidecar_config_epoch to detect drift.
+  string vault_config_epoch = 3;
+}
+
+message HandshakeResponse {
+  // Negotiated version — the first version in the Vault's `supported_versions` list
+  // that the sidecar also supports (preference-order, not lexicographic ordering).
+  string negotiated_version = 1;
+  // Sidecar binary version string.
+  string sidecar_version = 2;
+  // Sidecar build metadata (commit, timestamp, etc.).
+  string sidecar_build_info = 3;
+  // SHA-256 of the sidecar's currently loaded provider-config content.
+  // On mismatch with vault_config_epoch, the Vault calls ReloadConfig or restarts.
+  string sidecar_config_epoch = 4;
+}
+
+// ── Invoke ────────────────────────────────────────────────────────────────────
+
+message InvokeRequest {
+  // UUIDv7 correlation ID; echoed back in all response envelopes.
+  string idempotency_key = 1;
+  // Model identity string (e.g. "claude-opus-4-7"); used for family-floor check.
+  string model_id = 2;
+  // Name of the provider connection from anvil.toml to route this call through.
+  string provider_connection_id = 3;
+  // Per-call secret material.
+  Credentials credentials = 4;
+  // Request payload.
+  oneof payload {
+    ChatRequest chat = 5;
+    EmbedRequest embed = 6;
+  }
+  // Optional per-call timeout override.
+  optional Timeout timeout = 7;
+}
+
+message InvokeResponse {
+  string idempotency_key = 1;
+  oneof result {
+    ChatResponse chat = 2;
+    EmbedResponse embed = 3;
+    AnvilError error = 4;
+  }
+}
+
+// ── Streaming ─────────────────────────────────────────────────────────────────
+
+// InvokeStreamEvent is the unit of the InvokeStreaming response stream.
+// Exactly one FinalResult or exactly one Error terminates the stream.
+message InvokeStreamEvent {
+  string idempotency_key = 1;
+  oneof event {
+    // Ephemeral token for live display — NOT authoritative for commit.
+    Token token = 2;
+    // Authoritative result — the only event the Vault's commit path consumes.
+    FinalResult final_result = 3;
+    // Terminal error — Vault must discard all accumulated stream state.
+    StreamError error = 4;
+    // Keepalive heartbeat — no semantic content.
+    Heartbeat heartbeat = 5;
+  }
+}
+
+message Token {
+  string text = 1;
+}
+
+message FinalResult {
+  oneof result {
+    ChatResponse chat = 1;
+    EmbedResponse embed = 2;
+  }
+}
+
+message StreamError {
+  AnvilError error = 1;
+}
+
+message Heartbeat {
+  int64 timestamp_millis = 1;
+}
+
+// ── Cancel ────────────────────────────────────────────────────────────────────
+
+message CancelRequest {
+  string idempotency_key = 1;
+}
+
+message CancelResponse {
+  bool cancelled = 1;
+}
+
+// ── Health ────────────────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  string version = 2;
+}
+
+// ── ReloadConfig ──────────────────────────────────────────────────────────────
+
+message ReloadConfigRequest {
+  // SHA-256 of new_provider_config; sidecar verifies the hash before applying.
+  string new_config_epoch = 1;
+  // Serialized provider-config content (TOML bytes matching anvil.toml section).
+  bytes new_provider_config = 2;
+}
+
+message ReloadConfigResponse {
+  bool success = 1;
+  // Set on failure; absent on success.
+  AnvilError error = 2;
+  // Config epoch now active (new epoch on success, old epoch on failure).
+  string active_config_epoch = 3;
+}
+
+// ── Payloads ──────────────────────────────────────────────────────────────────
+
+message ChatRequest {
+  string system_prompt = 1;
+  repeated Message messages = 2;
+  optional int32 max_tokens = 3;
+  optional float temperature = 4;
+}
+
+message Message {
+  string role = 1;
+  string content = 2;
+}
+
+message ChatResponse {
+  string content = 1;
+  string model = 2;
+  Usage usage = 3;
+  string finish_reason = 4;
+}
+
+message EmbedRequest {
+  string text = 1;
+}
+
+message EmbedResponse {
+  repeated float embedding = 1;
+  string model = 2;
+}
+
+message Usage {
+  int32 input_tokens = 1;
+  int32 output_tokens = 2;
+}
+
+// ── Credentials ───────────────────────────────────────────────────────────────
+
+message Credentials {
+  oneof credential {
+    string api_key = 1;
+    string bearer_token = 2;
+  }
+}
+
+// ── Timeout ───────────────────────────────────────────────────────────────────
+
+message Timeout {
+  uint64 millis = 1;
+}
+
+// ── Errors ────────────────────────────────────────────────────────────────────
+
+// AnvilError is the canonical error envelope.
+// ErrorClass is pinned by hinge test test_error_class_count (pins=6).
+message AnvilError {
+  ErrorClass class = 1;
+  string vendor_code = 2;
+  string message = 3;
+  map<string, string> details = 4;
+}
+
+// ErrorClass is the six-value error taxonomy. The zero value is a sentinel.
+// Adding or removing a class is a breaking contract change (hinge-tested).
+enum ErrorClass {
+  ERROR_CLASS_UNSPECIFIED = 0;
+  ERROR_CLASS_TRANSPORT = 1;
+  ERROR_CLASS_PROVIDER_REFUSAL = 2;
+  ERROR_CLASS_SCHEMA_VIOLATION = 3;
+  ERROR_CLASS_ADAPTER_BUG = 4;
+  ERROR_CLASS_TIMEOUT = 5;
+  ERROR_CLASS_CANCELLED = 6;
+}

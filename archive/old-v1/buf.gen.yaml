@@ -1,0 +1,10 @@
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: sidecar
+    opt:
+      - module=github.com/ai-nhancement/Anvil/sidecar
+  - local: protoc-gen-go-grpc
+    out: sidecar
+    opt:
+      - module=github.com/ai-nhancement/Anvil/sidecar

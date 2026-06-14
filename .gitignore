@@ -1,14 +1,10 @@
 # Rust
 /target/
+**/*.rs.bk
 
-# Go
-sidecar/vendor/
-*.exe
-*.test
-
-# Anvil runtime
-.anvil/run/
-.anvil/logs/
+# Anvil runtime (local state, credentials are in keyring/env, never here)
+.anvil/
+!/.anvil/.gitkeep
 
 # Editor / OS
 .DS_Store
@@ -18,6 +14,45 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local dev tool state
+# Local dev tool / agent state (not project artifacts)
 .claude/
 .grok/
+.cursor/
+
+# Secrets (belt + suspenders — real creds should be keyring or env)
+*.key
+.env
+.env.local
+
+# Build artifacts (catch subdirectories such as archive/old-v1/target)
+**/target/
+**/*.rlib
+**/*.rmeta
+**/*.pdb
+
+# Development / session logs (cargo check, TUI runs, wizard tests, etc.)
+check-*.log
+run-*.log
+test-*.log
+build-*.log
+status-*.log
+*-smoke*.log
+anvil-*.log
+*-onboarding*.log
+*-phase*.log
+*-config*.log
+*-input*.log
+*-tui*.log
+*-quickfix*.log
+*-context*.log
+*-wizard*.log
+*-back-nav*.log
+*-multiline*.log
+*-polish*.log
+*-ui.log
+
+# Scratch runtime config while actively testing the first-run wizard
+# (real user projects should commit their anvil.toml once configured)
+anvil.toml
+anvil-current.toml.log
+

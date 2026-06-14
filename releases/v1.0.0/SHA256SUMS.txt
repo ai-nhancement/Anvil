@@ -1,4 +1,0 @@
-dff87e8a672d154be15b4a34d9bdac2f3400b9db661005f534865508ce34f50f  anvil-1.0.0-windows-x86_64/anvil-sidecar.exe
-53c6aff6a3bbf62b53a90f2a36e723c937cf3a2a733f427bce37d60dd663d820  anvil-1.0.0-windows-x86_64/anvil.exe
-05eb8c081a991bddaed6367d851c7460462899f0445c78617b9c4c57497ac0f0  anvil-1.0.0-windows-x86_64/README.txt
-b0af9ca6317ea0e833571ec9ebe136535e9bfc8d6d83e6e4e5dbe67a429cee78  anvil-1.0.0-windows-x86_64.zip

@@ -42,10 +42,8 @@ pub fn run_talk(root: &Path, role_or_binding: Option<&str>) -> Result<()> {
             (r, b, p)
         }
     } else {
-        // default to planner role, fall back to coder
-        cfg.resolve_role_full("planner")
-            .or_else(|_| cfg.resolve_role_full("coder"))
-            .map_err(|_| anyhow!("No planner or coder role configured. Run `anvil setup` first."))?
+        cfg.resolve_role_full("coder")
+            .map_err(|_| anyhow!("No coder role configured. Run `anvil setup` first."))?
     };
 
     let api_key = client.get_credential(binding_name, provider)?;

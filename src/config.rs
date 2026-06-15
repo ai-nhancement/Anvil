@@ -30,17 +30,18 @@ pub struct AnvilConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Roles {
-    /// Primary implementation / writing model (used during Talk and phase implementation)
+    /// Primary model — used for all coding, planning, and chat
     pub coder: Option<String>,
 
-    /// Model used to produce the initial Plan (and often for Talk if you want a different voice)
-    pub planner: Option<String>,
-
-    /// First reviewer (must be different provider/family from the thing it reviews)
+    /// First reviewer (must be different provider/family from coder)
     pub reviewer_a: Option<String>,
 
-    /// Second reviewer (different from reviewer_a and preferably from the coder/planner)
+    /// Second reviewer (different from reviewer_a and coder)
     pub reviewer_b: Option<String>,
+
+    /// Deprecated — ignored, kept only for smooth migration of old configs
+    #[serde(default, skip_serializing)]
+    pub planner: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,8 +182,7 @@ impl AnvilConfig {
     #[allow(dead_code)]
     pub fn resolve_role(&self, role: &str) -> Result<&ModelBinding, ConfigError> {
         let binding_name = match role {
-            "coder" => self.roles.coder.as_deref(),
-            "planner" => self.roles.planner.as_deref(),
+            "coder" | "planner" => self.roles.coder.as_deref(),
             "reviewer-a" | "reviewer_a" => self.roles.reviewer_a.as_deref(),
             "reviewer-b" | "reviewer_b" => self.roles.reviewer_b.as_deref(),
             other => return Err(ConfigError::RoleNotConfigured { role: other.to_string() }),
@@ -194,8 +194,7 @@ impl AnvilConfig {
     /// Returns (binding_name, binding, provider) for a role — convenient for calls.
     pub fn resolve_role_full(&self, role: &str) -> Result<(&str, &ModelBinding, &ProviderConnection), ConfigError> {
         let name = match role {
-            "coder" => self.roles.coder.as_deref(),
-            "planner" => self.roles.planner.as_deref(),
+            "coder" | "planner" => self.roles.coder.as_deref(),
             "reviewer-a" | "reviewer_a" => self.roles.reviewer_a.as_deref(),
             "reviewer-b" | "reviewer_b" => self.roles.reviewer_b.as_deref(),
             other => return Err(ConfigError::RoleNotConfigured { role: other.to_string() }),

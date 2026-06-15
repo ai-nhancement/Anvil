@@ -23,7 +23,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 
@@ -157,7 +157,6 @@ enum WizardStep {
     ApiKeySecret,
     // Model binding flow
     BindingProvider,
-    BindingName,
     ModelName,
     BindingNote,
     // Role assignment
@@ -184,7 +183,6 @@ struct ConfigWizard {
     model_options: Vec<String>,
 
     binding_provider: Option<String>,
-    binding_name: Option<String>,
     model: Option<String>,
     note: Option<String>,
 
@@ -326,7 +324,7 @@ impl App {
             .map_or(false, |c| c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some());
 
         app.push_system("Welcome to Anvil TUI.");
-        app.push_system("Type to chat with the planner (or coder). Real streaming to your configured model. /plan /phase-done /status /help /quit");
+        app.push_system("Type to chat with your coder. Real streaming to your configured model. /plan /phase-done /status /help /quit");
         if !has_reviewers {
             app.first_run = true;
             // The smooth first-time experience auto-launches the config wizard in run_ui().
@@ -365,7 +363,7 @@ impl App {
             "UNCONFIGURED — press s for quick setup"
         } else {
             match self.stage {
-                WorkflowStage::Talk => "TALK (chat with planner/coder; /plan for gate)",
+                WorkflowStage::Talk => "TALK (chat with coder; /plan for gate)",
                 WorkflowStage::PlanReviewsComplete => "PLAN (R1+R2 done — /accept-plan to proceed)",
                 WorkflowStage::PlanAccepted => "PLAN ACCEPTED — /start <id> for phases (phase gates in next iteration)",
                 _ => "TALK",
@@ -781,12 +779,11 @@ impl App {
             },
         );
 
-        // Coder + planner on one; the two reviewers on different bindings so R1 vs R2 has model diversity.
         cfg.roles = Roles {
             coder: Some("local-llama".to_string()),
-            planner: Some("local-llama".to_string()),
             reviewer_a: Some("local-llama".to_string()),
             reviewer_b: Some("local-qwen".to_string()),
+            planner: None,
         };
 
         save_config(&self.root, &cfg)?;
@@ -821,13 +818,10 @@ impl App {
             }
         };
 
-        // Prefer planner for normal conversation; fall back to coder.
-        let role = if cfg.roles.planner.is_some() {
-            "planner"
-        } else if cfg.roles.coder.is_some() {
+        let role = if cfg.roles.coder.is_some() {
             "coder"
         } else {
-            self.push_system("No planner or coder role configured. Use 's' or `anvil setup` to assign bindings.");
+            self.push_system("No coder role configured. Use 's' or /config to assign a model.");
             return;
         };
 
@@ -1058,7 +1052,6 @@ impl App {
             no_auth: false,
             model_options: vec![],
             binding_provider: None,
-            binding_name: None,
             model: None,
             note: None,
             current_role: None,
@@ -1087,7 +1080,7 @@ impl App {
                     "1. Quick local Ollama setup (recommended first try — no keys, ~10 seconds)".to_string(),
                     "2. Add / update a provider connection (OpenAI, Anthropic, Azure, Groq, Ollama, ...)".to_string(),
                     "3. Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
-                    "4. Assign roles  (which model is coder / planner / reviewer-a / reviewer-b)".to_string(),
+                    "4. Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
                     "5. Show current configuration".to_string(),
                     "6. Finish & return to chat".to_string(),
                 ];
@@ -1097,7 +1090,7 @@ impl App {
                 w.list_items = vec![
                     "Add / update a provider connection".to_string(),
                     "Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
-                    "Assign roles  (which model is coder / planner / reviewer-a / reviewer-b)".to_string(),
+                    "Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
                     "Show current configuration".to_string(),
                     "Finish & return to chat".to_string(),
                 ];
@@ -1152,8 +1145,8 @@ impl App {
                 } else if (s == "1" || s == "2") || s.contains("provider") {
                     // Covers normal (provider=1) and first-run (provider=2) layouts.
                     self.start_add_provider();
-                } else if (s == "2" || s == "3") || s.contains("binding") || s.contains("model") {
-                    self.start_add_binding();
+                } else if (s == "2" || s == "3") || s.starts_with("add") || s.contains("binding") {
+                    self.start_add_binding(None);
                 } else if (s == "3" || s == "4") || s.contains("role") || s.contains("assign") {
                     self.start_role_assignment();
                 } else if (s == "4" || s == "5") || s.contains("show") || s.contains("current") {
@@ -1315,43 +1308,25 @@ impl App {
                 } else { vec![] };
                 if let Some(w) = &mut self.config_wizard {
                     w.binding_provider = Some(prov.to_string());
-                    w.model_options = model_opts;
-                    w.step = WizardStep::BindingName;
-                    w.list_items.clear();
-                    w.list_title.clear();
-                }
-                self.push_system(&format!("Provider: '{}'.", prov));
-                self.push_system("Step 2 of 3: give this model a short nickname.");
-                self.push_system("You'll use this name to assign roles — pick anything recognisable (e.g. my-claude, fast-gpt, local-llama):");
-            }
-
-            Some(WizardStep::BindingName) => {
-                let bname = effective.trim();
-                if bname.is_empty() {
-                    return;
-                }
-                let has_model_list = self.config_wizard.as_ref()
-                    .map(|w| !w.model_options.is_empty())
-                    .unwrap_or(false);
-                if let Some(w) = &mut self.config_wizard {
-                    w.binding_name = Some(bname.to_string());
+                    w.model_options = model_opts.clone();
                     w.step = WizardStep::ModelName;
-                    if has_model_list {
-                        w.list_items = w.model_options.clone();
+                    if !model_opts.is_empty() {
+                        w.list_items = model_opts;
                         w.list_items.push("Other / type manually".to_string());
                         w.list_selected = 0;
-                        w.list_title = "Select a model ID (↑↓ then Enter, or choose 'Other' to type):".to_string();
+                        w.list_title = "Select the model ID (↑↓ then Enter):".to_string();
                     } else {
                         w.list_items.clear();
                         w.list_title.clear();
                     }
+                    w.model = None;
+                    w.note = None;
                 }
-                self.push_system(&format!("Nickname: '{}'.", bname));
-                if has_model_list {
-                    self.push_system("Step 3 of 3: select the model from the list (↑↓ then Enter), or pick 'Other / type manually':");
+                self.push_system(&format!("Provider: '{}'.", prov));
+                if self.config_wizard.as_ref().map(|w| !w.list_items.is_empty()).unwrap_or(false) {
+                    self.push_system("Select the model ID from the list, or choose 'Other / type manually':");
                 } else {
-                    self.push_system("Step 3 of 3: enter the exact model ID the provider uses.");
-                    self.push_system("Find this in your provider's dashboard or API docs (e.g. claude-sonnet-4-6, gpt-4o, llama3.2):");
+                    self.push_system("Enter the model ID (e.g. grok-3, claude-sonnet-4-6, gpt-4o):");
                 }
             }
 
@@ -1400,7 +1375,6 @@ impl App {
                 if let Some(cfg) = &mut self.cfg {
                     match role.as_str() {
                         "coder" => cfg.roles.coder = Some(binding.to_string()),
-                        "planner" => cfg.roles.planner = Some(binding.to_string()),
                         "reviewer_a" => cfg.roles.reviewer_a = Some(binding.to_string()),
                         "reviewer_b" => cfg.roles.reviewer_b = Some(binding.to_string()),
                         _ => {}
@@ -1409,8 +1383,7 @@ impl App {
                 self.push_system(&format!("Set {} → {}", role, binding));
 
                 let next_role = match role.as_str() {
-                    "coder" => Some("planner".to_string()),
-                    "planner" => Some("reviewer_a".to_string()),
+                    "coder" => Some("reviewer_a".to_string()),
                     "reviewer_a" => Some("reviewer_b".to_string()),
                     "reviewer_b" => None,
                     _ => None,
@@ -1538,43 +1511,69 @@ impl App {
         );
 
         self.save_current_config();
-        self.push_system(&format!("✓ Provider '{}' saved (type={}).", name, ptype));
-
-        // Immediately offer to create a binding for the new provider
-        if let Some(w) = &mut self.config_wizard {
-            w.binding_provider = Some(name);
-        }
-        self.start_add_binding();
+        self.push_system(&format!("✓ Provider '{}' saved.", name));
+        self.push_system("Provider ready. Use 'Add a model' from the menu to register model IDs for this provider.");
+        self.populate_main_menu();
     }
 
-    fn start_add_binding(&mut self) {
+    fn start_add_binding(&mut self, preselected_provider: Option<String>) {
         let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
-        let prov_names: Vec<String> = cfg.providers.keys().cloned().collect();
 
-        if prov_names.is_empty() {
+        if cfg.providers.is_empty() {
             self.push_system("No providers configured yet. Add a provider first.");
             self.populate_main_menu();
             return;
         }
 
-        if let Some(w) = &mut self.config_wizard {
-            w.step = WizardStep::BindingProvider;
-            w.list_items = prov_names;
-            w.list_selected = 0;
-            w.list_title = "Which provider connection reaches this model?".to_string();
-            w.binding_name = None;
-            w.model = None;
-            w.note = None;
+        if let Some(prov) = preselected_provider {
+            // Provider is already known — go straight to model selection.
+            let model_opts: Vec<String> = if let Some(conn) = cfg.providers.get(&prov) {
+                models_for_connection(&conn.r#type, conn.base_url.as_deref())
+                    .iter().map(|s| s.to_string()).collect()
+            } else { vec![] };
+
+            if let Some(w) = &mut self.config_wizard {
+                w.binding_provider = Some(prov.clone());
+                w.model_options = model_opts.clone();
+                w.step = WizardStep::ModelName;
+                if !model_opts.is_empty() {
+                    w.list_items = model_opts;
+                    w.list_items.push("Other / type manually".to_string());
+                    w.list_selected = 0;
+                    w.list_title = "Select the model ID (↑↓ then Enter):".to_string();
+                } else {
+                    w.list_items.clear();
+                    w.list_title.clear();
+                }
+                w.model = None;
+                w.note = None;
+            }
+            self.push_system(&format!("Adding a model for provider '{}'.", prov));
+            if self.config_wizard.as_ref().map(|w| !w.list_items.is_empty()).unwrap_or(false) {
+                self.push_system("Select the model ID from the list, or choose 'Other / type manually':");
+            } else {
+                self.push_system("Enter the model ID (e.g. grok-3, claude-sonnet-4-6, gpt-4o):");
+            }
+        } else {
+            // Show the provider list for the user to choose from.
+            let prov_names: Vec<String> = cfg.providers.keys().cloned().collect();
+            if let Some(w) = &mut self.config_wizard {
+                w.step = WizardStep::BindingProvider;
+                w.list_items = prov_names;
+                w.list_selected = 0;
+                w.list_title = "Which provider does this model use? (↑↓ then Enter)".to_string();
+                w.binding_provider = None;
+                w.model = None;
+                w.note = None;
+            }
+            self.push_system("Adding a model.");
+            self.push_system("Select the provider this model is accessed through:");
         }
-        self.push_system("Adding a model.");
-        self.push_system("Step 1 of 3: pick which provider connection this model is accessed through.");
-        self.push_system("(If you only have one provider, just select it. You can add more provider connections from the main config menu.)");
     }
 
     fn finish_add_binding(&mut self) {
-        let (bname, prov, model, note) = if let Some(w) = &self.config_wizard {
+        let (prov, model, note) = if let Some(w) = &self.config_wizard {
             (
-                w.binding_name.clone().unwrap_or_default(),
                 w.binding_provider.clone().unwrap_or_default(),
                 w.model.clone().unwrap_or_default(),
                 w.note.clone(),
@@ -1585,14 +1584,14 @@ impl App {
 
         let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
 
-        if bname.is_empty() || model.is_empty() || prov.is_empty() {
-            self.push_system("Binding incomplete — cancelling.");
+        if model.is_empty() || prov.is_empty() {
+            self.push_system("Incomplete — cancelling.");
             self.populate_main_menu();
             return;
         }
 
         cfg.model_bindings.insert(
-            bname.clone(),
+            model.clone(),
             ModelBinding {
                 provider: prov.clone(),
                 model: model.clone(),
@@ -1601,8 +1600,8 @@ impl App {
         );
 
         self.save_current_config();
-        self.push_system(&format!("✓ Model saved: '{}' = {} via {}.", bname, model, prov));
-        self.push_system("You can now assign this nickname to a role (coder, planner, reviewer-a, or reviewer-b).");
+        self.push_system(&format!("✓ Model '{}' saved via provider '{}'.", model, prov));
+        self.push_system("Use 'Assign roles' from the menu to assign it to coder / reviewer-a / reviewer-b.");
 
         self.populate_main_menu();
     }
@@ -1634,9 +1633,8 @@ impl App {
         }
 
         let role_desc = match role {
-            "coder"      => "coder  (writes the actual code)",
-            "planner"    => "planner  (generates and refines the plan)",
-            "reviewer_a" => "reviewer-a  (first independent review — ideally a different provider than reviewer-b)",
+            "coder"      => "coder  (your primary model — used for chat, planning, and code)",
+            "reviewer_a" => "reviewer-a  (first independent review — use a different model than coder)",
             "reviewer_b" => "reviewer-b  (second independent review — should be a DIFFERENT model than reviewer-a)",
             other        => other,
         };
@@ -1665,13 +1663,11 @@ impl App {
             WizardStep::BaseUrl => WizardStep::ProviderName,
             WizardStep::CredentialKind => WizardStep::BaseUrl,
             WizardStep::EnvVarName | WizardStep::ApiKeySecret => WizardStep::CredentialKind,
-            WizardStep::BindingName => WizardStep::BindingProvider,
-            WizardStep::ModelName => WizardStep::BindingName,
+            WizardStep::ModelName => WizardStep::BindingProvider,
             WizardStep::BindingNote => WizardStep::ModelName,
             WizardStep::RoleAssignment { role } => {
                 match role.as_str() {
-                    "planner" => WizardStep::RoleAssignment { role: "coder".to_string() },
-                    "reviewer_a" => WizardStep::RoleAssignment { role: "planner".to_string() },
+                    "reviewer_a" => WizardStep::RoleAssignment { role: "coder".to_string() },
                     "reviewer_b" => WizardStep::RoleAssignment { role: "reviewer_a".to_string() },
                     _ => {
                         // Backing from "coder" role assignment (or unknown) goes to main menu
@@ -1769,9 +1765,6 @@ impl App {
                     self.input = w.api_key.clone().unwrap_or_default();
                     self.input_secret = true;
                 }
-                WizardStep::BindingName => {
-                    self.input = w.binding_name.clone().unwrap_or_default();
-                }
                 WizardStep::ModelName => {
                     self.input = w.model.clone().unwrap_or_default();
                 }
@@ -1840,9 +1833,8 @@ impl App {
             let mut out = vec![
                 "--- Current Configuration ---".to_string(),
                 format!(
-                    "Roles: coder={} planner={} reviewer_a={} reviewer_b={}",
+                    "Roles: coder={} reviewer_a={} reviewer_b={}",
                     cfg.roles.coder.as_deref().unwrap_or("(none)"),
-                    cfg.roles.planner.as_deref().unwrap_or("(none)"),
                     cfg.roles.reviewer_a.as_deref().unwrap_or("(none)"),
                     cfg.roles.reviewer_b.as_deref().unwrap_or("(none)")
                 ),
@@ -1884,12 +1876,12 @@ impl App {
             let was_first = self.first_run;
             self.first_run = false;
             if was_first {
-                self.push_system("Setup complete! You can now type to chat with the planner/coder.");
+                self.push_system("Setup complete! You can now type to chat with the coder.");
                 self.push_system("Use /plan to run the Talk → plan + R1 review + R2 review gate (exactly two diverse reviewers).");
                 self.push_system("The workflow is deliberately simple to start yet powerful enough for serious use: structure that prevents drift without killing velocity.");
             } else {
                 self.push_system("Configuration wizard finished. Changes saved to anvil.toml (and keyring where used).");
-                self.push_system("You can now chat with the planner/coder and run /plan for the gate.");
+                self.push_system("You can now chat with the coder and run /plan for the gate.");
             }
         } else {
             self.push_system("Configuration wizard finished. Changes saved to anvil.toml (and keyring where used).");
@@ -1954,9 +1946,10 @@ fn run_app_loop<B: ratatui::backend::Backend>(
 }
 
 fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
-    // Any keypress dismisses the splash screen.
+    // Any keypress dismisses the splash screen — consume the key without further processing.
     if app.splash_ticks > 0 {
         app.splash_ticks = 0;
+        return Ok(false);
     }
 
     // Command palette navigation (when user pressed / and palette is visible).
@@ -2604,7 +2597,6 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             WizardStep::BaseUrl       => "base url> ",
             WizardStep::EnvVarName    => "env var name> ",
             WizardStep::ApiKeySecret  => "api key (hidden)> ",
-            WizardStep::BindingName   => "binding name> ",
             WizardStep::ModelName     => "model id> ",
             WizardStep::BindingNote   => "note (optional)> ",
             _                         => "config> ",
@@ -2722,9 +2714,11 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
         _ => return,
     };
 
-    let max_h: u16 = 12;
-    let needed = (wizard.list_items.len() as u16) + 2;
-    let h = needed.min(max_h).min(chat_area.height.saturating_sub(1)).max(3);
+    // Use most of the available height so long lists (providers, model IDs) all fit.
+    let available = chat_area.height.saturating_sub(4).max(4);
+    let needed = (wizard.list_items.len() as u16).saturating_add(2);
+    let h = needed.min(available);
+
     let popup = ratatui::layout::Rect {
         x: chat_area.x + 2,
         y: chat_area.y + chat_area.height.saturating_sub(h),
@@ -2737,32 +2731,30 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
     let items: Vec<ListItem> = wizard
         .list_items
         .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            if i == wizard.list_selected {
-                ListItem::new(Line::from(Span::styled(
-                    format!(" ▶ {} ", item),
-                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
-                )))
-            } else {
-                ListItem::new(Line::from(Span::styled(
-                    format!("   {} ", item),
-                    Style::default().fg(Color::Yellow),
-                )))
-            }
-        })
+        .map(|item| ListItem::new(format!("  {}  ", item)))
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(Span::styled(
-                format!(" {} ", wizard.list_title),
-                Style::default().fg(Color::DarkGray),
-            )),
-    );
-    f.render_widget(list, popup);
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(
+                    format!(" {} ", wizard.list_title),
+                    Style::default().fg(Color::DarkGray),
+                )),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ▶ ");
+
+    let mut state = ListState::default();
+    state.select(Some(wizard.list_selected));
+    f.render_stateful_widget(list, popup, &mut state);
 }
 
 fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {

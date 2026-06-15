@@ -212,18 +212,16 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
 
     // 3. Role assignment — this is where the "exactly two different reviewers" contract is made explicit.
     println!("\n{}", "Step 3: Assign roles.".bold());
-    println!("Pick which model nickname handles each job.");
-    println!("The most important rule: reviewer-a and reviewer-b should be DIFFERENT models");
-    println!("(ideally from different providers) so you get a genuine second opinion, not an echo.\n");
+    println!("Coder handles all chat, planning, and code. Reviewer-a and reviewer-b should be");
+    println!("DIFFERENT models (ideally from different providers) for genuine second opinions.\n");
 
     let binding_names: Vec<String> = cfg.model_bindings.keys().cloned().collect();
     if binding_names.is_empty() {
         println!("No bindings yet — skipping role assignment. Run `anvil setup` again later.");
     } else {
-        let coder = Select::new("Coder  (writes the actual code):", binding_names.clone()).prompt()?;
-        let planner = Select::new("Planner  (generates and refines the plan, handles /talk):", binding_names.clone()).prompt()?;
+        let coder = Select::new("Coder  (primary model — used for chat, planning, and code):", binding_names.clone()).prompt()?;
 
-        let reviewer_a = Select::new("Reviewer A  (first independent review — ideally a different provider than B):", binding_names.clone()).prompt()?;
+        let reviewer_a = Select::new("Reviewer A  (first independent review — use a different model than coder):", binding_names.clone()).prompt()?;
         let reviewer_b = Select::new("Reviewer B  (second independent review — should be a DIFFERENT model than A):", binding_names.clone()).prompt()?;
 
         if reviewer_a == reviewer_b {
@@ -232,9 +230,9 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
 
         cfg.roles = Roles {
             coder: Some(coder),
-            planner: Some(planner),
             reviewer_a: Some(reviewer_a),
             reviewer_b: Some(reviewer_b),
+            planner: None,
         };
     }
 

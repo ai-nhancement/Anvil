@@ -45,11 +45,9 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
         println!("Using existing plan.md (use --fresh to regenerate).");
         fs::read_to_string(&plan_path)?
     } else {
-        // Resolve planner
         let (planner_name, planner_binding, planner_provider) = cfg
-            .resolve_role_full("planner")
-            .or_else(|_| cfg.resolve_role_full("coder"))
-            .map_err(|_| anyhow!("Configure a 'planner' (or at least 'coder') role via `anvil setup`."))?;
+            .resolve_role_full("coder")
+            .map_err(|_| anyhow!("Configure a 'coder' role via `anvil setup`."))?;
 
         let api_key = client.get_credential(planner_name, planner_provider)?;
 

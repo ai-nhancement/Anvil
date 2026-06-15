@@ -92,11 +92,11 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
         let ptype = Select::new(
             "Provider type",
             vec![
-                "openai_compat  (Ollama, Groq, Together, Fireworks, OpenRouter, Azure compat, vLLM, ...)",
+                "openai_compat  (Ollama, Groq, Together, Fireworks, OpenRouter, Azure, AWS, Gradient, vLLM, ...)",
                 "anthropic",
                 "google",
-                "azure_openai (native, or use openai_compat)",
-                "aws_bedrock    (not yet native — use gateway or openai_compat if available)",
+                "azure_openai",
+                "aws_bedrock    (use a gateway / openai_compat endpoint for now)",
                 "other (you will enter the string)",
             ],
         )

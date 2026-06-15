@@ -29,7 +29,7 @@ use ratatui::{
 
 use crate::config::{
     ensure_anvil_dir, load_config, save_config, AnvilConfig, CredentialRef, ModelBinding,
-    ProviderConnection, Roles,
+    ProviderConnection,
 };
 use crate::llm::LlmClient;
 use crate::state::{load_state, reviews_dir, save_state};
@@ -67,13 +67,19 @@ const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, 
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Role-specific colors used consistently for labels, headers, splash, chat prefixes,
+/// and during quick-setup model picking. Coder=blue, R1=purple (magenta), R2=cyan (blue+green).
+const ROLE_CODER: Color = Color::LightBlue;
+const ROLE_R1: Color = Color::Magenta;
+const ROLE_R2: Color = Color::Cyan;
+
 /// Known providers: (display_name, suggested_connection_name, provider_type, base_url, needs_api_key)
 /// base_url = "" means the client uses the provider's SDK default (anthropic, google).
 const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
     ("Anthropic",          "anthropic",  "anthropic",     "",                                          true),
     ("OpenAI",             "openai",     "openai_compat", "https://api.openai.com/v1",                 true),
-    ("xAI  (Grok)",        "xai",        "openai_compat", "https://api.x.ai/v1",                       true),
-    ("Google  (Gemini)",   "google",     "google",        "",                                          true),
+    ("xAI",                "xai",        "openai_compat", "https://api.x.ai/v1",                       true),
+    ("Google",             "google",     "google",        "",                                          true),
     ("Groq",               "groq",       "openai_compat", "https://api.groq.com/openai/v1",            true),
     ("Mistral",            "mistral",    "openai_compat", "https://api.mistral.ai/v1",                 true),
     ("Together AI",        "together",   "openai_compat", "https://api.together.xyz/v1",               true),
@@ -82,10 +88,12 @@ const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
     ("Perplexity",         "perplexity", "openai_compat", "https://api.perplexity.ai",                 true),
     ("DeepSeek",           "deepseek",   "openai_compat", "https://api.deepseek.com",                  true),
     ("Cohere",             "cohere",     "openai_compat", "https://api.cohere.com/v2",                 true),
-    ("AWS Bedrock",        "bedrock",    "aws_bedrock",   "",                                          true),
-    ("Ollama  (local)",    "ollama",     "openai_compat", "http://localhost:11434/v1",                 false),
-    ("LM Studio  (local)", "lmstudio",   "openai_compat", "http://localhost:1234/v1",                  false),
-    ("Azure OpenAI",       "azure",      "openai_compat", "",                                          true),
+    ("Azure",              "azure",      "azure_openai",  "",                                          true),
+    ("AWS",                "aws",        "openai_compat", "",                                          true),
+    ("Vertex AI",          "vertex",     "openai_compat", "",                                          true),
+    ("Gradient",           "gradient",   "openai_compat", "",                                          true),
+    ("Ollama (local)",     "ollama",     "openai_compat", "http://localhost:11434/v1",                 false),
+    ("LM Studio (local)",  "lmstudio",   "openai_compat", "http://localhost:1234/v1",                  false),
     ("Other / custom",     "custom",     "openai_compat", "",                                          true),
 ];
 
@@ -161,6 +169,9 @@ enum WizardStep {
     BindingNote,
     // Role assignment
     RoleAssignment { role: String },
+    // Special first-run quick Ollama path: after auto-adding the local provider,
+    // user scrolls the *live* fetched model list and picks (no more hardcoded defaults).
+    QuickOllamaModelPick { role: String },
 }
 
 /// Lightweight state for the /config wizard.
@@ -188,6 +199,10 @@ struct ConfigWizard {
 
     // Which role we are currently assigning (for RoleAssignment step)
     current_role: Option<String>,
+
+    // Populated only for the Quick Ollama model picker flow so we can present
+    // the real models the user has `ollama pull`'ed (no baked-in llama3.2 etc).
+    ollama_model_list: Vec<String>,
 }
 
 /// Entry point called from main when no subcommand (or `anvil ui`) is given.
@@ -270,6 +285,11 @@ struct App {
     // When true the input characters are masked in the UI (for API keys)
     input_secret: bool,
 
+    // Cached result of the Ollama probe (localhost:11434). Decides whether the
+    // "Quick local Ollama setup" option is offered on first boot / in the wizard.
+    // None = not yet probed. Populated lazily by is_ollama_available().
+    ollama_available_cached: Option<bool>,
+
     // Files whose contents are sent as additional context with chat turns (via /include).
     // First step toward real agentic/grounded assistance *behind the gates* (post PlanAccepted).
     // The model sees the real file text; human still decides what to keep or edit.
@@ -312,6 +332,7 @@ impl App {
             splash_ticks: SPLASH_DURATION,
             anim_tick: 0,
             input_secret: false,
+            ollama_available_cached: None,
             active_context: vec![],
             viewing_doc: None,
         };
@@ -335,6 +356,13 @@ impl App {
         }
         app.reconcile_stage_from_disk();
         app.update_status();
+
+        // Warm the Ollama probe cache on first run so the main menu can decide
+        // immediately whether to show the Quick Ollama option (no surprise delay or flicker).
+        if app.first_run {
+            let _ = app.is_ollama_available();
+        }
+
         app
     }
 
@@ -360,7 +388,7 @@ impl App {
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.root.display().to_string());
         let stage = if self.first_run || self.stage == WorkflowStage::Unconfigured {
-            "UNCONFIGURED — press s for quick setup"
+            "UNCONFIGURED — press s for quick setup (when Ollama present)"
         } else {
             match self.stage {
                 WorkflowStage::Talk => "TALK (chat with coder; /plan for gate)",
@@ -451,7 +479,7 @@ impl App {
     }
 
     /// Production-quality message renderer for the main chat log.
-    /// - Respects [you], [system], [review R*], [assistant via ...] prefixes with distinct colors.
+    /// - Respects [you], [system], [review R*], [coder], [planner], [reviewer*] (assistant) prefixes with distinct colors.
     /// - Parses ```lang ... ``` fences anywhere in the message (including inside the big REVIEW_*.md dumps
     ///   and context-augmented LLM replies) and renders them as visual "code cards" using box-drawing
     ///   characters + muted style. This gives a Cline-like richer reading experience for code suggestions
@@ -469,9 +497,21 @@ impl App {
         } else if m.starts_with("[review") {
             // Prominent treatment for the gate reviews (the heart of the "exactly two" contract).
             (Style::default().fg(Color::Cyan).bold(), m)
+        } else if m.starts_with("[coder]") || m.starts_with("[planner]") || m.starts_with("[assistant") {
+            // Coder (and planner fallback) responses are always blue.
+            (Style::default().fg(ROLE_CODER), m)
+        } else if m.starts_with("[reviewer-a]") || m.starts_with("[R1]") {
+            // R1 / reviewer-a responses are purple.
+            (Style::default().fg(ROLE_R1), m)
+        } else if m.starts_with("[reviewer-b]") || m.starts_with("[R2]") {
+            // R2 / reviewer-b responses are the blue/green (cyan) mixed color.
+            (Style::default().fg(ROLE_R2), m)
+        } else if m.starts_with("[reviewer") {
+            // Generic reviewer prefix fallback.
+            (Style::default().fg(ROLE_R1), m)
         } else if m.starts_with("[") && m.contains(" via ") {
-            // LLM responses, e.g. [planner via llama3.2]
-            (Style::default().fg(Color::LightBlue), m)
+            // Legacy LLM responses that still contain the old " via model" form.
+            (Style::default().fg(ROLE_CODER), m)
         } else {
             (Style::default(), m)
         };
@@ -734,20 +774,26 @@ impl App {
         }
     }
 
-    /// Quick local-Ollama first-run setup. Reuses the exact same config types + save_config
-    /// that cmd_init / cmd_setup use, so anvil.toml is 100% compatible.
-    ///
-    /// Uses two different model families on the *same* local-ollama service for the two
-    /// reviewers. Ollama hosts many distinct models, so this still satisfies the R1/R2
-    /// cross-family diversity requirement without emitting a "same provider" warning.
-    fn do_quick_ollama_setup(&mut self) -> Result<()> {
+    /// Returns whether Ollama appears to be running and reachable on the default port.
+    /// Result is cached for the lifetime of the App so menu building doesn't spam probes.
+    fn is_ollama_available(&mut self) -> bool {
+        if let Some(cached) = self.ollama_available_cached {
+            return cached;
+        }
+        let ok = if let Some(rt) = &self.runtime {
+            rt.block_on(self.llm.probe_ollama())
+        } else {
+            false
+        };
+        self.ollama_available_cached = Some(ok);
+        ok
+    }
+
+    /// Seed (or update) just the "local-ollama" provider connection with the standard
+    /// localhost openai_compat URL and no credential. Called as the first half of quick setup.
+    fn ensure_local_ollama_provider(&mut self) -> Result<()> {
         ensure_anvil_dir(&self.root)?;
-
         let mut cfg = load_config(&self.root).unwrap_or_default();
-
-        // Seed the same local-ollama provider (idempotent if already present).
-        // Use CredentialRef::None because default Ollama (and many local openai-compat servers)
-        // require no key. We still send a conventional placeholder so the HTTP layer is uniform.
         cfg.providers.insert(
             "local-ollama".to_string(),
             ProviderConnection {
@@ -757,48 +803,87 @@ impl App {
                 extra: Default::default(),
             },
         );
+        save_config(&self.root, &cfg)?;
+        self.cfg = load_config(&self.root).ok();
+        Ok(())
+    }
 
-        // Two distinct bindings using different model families on the single local-ollama connection.
-        // This gives reviewer_a and reviewer_b the required diversity for the anti-drift gates.
-        // (Remove any prior single-binding quick-start name so re-running 's' after the old behavior leaves a clean file.)
-        cfg.model_bindings.remove("local-default");
-        cfg.model_bindings.insert(
-            "local-llama".to_string(),
-            ModelBinding {
-                provider: "local-ollama".to_string(),
-                model: "llama3.2".to_string(),
-                note: Some("quick-start".to_string()),
-            },
-        );
-        cfg.model_bindings.insert(
-            "local-qwen".to_string(),
-            ModelBinding {
-                provider: "local-ollama".to_string(),
-                model: "qwen2.5".to_string(),
-                note: Some("quick-start (diverse reviewer)".to_string()),
-            },
-        );
+    /// Entry point for the improved Quick local Ollama first-run experience.
+    /// - Only offered when is_ollama_available() is true (checked on first boot + before showing menu).
+    /// - Seeds the provider connection automatically (no key).
+    /// - Fetches the *live* list of models from the user's Ollama (/v1/models or /api/tags).
+    /// - Puts the user into a scrolling picker (reusing the wizard list UI) for CODER, then R1, then R2.
+    /// - No more hardcoded model names (llama3.2 etc) that 404 on machines with different tags.
+    fn start_quick_ollama_setup(&mut self) {
+        if !self.is_ollama_available() {
+            self.push_system("Ollama not detected at http://localhost:11434.");
+            self.push_system("Install from https://ollama.com, run `ollama serve` (or launch the app), pull a couple models, then press 's' or choose Quick setup again.");
+            if self.config_wizard.is_none() {
+                self.start_config_wizard();
+            }
+            return;
+        }
 
-        cfg.roles = Roles {
-            coder: Some("local-llama".to_string()),
-            reviewer_a: Some("local-llama".to_string()),
-            reviewer_b: Some("local-qwen".to_string()),
-            planner: None,
+        if let Err(e) = self.ensure_local_ollama_provider() {
+            self.push_system(&format!("Quick Ollama provider setup failed: {}", e));
+            return;
+        }
+
+        // Fetch the real models the user has available right now.
+        let models: Vec<String> = if let Some(rt) = &self.runtime {
+            match rt.block_on(self.llm.list_ollama_models()) {
+                Ok(m) if !m.is_empty() => m,
+                Ok(_) => {
+                    self.push_system("Ollama is running but returned no models. Use `ollama pull <name>` for at least one model (e.g. llama3.1:8b), then retry quick setup.");
+                    vec![]
+                }
+                Err(e) => {
+                    self.push_system(&format!("Could not list Ollama models: {}. (Is Ollama still running?)", e));
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
         };
 
-        save_config(&self.root, &cfg)?;
+        // Make sure we have an active wizard so the list scroller appears.
+        if self.config_wizard.is_none() {
+            self.start_config_wizard();
+        }
+
+        if let Some(w) = &mut self.config_wizard {
+            w.ollama_model_list = models.clone();
+            w.step = WizardStep::QuickOllamaModelPick { role: "coder".to_string() };
+            w.list_items = models;
+            if !w.list_items.is_empty() {
+                w.list_items.push("Other / type manually".to_string());
+            }
+            w.list_selected = 0;
+            w.list_title = "Quick local Ollama — pick model for CODER (blue):".to_string();
+        }
 
         self.first_run = false;
-        self.cfg = load_config(&self.root).ok();
         self.reconcile_stage_from_disk();
         self.update_status();
 
-        self.push_system("Quick setup complete: local-ollama provider + two bindings (llama3.2 + qwen2.5).");
-        self.push_system("reviewer-a uses local-llama; reviewer-b uses local-qwen (different models on same Ollama service).");
-        self.push_system("This satisfies the R1 + R2 diversity requirement for the plan/phase gates.");
-        self.push_system("You can now type to chat and run /plan for the full structured workflow. (Ollama must be running on :11434 for real calls.)");
+        self.push_system("Local Ollama provider added (http://localhost:11434/v1, no key).");
+        self.push_system("Scroll ↑↓ and Enter to choose your model for CODER (blue). You will then pick for R1 (purple) and R2 (cyan).");
+        self.push_system("This keeps the quick path fast while letting you use exactly the tags you have pulled.");
+    }
 
-        Ok(())
+    /// Helper used by the QuickOllamaModelPick wizard steps to advance to the next role
+    /// while reusing the already-fetched ollama_model_list.
+    fn enter_next_quick_pick(&mut self, next_role: &str, display: &str) {
+        if let Some(w) = &mut self.config_wizard {
+            w.step = WizardStep::QuickOllamaModelPick { role: next_role.to_string() };
+            w.list_items = w.ollama_model_list.clone();
+            if !w.list_items.is_empty() {
+                w.list_items.push("Other / type manually".to_string());
+            }
+            w.list_selected = 0;
+            w.list_title = format!("Quick local Ollama — pick model for {}:", display);
+        }
+        self.push_system(&format!("Now pick for {} (scroll and Enter).", display));
     }
 
     fn is_configured(&self) -> bool {
@@ -844,7 +929,7 @@ impl App {
 
         // Clone what we need for the async task + the UI prefix *before* any mutable calls on self.
         // This releases the immutable borrow on self.cfg / binding / provider.
-        let model_for_ui_and_task = binding.model.clone();
+        let model = binding.model.clone();
         let conn_for_task = provider.clone();
         let key_for_task = api_key.clone();
 
@@ -852,8 +937,9 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel::<String>();
         self.llm_rx = Some(rx);
 
-        // Start the visible streaming line with a nice role prefix (tokens will be appended to this entry).
-        let prefix = format!("[{} via {}] ", role, model_for_ui_and_task);
+        // Start the visible streaming line with the role prefix (tokens appended live to this entry).
+        // Model name is not shown here (kept only in the top header bar for CODER/R1/R2).
+        let prefix = format!("[{}] ", role);
         self.push(prefix);
 
         // Spawn the actual streaming work on our runtime so the TUI loop is not blocked.
@@ -896,7 +982,7 @@ impl App {
                 // The tx is consumed by the call; when the future ends the sender is dropped and
                 // the receiver in the UI loop will observe disconnect (stream finished).
                 let _ = llm
-                    .chat_stream_to_channel(&conn_for_task, &model_for_ui_and_task, &key_for_task, &system, &user, tx)
+                    .chat_stream_to_channel(&conn_for_task, &model, &key_for_task, &system, &user, tx)
                     .await;
             });
         } else {
@@ -909,32 +995,67 @@ impl App {
     /// from the event loop so text appears live without blocking crossterm poll.
     fn drain_llm_stream(&mut self) -> bool {
         let mut changed = false;
+
+        // Collect incoming deltas (and detect disconnect) without holding a mutable borrow on
+        // the receiver across calls that also mutate self (push_system etc.).
+        let mut deltas: Vec<String> = Vec::new();
+        let mut stream_finished = false;
+
         if let Some(rx) = &mut self.llm_rx {
             loop {
                 match rx.try_recv() {
-                    Ok(delta) => {
-                        if let Some(last) = self.messages.last_mut() {
-                            last.push_str(&delta);
-                        }
-                        changed = true;
-                    }
+                    Ok(delta) => deltas.push(delta),
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                        // Stream finished for this response. Leave the accumulated text as-is.
-                        // Clear the receiver so we don't keep checking a dead channel.
-                        self.llm_rx = None;
-                        // Ensure the line ends neatly if the model didn't send a trailing newline.
-                        if let Some(last) = self.messages.last_mut() {
-                            if !last.ends_with('\n') {
-                                last.push('\n');
-                            }
-                        }
-                        changed = true;
+                        stream_finished = true;
                         break;
                     }
                 }
             }
         }
+
+        for delta in deltas {
+            // Special handling for errors injected by the streaming layer (so the user
+            // sees *why* there was no reply, e.g. Ollama not running, model not pulled,
+            // bad endpoint, auth, etc.). We remove the placeholder assistant line we
+            // started with the role prefix and surface a clean system message instead.
+            if delta.contains("[llm-error]") {
+                // Drop the "[coder] " (or equivalent) starter that has no useful content.
+                if let Some(last) = self.messages.last() {
+                    if last.starts_with('[') {
+                        let _ = self.messages.pop();
+                    }
+                }
+                let clean = delta
+                    .trim_start_matches('\n')
+                    .trim_start_matches("[llm-error]")
+                    .trim_start_matches(": ")
+                    .trim_start_matches(' ')
+                    .to_string();
+                self.push_system(&format!("model error: {}", clean));
+                changed = true;
+                continue;
+            }
+
+            if let Some(last) = self.messages.last_mut() {
+                last.push_str(&delta);
+            }
+            changed = true;
+        }
+
+        if stream_finished {
+            // Stream finished for this response. Leave the accumulated text as-is.
+            // Clear the receiver so we don't keep checking a dead channel.
+            self.llm_rx = None;
+            // Ensure the line ends neatly if the model didn't send a trailing newline.
+            if let Some(last) = self.messages.last_mut() {
+                if !last.ends_with('\n') {
+                    last.push('\n');
+                }
+            }
+            changed = true;
+        }
+
         changed
     }
 
@@ -1055,6 +1176,7 @@ impl App {
             model: None,
             note: None,
             current_role: None,
+            ollama_model_list: vec![],
         };
 
         self.push_system("=== CONFIGURATION WIZARD ===");
@@ -1072,20 +1194,36 @@ impl App {
     }
 
     fn populate_main_menu(&mut self) {
+        // Probe (and cache) *before* we take a &mut borrow on the wizard, to satisfy borrow checker.
+        let ollama_here = if self.first_run { self.is_ollama_available() } else { false };
+
         if let Some(w) = &mut self.config_wizard {
             w.step = WizardStep::MainMenu;
             if self.first_run {
-                // Prominent fast path for "someone off the street" — one choice and they are done.
-                w.list_items = vec![
-                    "1. Quick local Ollama setup (recommended first try — no keys, ~10 seconds)".to_string(),
-                    "2. Add / update a provider connection (OpenAI, Anthropic, Azure, Groq, Ollama, ...)".to_string(),
-                    "3. Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
-                    "4. Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
-                    "5. Show current configuration".to_string(),
-                    "6. Finish & return to chat".to_string(),
-                ];
+                if ollama_here {
+                    // Only present the Quick Ollama option when we can actually reach a running Ollama.
+                    // This avoids confusing new users who don't have it installed/running.
+                    w.list_items = vec![
+                        "1. Quick local Ollama setup (recommended first try — no keys, ~10 seconds)".to_string(),
+                        "2. Add / update a provider connection (Anthropic, OpenAI, xAI, Google, Azure, AWS, Groq, Gradient, Ollama, ...)".to_string(),
+                        "3. Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
+                        "4. Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
+                        "5. Show current configuration".to_string(),
+                        "6. Finish & return to chat".to_string(),
+                    ];
+                    w.list_title = "First-time setup — ↑↓ to the top item then Enter (or just type 1). This is the simplest on-ramp.".to_string();
+                } else {
+                    // No Ollama probe success → do not offer the quick item at all.
+                    w.list_items = vec![
+                        "1. Add / update a provider connection (Anthropic, OpenAI, xAI, Google, Azure, AWS, Groq, Gradient, Ollama, ...)".to_string(),
+                        "2. Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
+                        "3. Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
+                        "4. Show current configuration".to_string(),
+                        "5. Finish & return to chat".to_string(),
+                    ];
+                    w.list_title = "First-time setup — Ollama not detected on :11434. Pick 1 to add any provider (including local Ollama later).".to_string();
+                }
                 w.list_selected = 0;
-                w.list_title = "First-time setup — ↑↓ to the top item then Enter (or just type 1). This is the simplest on-ramp.".to_string();
             } else {
                 w.list_items = vec![
                     "Add / update a provider connection".to_string(),
@@ -1099,7 +1237,7 @@ impl App {
             }
         }
         if self.first_run {
-            self.push_system("Main menu — first-run mode. Pick 1 for instant local setup or arrow + Enter.");
+            self.push_system("Main menu — first-run mode. Pick the top item (or arrow + Enter).");
         } else {
             self.push_system("Main menu — use arrows then Enter, or type a number 1-5.");
         }
@@ -1117,6 +1255,7 @@ impl App {
                     | WizardStep::BindingProvider
                     | WizardStep::ModelName
                     | WizardStep::RoleAssignment { .. }
+                    | WizardStep::QuickOllamaModelPick { .. }
             );
             let chosen = if listy && !w.list_items.is_empty() {
                 w.list_items.get(w.list_selected).cloned()
@@ -1134,14 +1273,12 @@ impl App {
         match &self.config_wizard.as_ref().map(|w| w.step.clone()) {
             Some(WizardStep::MainMenu) => {
                 let s = effective.trim().to_lowercase();
-                // First-run has a prominent Quick Ollama choice as #1. Handle it specially
-                // and auto-finish the wizard so the user lands straight back in chat ready to code.
-                if self.first_run && (s == "1" || s.contains("quick") || s.contains("ollama")) {
-                    if let Err(e) = self.do_quick_ollama_setup() {
-                        self.push_system(&format!("Quick setup error: {}", e));
-                    }
-                    // do_quick_ollama_setup already sets first_run=false and pushes success details.
-                    self.finish_config_wizard();
+                // First-run Quick Ollama (only shown if probe says Ollama is reachable).
+                // It seeds the provider then switches the wizard into live model-list pickers
+                // for CODER (blue) → R1 (purple) → R2 (cyan). No auto-finish until picks complete.
+                if self.first_run && (s.contains("quick") || s.contains("ollama")) {
+                    self.start_quick_ollama_setup();
+                    // The picker steps will call finish_config_wizard() themselves after the third choice.
                 } else if (s == "1" || s == "2") || s.contains("provider") {
                     // Covers normal (provider=1) and first-run (provider=2) layouts.
                     self.start_add_provider();
@@ -1341,7 +1478,7 @@ impl App {
                         w.list_title.clear();
                     }
                     self.input.clear();
-                    self.push_system("Type the model ID (e.g. claude-sonnet-4-6, gpt-4o, llama3.2):");
+                    self.push_system("Type the model ID (e.g. claude-sonnet-4-6, gpt-4o, llama3.1:8b):");
                     return;
                 }
                 if let Some(w) = &mut self.config_wizard {
@@ -1405,6 +1542,66 @@ impl App {
                         }
                     }
                     self.populate_main_menu();
+                }
+            }
+
+            Some(WizardStep::QuickOllamaModelPick { role }) => {
+                let model = effective.trim();
+                if model.is_empty() {
+                    return;
+                }
+                if model == "Other / type manually" {
+                    if let Some(w) = &mut self.config_wizard {
+                        w.list_items.clear();
+                        w.list_title.clear();
+                    }
+                    self.input.clear();
+                    self.push_system(&format!(
+                        "Type the exact Ollama model tag for {} (from `ollama list` or the picker above):",
+                        role
+                    ));
+                    return;
+                }
+                // Create (or overwrite) a stable binding name for this role under the local-ollama provider.
+                let binding_name = match role.as_str() {
+                    "coder" => "local-coder".to_string(),
+                    "reviewer_a" => "local-r1".to_string(),
+                    "reviewer_b" => "local-r2".to_string(),
+                    _ => format!("local-{}", role.replace('_', "-")),
+                };
+
+                {
+                    let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
+                    cfg.model_bindings.insert(
+                        binding_name.clone(),
+                        ModelBinding {
+                            provider: "local-ollama".to_string(),
+                            model: model.to_string(),
+                            note: Some("quick-ollama".to_string()),
+                        },
+                    );
+                    match role.as_str() {
+                        "coder" => cfg.roles.coder = Some(binding_name.clone()),
+                        "reviewer_a" => cfg.roles.reviewer_a = Some(binding_name.clone()),
+                        "reviewer_b" => cfg.roles.reviewer_b = Some(binding_name.clone()),
+                        _ => {}
+                    }
+                }
+
+                save_config(&self.root, self.cfg.as_ref().unwrap()).ok();
+                self.reconcile_stage_from_disk();
+                self.update_status();
+
+                if role == "coder" {
+                    self.enter_next_quick_pick("reviewer_a", "R1 (purple)");
+                } else if role == "reviewer_a" {
+                    self.enter_next_quick_pick("reviewer_b", "R2 (cyan)");
+                } else {
+                    // All three chosen — finish the quick flow.
+                    self.push_system("Quick setup complete!");
+                    self.push_system("CODER (blue) • R1 (purple) • R2 (cyan) are now assigned from your live Ollama models.");
+                    self.push_system("Type to chat, or run /plan for the full R1+R2 gated workflow.");
+                    self.finish_config_wizard();
                 }
             }
 
@@ -1683,6 +1880,17 @@ impl App {
                 self.push_system("(back)");
                 return;
             }
+            WizardStep::QuickOllamaModelPick { role } => {
+                match role.as_str() {
+                    "reviewer_b" => WizardStep::QuickOllamaModelPick { role: "reviewer_a".to_string() },
+                    "reviewer_a" => WizardStep::QuickOllamaModelPick { role: "coder".to_string() },
+                    _ => {
+                        self.populate_main_menu();
+                        self.push_system("(back)");
+                        return;
+                    }
+                }
+            }
             _ => {
                 self.populate_main_menu();
                 self.push_system("(back)");
@@ -1738,6 +1946,20 @@ impl App {
                         role
                     );
                 }
+                WizardStep::QuickOllamaModelPick { role } => {
+                    w.list_items = w.ollama_model_list.clone();
+                    if !w.list_items.is_empty() {
+                        w.list_items.push("Other / type manually".to_string());
+                    }
+                    w.list_selected = 0;
+                    let display = match role.as_str() {
+                        "coder" => "CODER (blue)",
+                        "reviewer_a" => "R1 (purple)",
+                        "reviewer_b" => "R2 (cyan)",
+                        _ => role,
+                    };
+                    w.list_title = format!("Quick local Ollama — pick model for {}:", display);
+                }
                 _ => {
                     // Text steps or anything else: ensure no stale list popup
                     w.list_items.clear();
@@ -1771,6 +1993,9 @@ impl App {
                 WizardStep::BindingNote => {
                     self.input = w.note.clone().unwrap_or_default();
                 }
+                WizardStep::QuickOllamaModelPick { .. } => {
+                    // Pure list step (models already in w.list_items); input stays cleared.
+                }
                 _ => {}
             }
 
@@ -1797,6 +2022,9 @@ impl App {
                             _ => 0,
                         };
                     }
+                }
+                WizardStep::QuickOllamaModelPick { .. } => {
+                    // Fresh list each time we enter/back into a pick; 0 is fine (or could remember last choice per role).
                 }
                 WizardStep::BindingProvider => {
                     if let Some(bp) = &w.binding_provider {
@@ -2005,6 +2233,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
                 | WizardStep::BindingProvider
                 | WizardStep::ModelName
                 | WizardStep::RoleAssignment { .. }
+                | WizardStep::QuickOllamaModelPick { .. }
         );
         if is_list_step && !wizard.list_items.is_empty() {
             match key.code {
@@ -2062,16 +2291,10 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         }
 
         KeyCode::Char('s') if app.first_run && key.modifiers.is_empty() && app.input.is_empty() => {
-            // Quick first-run setup (addresses the review comment at plan.md:183-185)
-            // Works even if the wizard is currently open — great escape hatch for the "just get me going" path.
-            if let Err(e) = app.do_quick_ollama_setup() {
-                app.push_system(&format!("Quick setup error: {}", e));
-            }
+            // Quick first-run setup. Guarded by Ollama probe (only offered when reachable).
+            // Starts (or switches) the wizard into the live model scroller for CODER/R1/R2 picks.
             app.showing_command_palette = false;
-            if app.config_wizard.is_some() {
-                app.config_wizard = None;
-                app.input_secret = false;
-            }
+            app.start_quick_ollama_setup();
             return Ok(false);
         }
 
@@ -2280,11 +2503,11 @@ fn render_splash(f: &mut Frame, app: &App) {
         let r2    = splash_model_label(cfg, "reviewer-b");
         if coder != "—" || r1 != "—" {
             lines.push(Line::from(vec![
-                Span::styled("  CODER ".to_string(), Style::default().fg(Color::Cyan)),
+                Span::styled("  CODER ".to_string(), Style::default().fg(ROLE_CODER)),
                 Span::styled(coder, Style::default().fg(Color::White)),
-                Span::styled("   R1 ".to_string(), Style::default().fg(Color::Magenta)),
+                Span::styled("   R1 ".to_string(), Style::default().fg(ROLE_R1)),
                 Span::styled(r1, Style::default().fg(Color::White)),
-                Span::styled("   R2 ".to_string(), Style::default().fg(Color::Magenta)),
+                Span::styled("   R2 ".to_string(), Style::default().fg(ROLE_R2)),
                 Span::styled(r2, Style::default().fg(Color::White)),
                 Span::raw("  ".to_string()),
             ]));
@@ -2416,16 +2639,16 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let r1    = header_model_label(cfg, "reviewer-a");
         let r2    = header_model_label(cfg, "reviewer-b");
         vec![
-            Span::styled(" CODER ".to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" CODER ".to_string(), Style::default().fg(ROLE_CODER).add_modifier(Modifier::BOLD)),
             Span::styled(coder, Style::default().fg(Color::White)),
-            Span::styled("  │  R1 ".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled("  │  R1 ".to_string(), Style::default().fg(ROLE_R1).add_modifier(Modifier::BOLD)),
             Span::styled(r1, Style::default().fg(Color::White)),
-            Span::styled("  │  R2 ".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled("  │  R2 ".to_string(), Style::default().fg(ROLE_R2).add_modifier(Modifier::BOLD)),
             Span::styled(r2, Style::default().fg(Color::White)),
         ]
     } else {
         vec![Span::styled(
-            " Run /config or press s for quick Ollama setup".to_string(),
+            " Run /config or press s for quick setup (Ollama if available)".to_string(),
             Style::default().fg(Color::Yellow),
         )]
     };
@@ -2469,21 +2692,19 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
 /// Short model label for splash screen.
 fn splash_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
-    if let Ok((name, binding, _)) = cfg.resolve_role_full(role) {
+    if let Ok((_, binding, _)) = cfg.resolve_role_full(role) {
         let m = &binding.model;
-        let m = if m.len() > 18 { &m[..18] } else { m };
-        format!("{} ({})", name, m)
+        if m.len() > 18 { m[..18].to_string() } else { m.clone() }
     } else {
         "—".to_string()
     }
 }
 
-/// Full model label for the header row.
+/// Model label for the header row (coder / R1 / R2). Only the model name.
 fn header_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
-    if let Ok((name, binding, provider)) = cfg.resolve_role_full(role) {
+    if let Ok((_, binding, _)) = cfg.resolve_role_full(role) {
         let m = &binding.model;
-        let m = if m.len() > 20 { &m[..20] } else { m };
-        format!("{} ({} / {})", name, m, provider.r#type)
+        if m.len() > 22 { m[..22].to_string() } else { m.clone() }
     } else {
         "not configured".to_string()
     }
@@ -2734,14 +2955,23 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
         .map(|item| ListItem::new(format!("  {}  ", item)))
         .collect();
 
+    // Color the wizard popup border + title for the quick Ollama role picks so the
+    // CODER/R1/R2 identity is visible even while choosing (blue / purple / cyan).
+    let (wiz_border, wiz_title_fg) = match &wizard.step {
+        WizardStep::QuickOllamaModelPick { role } if role == "coder" => (ROLE_CODER, ROLE_CODER),
+        WizardStep::QuickOllamaModelPick { role } if role == "reviewer_a" => (ROLE_R1, ROLE_R1),
+        WizardStep::QuickOllamaModelPick { role } if role == "reviewer_b" => (ROLE_R2, ROLE_R2),
+        _ => (Color::Yellow, Color::DarkGray),
+    };
+
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
+                .border_style(Style::default().fg(wiz_border))
                 .title(Span::styled(
                     format!(" {} ", wizard.list_title),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(wiz_title_fg),
                 )),
         )
         .highlight_style(

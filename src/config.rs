@@ -48,7 +48,7 @@ pub struct Roles {
 pub struct ProviderConnection {
     /// "openai_compat" | "anthropic" | "google" | "aws_bedrock" | "azure_openai" | ...
     /// "openai_compat" is the universal path for Ollama, Groq, Together, Fireworks, OpenRouter,
-    /// vLLM, LocalAI, Azure OpenAI (with appropriate base_url + auth), etc.
+    /// vLLM, LocalAI, Azure, AWS (via gateway), Gradient, Vertex, etc.
     pub r#type: String,
 
     /// For openai_compat and some others: the base URL (no trailing slash).

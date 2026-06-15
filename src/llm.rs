@@ -8,7 +8,7 @@
 //!   - Any vLLM / LocalAI / llama.cpp server
 //!
 //! Special-cased adapters for Anthropic (Messages API) and Google (Gemini).
-//! AWS Bedrock and Vertex can be added later (or routed through a gateway that speaks OpenAI compat).
+//! AWS (Bedrock), Vertex, Gradient etc. work via openai_compat gateways for now.
 //!
 //! Exactly two reviews from different providers is a *workflow* concern, not a client concern.
 
@@ -85,6 +85,77 @@ impl LlmClient {
                 Ok("ollama".to_string())
             }
         }
+    }
+
+    /// Quick reachability check for default Ollama (http://localhost:11434).
+    /// Short timeout so first-boot / menu decisions aren't slow.
+    pub async fn probe_ollama(&self) -> bool {
+        let url = "http://localhost:11434/api/version";
+        match self
+            .http
+            .get(url)
+            .timeout(std::time::Duration::from_millis(700))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Live list of models from local Ollama.
+    /// Prefers the OpenAI-compat /v1/models (exact IDs for chat calls).
+    /// Falls back to native /api/tags if needed.
+    pub async fn list_ollama_models(&self) -> Result<Vec<String>> {
+        // Compat path (recommended — the "id" values are what /v1/chat/completions accepts)
+        let url = "http://localhost:11434/v1/models";
+        #[derive(Deserialize, Debug)]
+        struct M {
+            id: String,
+        }
+        #[derive(Deserialize, Debug)]
+        struct L {
+            data: Vec<M>,
+        }
+        if let Ok(resp) = self
+            .http
+            .get(url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(list) = resp.json::<L>().await {
+                    let ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
+                    if !ids.is_empty() {
+                        return Ok(ids);
+                    }
+                }
+            }
+        }
+
+        // Native Ollama fallback
+        let url = "http://localhost:11434/api/tags";
+        #[derive(Deserialize, Debug)]
+        struct Tag {
+            name: String,
+        }
+        #[derive(Deserialize, Debug)]
+        struct Tags {
+            models: Vec<Tag>,
+        }
+        let resp = self
+            .http
+            .get(url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+            .context("failed to reach Ollama /api/tags")?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Ollama returned non-success for model list");
+        }
+        let t: Tags = resp.json().await?;
+        Ok(t.models.into_iter().map(|x| x.name).collect())
     }
 
     /// Non-streaming chat. Returns the full assistant message.
@@ -168,12 +239,21 @@ impl LlmClient {
             }
             "google" | "google_ai_studio" | "gemini" => {
                 // Gemini streaming is more involved; send the whole response as a single chunk.
-                let full = self.chat_google(conn, model, api_key, system, user).await?;
-                let _ = token_tx.send(full.clone());
-                Ok(full)
+                match self.chat_google(conn, model, api_key, system, user).await {
+                    Ok(full) => {
+                        let _ = token_tx.send(full.clone());
+                        Ok(full)
+                    }
+                    Err(e) => {
+                        let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                        Err(e)
+                    }
+                }
             }
             other => {
-                anyhow::bail!("provider type '{}' does not support streaming yet (or is not implemented)", other)
+                let msg = format!("provider type '{}' does not support streaming yet (or is not implemented)", other);
+                let _ = token_tx.send(format!("\n[llm-error] {}", msg));
+                anyhow::bail!("{}", msg)
             }
         }
     }
@@ -379,16 +459,25 @@ impl LlmClient {
         }
         request = request.header("Accept", "text/event-stream");
 
-        let resp = request
+        let resp = match request
             .json(&req)
             .send()
             .await
-            .with_context(|| format!("POST {} failed", url))?;
+            .with_context(|| format!("POST {} failed", url))
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                return Err(e);
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("{} error ({}): {}", conn.r#type, status, body);
+            let err_msg = format!("{} error ({}): {}", conn.r#type, status, body);
+            let _ = token_tx.send(format!("\n[llm-error] {}", err_msg));
+            anyhow::bail!("{}", err_msg);
         }
 
         self.handle_openai_sse_to_channel(resp, token_tx).await
@@ -600,12 +689,20 @@ impl LlmClient {
             .header("content-type", "application/json")
             .header("anthropic-beta", "messages-2023-12-15");
 
-        let resp = request.json(&req).send().await?;
+        let resp = match request.json(&req).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                return Err(e.into());
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("anthropic error ({}): {}", status, body);
+            let err_msg = format!("anthropic error ({}): {}", status, body);
+            let _ = token_tx.send(format!("\n[llm-error] {}", err_msg));
+            anyhow::bail!("{}", err_msg);
         }
 
         self.handle_anthropic_stream_to_channel(resp, token_tx).await

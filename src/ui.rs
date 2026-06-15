@@ -1972,8 +1972,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             app.should_quit = true;
             return Ok(true);
         }
-        KeyCode::Char('q') if key.modifiers.is_empty() => {
-            // 'q' is always a hard quit (even from inside the config wizard).
+        KeyCode::Char('q') if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() => {
+            // Only quit on 'q' when idle — not while the wizard is open or input contains text,
+            // so pasting an API key that contains 'q' doesn't eject the user.
             app.should_quit = true;
             return Ok(true);
         }
@@ -1982,7 +1983,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             return Ok(true);
         }
 
-        KeyCode::Char('s') if app.first_run && key.modifiers.is_empty() => {
+        KeyCode::Char('s') if app.first_run && key.modifiers.is_empty() && app.input.is_empty() => {
             // Quick first-run setup (addresses the review comment at plan.md:183-185)
             // Works even if the wizard is currently open — great escape hatch for the "just get me going" path.
             if let Err(e) = app.do_quick_ollama_setup() {

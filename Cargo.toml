@@ -33,6 +33,9 @@ crossterm = "0.28"
 # Credentials (keychain + env fallback)
 keyring = { version = "3", features = ["linux-native"] }
 
+# Image rendering (splash screen half-block technique)
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # Errors and utils
 anyhow = "1"
 thiserror = "1"

@@ -63,21 +63,11 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/view-reviews", "Open REVIEW_plan_R1 + R2 in a focused review popup — inspect the two independent reviews before /accept-plan"),
 ];
 
-const SPLASH_DURATION: u8 = 28; // 28 × 80 ms ≈ 2.2 s
+const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, not a timer
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// ANVIL in block font (hand-kerned). Width ~38 cols.
-const SPLASH_LOGO: &[&str] = &[
-    " █████╗ ███╗  ██╗██╗   ██╗██╗██╗     ",
-    "██╔══██╗████╗ ██║██║   ██║██║██║     ",
-    "███████║██╔██╗██║╚██╗ ██╔╝██║██║     ",
-    "██╔══██║██║╚████║ ╚████╔╝ ██║██║     ",
-    "██║  ██║██║ ╚███║  ╚══╝   ██║███████╗",
-    "╚═╝  ╚═╝╚═╝  ╚══╝        ╚═╝╚══════╝",
-];
-
-/// ASCII anvil silhouette (44 cols wide, 9 rows).
+/// ASCII anvil silhouette (44 cols wide, 9 rows) — fallback when PNG decode fails.
 const SPLASH_ANVIL: &[&str] = &[
     "              ┌──────────────┐              ",
     "              │  ░░░░░░░░░░  │              ",
@@ -89,6 +79,9 @@ const SPLASH_ANVIL: &[&str] = &[
     "             ┌─────┴──────┐                 ",
     "             └────────────┘                 ",
 ];
+
+/// Logo PNG bundled at compile time — decoded at runtime into half-block pixels.
+static LOGO_BYTES: &[u8] = include_bytes!("../anvil_logo.png");
 
 /// Steps in the in-TUI configuration wizard (launched via /config or /setup).
 #[derive(Clone, Debug, PartialEq)]
@@ -210,7 +203,7 @@ struct App {
     config_wizard: Option<ConfigWizard>,
 
     // Animation state (frame counter + splash countdown)
-    splash_ticks: u8, // counts down from SPLASH_DURATION; 0 = show main UI
+    splash_ticks: u8, // nonzero = showing splash; cleared on first keypress
     anim_tick: u64,   // increments every frame, drives spinner + cursor blink
 
     // When true the input characters are masked in the UI (for API keys)
@@ -1802,9 +1795,6 @@ fn run_app_loop<B: ratatui::backend::Backend>(
         let _chat = app.drain_llm_stream();
         let _gate = app.drain_gate_events();
         app.anim_tick = app.anim_tick.wrapping_add(1);
-        if app.splash_ticks > 0 {
-            app.splash_ticks -= 1;
-        }
 
         terminal.draw(|f| render_ui(f, app))?;
 
@@ -2047,6 +2037,71 @@ fn render_ui(f: &mut Frame, app: &App) {
 
 // ─── Splash screen ────────────────────────────────────────────────────────────
 
+/// Decode a PNG and render it into ratatui `Line`s using the Unicode half-block technique.
+///
+/// Each `▀` character encodes two vertical pixels: fg = top pixel, bg = bottom pixel.
+/// Half-blocks at 2px-per-row cancel out the 2:1 terminal character aspect ratio, so the
+/// image appears undistorted in any truecolor terminal (Windows Terminal, iTerm2, etc.).
+///
+/// Returns an empty Vec on any decode failure — caller falls back to ASCII art.
+fn render_png_as_halfblocks(png_bytes: &[u8], max_cols: u16, max_rows: u16) -> Vec<Line<'static>> {
+    let img = match image::load_from_memory(png_bytes) {
+        Ok(i) => i,
+        Err(_) => return vec![],
+    };
+
+    let orig_w = img.width();
+    let orig_h = img.height();
+    if orig_w == 0 || orig_h == 0 {
+        return vec![];
+    }
+
+    // Scale to fit inside max_cols × (max_rows*2) pixel budget, preserving aspect ratio.
+    // Half-blocks give 2 pixels per char row, so the pixel grid is max_cols wide × (max_rows*2) tall.
+    let target_w = max_cols as u32;
+    let target_h = (max_rows * 2) as u32;
+    let scale = (target_w as f32 / orig_w as f32).min(target_h as f32 / orig_h as f32);
+    let scaled_w = ((orig_w as f32 * scale).round() as u32).max(1);
+    let scaled_h = ((orig_h as f32 * scale).round() as u32).max(1);
+
+    let img = img.resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Lanczos3);
+    let img = img.to_rgba8();
+    let (w, h) = img.dimensions();
+
+    // Alpha-composite against the splash background colour rgb(10, 10, 20).
+    let blend = |p: image::Rgba<u8>| -> (u8, u8, u8) {
+        let a = p[3] as f32 / 255.0;
+        (
+            (p[0] as f32 * a + 10.0 * (1.0 - a)) as u8,
+            (p[1] as f32 * a + 10.0 * (1.0 - a)) as u8,
+            (p[2] as f32 * a + 20.0 * (1.0 - a)) as u8,
+        )
+    };
+
+    let mut lines = Vec::new();
+    for y in (0..h).step_by(2) {
+        let mut spans = Vec::new();
+        for x in 0..w {
+            let top = *img.get_pixel(x, y);
+            let bot = if y + 1 < h {
+                *img.get_pixel(x, y + 1)
+            } else {
+                image::Rgba([10u8, 10, 20, 255])
+            };
+            let (tr, tg, tb) = blend(top);
+            let (br, bg_c, bb) = blend(bot);
+            spans.push(Span::styled(
+                "▀".to_string(),
+                Style::default()
+                    .fg(Color::Rgb(tr, tg, tb))
+                    .bg(Color::Rgb(br, bg_c, bb)),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 fn render_splash(f: &mut Frame, app: &App) {
     use ratatui::layout::Rect;
 
@@ -2056,29 +2111,19 @@ fn render_splash(f: &mut Frame, app: &App) {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Anvil silhouette (orange / amber)
-    for row in SPLASH_ANVIL {
-        lines.push(Line::from(Span::styled(
-            row.to_string(),
-            Style::default().fg(Color::Rgb(210, 120, 30)),
-        )));
-    }
-
-    lines.push(Line::from(Span::raw("".to_string())));
-
-    // ANVIL logo — gradient from bright yellow at top to deep orange at bottom
-    for (i, row) in SPLASH_LOGO.iter().enumerate() {
-        let color = if i < 2 {
-            Color::Rgb(255, 200, 50)
-        } else if i < 4 {
-            Color::Rgb(255, 160, 20)
-        } else {
-            Color::Rgb(220, 100, 10)
-        };
-        lines.push(Line::from(Span::styled(
-            row.to_string(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )));
+    // PNG logo — fill the screen, reserving ~10 rows for tagline/version/hint below.
+    let img_max_cols = area.width.saturating_sub(6);
+    let img_max_rows = area.height.saturating_sub(10).max(8);
+    let img_rows = render_png_as_halfblocks(LOGO_BYTES, img_max_cols, img_max_rows);
+    if !img_rows.is_empty() {
+        lines.extend(img_rows);
+    } else {
+        for row in SPLASH_ANVIL {
+            lines.push(Line::from(Span::styled(
+                row.to_string(),
+                Style::default().fg(Color::Rgb(210, 120, 30)),
+            )));
+        }
     }
 
     lines.push(Line::from(Span::raw("".to_string())));
@@ -2129,17 +2174,14 @@ fn render_splash(f: &mut Frame, app: &App) {
     let total_h = lines.len() as u16;
     let top_pad = area.height.saturating_sub(total_h) / 2;
 
-    let max_w = lines.iter()
-        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
-        .max()
-        .unwrap_or(0) as u16;
-    let left_pad = area.width.saturating_sub(max_w) / 2;
-
     for (i, line) in lines.into_iter().enumerate() {
         let y = area.y + top_pad + i as u16;
         if y >= area.y + area.height {
             break;
         }
+        // Center each line independently so short text lines don't inherit the image's left_pad.
+        let line_w = line.spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16;
+        let left_pad = area.width.saturating_sub(line_w) / 2;
         let row_area = Rect {
             x: area.x + left_pad,
             y,

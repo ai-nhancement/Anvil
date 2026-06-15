@@ -1020,9 +1020,9 @@ impl App {
                 // Prominent fast path for "someone off the street" — one choice and they are done.
                 w.list_items = vec![
                     "1. Quick local Ollama setup (recommended first try — no keys, ~10 seconds)".to_string(),
-                    "2. Add / update a provider connection (OpenAI, Anthropic, Azure, AWS, Groq, Ollama, ... )".to_string(),
-                    "3. Add a model binding".to_string(),
-                    "4. Assign roles (coder, planner, reviewer-a, reviewer-b — keep the two reviewers on different bindings)".to_string(),
+                    "2. Add / update a provider connection (OpenAI, Anthropic, Azure, Groq, Ollama, ...)".to_string(),
+                    "3. Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
+                    "4. Assign roles  (which model is coder / planner / reviewer-a / reviewer-b)".to_string(),
                     "5. Show current configuration".to_string(),
                     "6. Finish & return to chat".to_string(),
                 ];
@@ -1031,8 +1031,8 @@ impl App {
             } else {
                 w.list_items = vec![
                     "Add / update a provider connection".to_string(),
-                    "Add a model binding".to_string(),
-                    "Assign roles (coder, planner, reviewer-a, reviewer-b)".to_string(),
+                    "Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
+                    "Assign roles  (which model is coder / planner / reviewer-a / reviewer-b)".to_string(),
                     "Show current configuration".to_string(),
                     "Finish & return to chat".to_string(),
                 ];
@@ -1225,8 +1225,9 @@ impl App {
                     w.list_items.clear();
                     w.list_title.clear();
                 }
-                self.push_system(&format!("Using provider connection '{}'.", prov));
-                self.push_system("Enter a logical name for this binding (e.g. coder-claude, llama3-reviewer, gpt4-writer):");
+                self.push_system(&format!("Provider: '{}'.", prov));
+                self.push_system("Step 2 of 3: give this model a short nickname.");
+                self.push_system("You'll use this name to assign roles — pick anything recognisable (e.g. my-claude, fast-gpt, local-llama):");
             }
 
             Some(WizardStep::BindingName) => {
@@ -1240,8 +1241,9 @@ impl App {
                     w.list_items.clear();
                     w.list_title.clear();
                 }
-                self.push_system(&format!("Binding name: {}", bname));
-                self.push_system("Enter the exact model identifier the provider expects (e.g. llama3.2, claude-3-5-sonnet-20241022, gpt-4o):");
+                self.push_system(&format!("Nickname: '{}'.", bname));
+                self.push_system("Step 3 of 3: enter the exact model ID the provider uses.");
+                self.push_system("Find this in your provider's dashboard or API docs (e.g. claude-sonnet-4-6, gpt-4o, llama3.2):");
             }
 
             Some(WizardStep::ModelName) => {
@@ -1447,12 +1449,14 @@ impl App {
             w.step = WizardStep::BindingProvider;
             w.list_items = prov_names;
             w.list_selected = 0;
-            w.list_title = "Which provider connection should this binding use?".to_string();
+            w.list_title = "Which provider connection reaches this model?".to_string();
             w.binding_name = None;
             w.model = None;
             w.note = None;
         }
-        self.push_system("Adding a model binding (logical name → specific model on a provider).");
+        self.push_system("Adding a model.");
+        self.push_system("Step 1 of 3: pick which provider connection this model is accessed through.");
+        self.push_system("(If you only have one provider, just select it. You can add more provider connections from the main config menu.)");
     }
 
     fn finish_add_binding(&mut self) {
@@ -1485,7 +1489,8 @@ impl App {
         );
 
         self.save_current_config();
-        self.push_system(&format!("✓ Binding '{}' → {} via {} saved.", bname, model, prov));
+        self.push_system(&format!("✓ Model saved: '{}' = {} via {}.", bname, model, prov));
+        self.push_system("You can now assign this nickname to a role (coder, planner, reviewer-a, or reviewer-b).");
 
         self.populate_main_menu();
     }
@@ -1493,7 +1498,7 @@ impl App {
     fn start_role_assignment(&mut self) {
         let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
         if cfg.model_bindings.is_empty() {
-            self.push_system("No model bindings yet. Add at least one binding before assigning roles.");
+            self.push_system("No models added yet — add at least one model first (config menu → option 3).");
             self.populate_main_menu();
             return;
         }
@@ -1509,14 +1514,22 @@ impl App {
             w.list_items = binding_names;
             w.list_selected = 0;
             w.current_role = Some(role.to_string());
-            w.list_title = format!(
-                "Choose binding for role '{}' (make reviewer_a and reviewer_b different)",
-                role
-            );
+            let hint = match role {
+                "reviewer_a" | "reviewer_b" => " — pick a DIFFERENT model than the other reviewer",
+                _ => "",
+            };
+            w.list_title = format!("Which model should be the '{}'{}?", role, hint);
         }
 
-        self.push_system(&format!("Assigning role: {}", role));
-        self.push_system("Select a model binding from the list (↑↓ then Enter).");
+        let role_desc = match role {
+            "coder"      => "coder  (writes the actual code)",
+            "planner"    => "planner  (generates and refines the plan)",
+            "reviewer_a" => "reviewer-a  (first independent review — ideally a different provider than reviewer-b)",
+            "reviewer_b" => "reviewer-b  (second independent review — should be a DIFFERENT model than reviewer-a)",
+            other        => other,
+        };
+        self.push_system(&format!("Assigning role: {}", role_desc));
+        self.push_system("Select a model nickname from the list (↑↓ then Enter):");
     }
 
     fn go_back_in_wizard(&mut self) {

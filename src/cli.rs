@@ -172,15 +172,18 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
     }
 
     // 2. Model bindings
-    println!("\n{}", "Now create model bindings (logical names you will reference in roles).".bold());
+    println!("\n{}", "Step 2: Register the models you want to use.".bold());
+    println!("For each model, you'll pick which provider connection reaches it, enter its exact model ID,");
+    println!("and give it a short nickname (e.g. 'my-claude', 'fast-gpt', 'local-llama').");
+    println!("You'll assign these nicknames to roles in the next step.\n");
 
     loop {
-        let add = Confirm::new("Add a model binding?").with_default(!cfg.model_bindings.is_empty()).prompt()?;
+        let add = Confirm::new("Register another model?").with_default(!cfg.model_bindings.is_empty()).prompt()?;
         if !add {
             break;
         }
 
-        let name: String = Text::new("Binding name (e.g. coder-claude, reviewer-gemini, local-llama):").prompt()?;
+        let name: String = Text::new("Nickname for this model (e.g. my-claude, fast-gpt, local-llama):").prompt()?;
 
         if cfg.providers.is_empty() {
             return Err(anyhow!("Add at least one provider connection first."));
@@ -208,21 +211,23 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
     }
 
     // 3. Role assignment — this is where the "exactly two different reviewers" contract is made explicit.
-    println!("\n{}", "Assign roles. This is the most important part for fighting drift.".bold());
-    println!("You should pick two *different* reviewer bindings that use different providers/families when possible.");
+    println!("\n{}", "Step 3: Assign roles.".bold());
+    println!("Pick which model nickname handles each job.");
+    println!("The most important rule: reviewer-a and reviewer-b should be DIFFERENT models");
+    println!("(ideally from different providers) so you get a genuine second opinion, not an echo.\n");
 
     let binding_names: Vec<String> = cfg.model_bindings.keys().cloned().collect();
     if binding_names.is_empty() {
         println!("No bindings yet — skipping role assignment. Run `anvil setup` again later.");
     } else {
-        let coder = Select::new("Coder / primary writer (used for implementation work):", binding_names.clone()).prompt()?;
-        let planner = Select::new("Planner (plan generation + talk):", binding_names.clone()).prompt()?;
+        let coder = Select::new("Coder  (writes the actual code):", binding_names.clone()).prompt()?;
+        let planner = Select::new("Planner  (generates and refines the plan, handles /talk):", binding_names.clone()).prompt()?;
 
-        let reviewer_a = Select::new("Reviewer A (first review round):", binding_names.clone()).prompt()?;
-        let reviewer_b = Select::new("Reviewer B (second review round — should be different from A):", binding_names.clone()).prompt()?;
+        let reviewer_a = Select::new("Reviewer A  (first independent review — ideally a different provider than B):", binding_names.clone()).prompt()?;
+        let reviewer_b = Select::new("Reviewer B  (second independent review — should be a DIFFERENT model than A):", binding_names.clone()).prompt()?;
 
         if reviewer_a == reviewer_b {
-            println!("{}", "Warning: reviewer-a and reviewer-b are the same binding. This weakens the anti-drift guarantee.".yellow());
+            println!("{}", "Warning: reviewer-a and reviewer-b are the same model. The whole point of two reviewers is diversity — consider using a different model for one of them.".yellow());
         }
 
         cfg.roles = Roles {

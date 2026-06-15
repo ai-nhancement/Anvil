@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tokio::sync::mpsc;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -66,6 +66,28 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, not a timer
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Known providers: (display_name, suggested_connection_name, provider_type, base_url, needs_api_key)
+/// base_url = "" means the client uses the provider's SDK default (anthropic, google).
+const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
+    ("Anthropic",          "anthropic",  "anthropic",     "",                                          true),
+    ("OpenAI",             "openai",     "openai_compat", "https://api.openai.com/v1",                 true),
+    ("xAI  (Grok)",        "xai",        "openai_compat", "https://api.x.ai/v1",                       true),
+    ("Google  (Gemini)",   "google",     "google",        "",                                          true),
+    ("Groq",               "groq",       "openai_compat", "https://api.groq.com/openai/v1",            true),
+    ("Mistral",            "mistral",    "openai_compat", "https://api.mistral.ai/v1",                 true),
+    ("Together AI",        "together",   "openai_compat", "https://api.together.xyz/v1",               true),
+    ("OpenRouter",         "openrouter", "openai_compat", "https://openrouter.ai/api/v1",              true),
+    ("Fireworks",          "fireworks",  "openai_compat", "https://api.fireworks.ai/inference/v1",     true),
+    ("Perplexity",         "perplexity", "openai_compat", "https://api.perplexity.ai",                 true),
+    ("DeepSeek",           "deepseek",   "openai_compat", "https://api.deepseek.com",                  true),
+    ("Cohere",             "cohere",     "openai_compat", "https://api.cohere.com/v2",                 true),
+    ("AWS Bedrock",        "bedrock",    "aws_bedrock",   "",                                          true),
+    ("Ollama  (local)",    "ollama",     "openai_compat", "http://localhost:11434/v1",                 false),
+    ("LM Studio  (local)", "lmstudio",   "openai_compat", "http://localhost:1234/v1",                  false),
+    ("Azure OpenAI",       "azure",      "openai_compat", "",                                          true),
+    ("Other / custom",     "custom",     "openai_compat", "",                                          true),
+];
 
 /// ASCII anvil silhouette (44 cols wide, 9 rows) — fallback when PNG decode fails.
 const SPLASH_ANVIL: &[&str] = &[
@@ -119,6 +141,7 @@ struct ConfigWizard {
     cred_kind: Option<String>, // "keyring" or "env"
     env_var: Option<String>,
     api_key: Option<String>,
+    no_auth: bool,   // true for local providers — skips credential steps
 
     binding_provider: Option<String>,
     binding_name: Option<String>,
@@ -147,7 +170,7 @@ pub fn run_ui(root: &Path) -> Result<()> {
     // Setup terminal (raw mode + alternate screen). We must restore on any exit path.
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -156,7 +179,7 @@ pub fn run_ui(root: &Path) -> Result<()> {
 
     // Restore terminal state (critical on Windows and for users who ^C).
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste);
     let _ = terminal.show_cursor();
 
     run_result
@@ -992,6 +1015,7 @@ impl App {
             cred_kind: None,
             env_var: None,
             api_key: None,
+            no_auth: false,
             binding_provider: None,
             binding_name: None,
             model: None,
@@ -1101,18 +1125,30 @@ impl App {
             }
 
             Some(WizardStep::ProviderType) => {
-                let ptype = effective.trim();
-                if ptype.is_empty() {
+                let selected = effective.trim();
+                if selected.is_empty() {
                     return;
                 }
+                // Look up the named preset (display_name, suggested_name, type, url, needs_key)
+                let preset = PROVIDER_PRESETS.iter().find(|p| p.0 == selected);
+                let (ptype, suggested, url, needs_key) = preset
+                    .map(|p| (p.2, p.1, p.3, p.4))
+                    .unwrap_or(("openai_compat", "custom", "", true));
+
                 if let Some(w) = &mut self.config_wizard {
                     w.provider_type = Some(ptype.to_string());
+                    w.base_url = if url.is_empty() { None } else { Some(url.to_string()) };
+                    w.no_auth = !needs_key;
                     w.step = WizardStep::ProviderName;
                     w.list_items.clear();
                     w.list_title.clear();
                 }
-                self.push_system(&format!("Provider type set to '{}'.", ptype));
-                self.push_system("Enter a short name for this connection (e.g. local-ollama, my-anthropic, azure-east):");
+                // Pre-fill input with the suggested connection name so user can just press Enter
+                self.input = suggested.to_string();
+
+                let url_note = if url.is_empty() { "provider default".to_string() } else { url.to_string() };
+                self.push_system(&format!("Provider: {}  (type={}, url={})", selected, ptype, url_note));
+                self.push_system("Enter a name for this connection — press Enter to accept the suggestion, or type your own:");
             }
 
             Some(WizardStep::ProviderName) => {
@@ -1120,39 +1156,48 @@ impl App {
                 if name.is_empty() {
                     return;
                 }
-                let default = if let Some(w) = &self.config_wizard {
-                    match w.provider_type.as_deref() {
-                        Some("openai_compat") | Some("azure_openai") => "https://api.openai.com/v1",
-                        _ => "",
-                    }
+                let current_url = if let Some(w) = &self.config_wizard {
+                    w.base_url.clone().unwrap_or_default()
                 } else {
-                    ""
-                }
-                .to_string();
+                    String::new()
+                };
 
                 if let Some(w) = &mut self.config_wizard {
                     w.provider_name = Some(name.to_string());
-                    w.base_url = if default.is_empty() { None } else { Some(default.clone()) };
                     w.step = WizardStep::BaseUrl;
                     w.list_items.clear();
                     w.list_title.clear();
                 }
-                self.push_system(&format!("Connection name: {}", name));
-                if !default.is_empty() {
-                    self.push_system(&format!("Enter base URL (default: {}) — press Enter to accept:", default));
+                // Pre-fill the base URL so user can just press Enter to accept
+                self.input = current_url.clone();
+
+                self.push_system(&format!("Connection name: '{}'.", name));
+                if !current_url.is_empty() {
+                    self.push_system("Base URL (pre-filled — press Enter to accept, or edit):");
                 } else {
-                    self.push_system("Enter base URL (or leave empty for provider default):");
+                    self.push_system("Enter the base URL for this provider (leave empty to use provider SDK default):");
                 }
             }
 
             Some(WizardStep::BaseUrl) => {
                 let url = effective.trim();
-                if let Some(w) = &mut self.config_wizard {
+                let no_auth = if let Some(w) = &mut self.config_wizard {
                     if !url.is_empty() {
                         w.base_url = Some(url.to_string());
                     }
+                    w.no_auth
+                } else {
+                    false
+                };
+                if no_auth {
+                    // Local providers (Ollama, LM Studio, etc.) need no credential — finish directly.
+                    if let Some(w) = &mut self.config_wizard {
+                        w.cred_kind = Some("none".to_string());
+                    }
+                    self.finish_add_provider();
+                } else {
+                    self.start_credential_list();
                 }
-                self.start_credential_list();
             }
 
             Some(WizardStep::CredentialKind) => {
@@ -1329,19 +1374,13 @@ impl App {
     fn start_add_provider(&mut self) {
         if let Some(w) = &mut self.config_wizard {
             w.step = WizardStep::ProviderType;
-            w.list_items = vec![
-                "openai_compat  (Ollama, Groq, Together, Fireworks, OpenRouter, Azure compat, vLLM, ...)".to_string(),
-                "anthropic".to_string(),
-                "google".to_string(),
-                "azure_openai (native Azure OpenAI)".to_string(),
-                "aws_bedrock    (via Bedrock or gateway)".to_string(),
-                "other (enter any provider type string)".to_string(),
-            ];
+            w.list_items = PROVIDER_PRESETS.iter().map(|p| p.0.to_string()).collect();
             w.list_selected = 0;
-            w.list_title = "Choose provider type (↑↓ Enter or type)".to_string();
+            w.list_title = "Choose your AI provider (↑↓ then Enter):".to_string();
+            w.no_auth = false;
         }
         self.push_system("Adding a provider connection.");
-        self.push_system("Select the type of provider (this determines how we call the API).");
+        self.push_system("Select your provider from the list — base URL and connection type are pre-filled automatically.");
     }
 
     fn start_credential_list(&mut self) {
@@ -1590,16 +1629,9 @@ impl App {
             // (no "Adding ..." progress messages that the start_* helpers emit on forward entry).
             match &w.step {
                 WizardStep::ProviderType => {
-                    w.list_items = vec![
-                        "openai_compat  (Ollama, Groq, Together, Fireworks, OpenRouter, Azure compat, vLLM, ...)".to_string(),
-                        "anthropic".to_string(),
-                        "google".to_string(),
-                        "azure_openai (native Azure OpenAI)".to_string(),
-                        "aws_bedrock    (via Bedrock or gateway)".to_string(),
-                        "other (enter any provider type string)".to_string(),
-                    ];
+                    w.list_items = PROVIDER_PRESETS.iter().map(|p| p.0.to_string()).collect();
                     w.list_selected = 0;
-                    w.list_title = "Choose provider type (↑↓ Enter or type)".to_string();
+                    w.list_title = "Choose your AI provider (↑↓ then Enter):".to_string();
                 }
                 WizardStep::CredentialKind => {
                     w.list_items = vec![
@@ -1812,16 +1844,21 @@ fn run_app_loop<B: ratatui::backend::Backend>(
         terminal.draw(|f| render_ui(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(80))? {
-            if let Event::Key(key) = event::read()? {
-                // Only act on real presses and OS-generated repeats.
-                // Ignore Release events (crossterm 0.28+ on Windows commonly emits both
-                // Press + Release for the same physical key, which was causing every
-                // character to be inserted twice into the input buffer).
-                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            match event::read()? {
+                Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
                     if handle_key(app, key)? {
                         break;
                     }
                 }
+                Event::Paste(text) => {
+                    // Paste arrives as a single string — append directly without per-char processing.
+                    // This avoids crashes from escape sequences inside bracketed paste streams.
+                    app.input.push_str(&text);
+                    if !app.input.starts_with('/') || app.config_wizard.is_some() {
+                        app.showing_command_palette = false;
+                    }
+                }
+                _ => {}
             }
         }
 

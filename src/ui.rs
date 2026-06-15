@@ -89,6 +89,45 @@ const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
     ("Other / custom",     "custom",     "openai_compat", "",                                          true),
 ];
 
+fn models_for_connection(provider_type: &str, base_url: Option<&str>) -> &'static [&'static str] {
+    let url = base_url.unwrap_or("");
+    if url.contains("x.ai") {
+        return &["grok-3", "grok-3-fast", "grok-3-mini", "grok-3-mini-fast", "grok-2-1212", "grok-beta"];
+    }
+    if url.contains("groq.com") {
+        return &["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it", "llama-guard-3-8b"];
+    }
+    if url.contains("mistral.ai") {
+        return &["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest", "codestral-latest", "open-mistral-nemo", "open-codestral-mamba"];
+    }
+    if url.contains("together.xyz") {
+        return &["meta-llama/Llama-3.3-70B-Instruct-Turbo", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "Qwen/Qwen2.5-72B-Instruct-Turbo", "deepseek-ai/DeepSeek-R1", "mistralai/Mixtral-8x7B-Instruct-v0.1"];
+    }
+    if url.contains("openrouter.ai") {
+        return &["anthropic/claude-opus-4-8", "anthropic/claude-sonnet-4-6", "openai/gpt-4o", "google/gemini-2.5-pro-preview", "meta-llama/llama-3.3-70b-instruct", "deepseek/deepseek-r1"];
+    }
+    if url.contains("fireworks.ai") {
+        return &["accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/llama-v3p1-405b-instruct", "accounts/fireworks/models/mixtral-8x7b-instruct", "accounts/fireworks/models/qwen2p5-72b-instruct"];
+    }
+    if url.contains("perplexity.ai") {
+        return &["llama-3.1-sonar-large-128k-online", "llama-3.1-sonar-small-128k-online", "llama-3.1-sonar-huge-128k-online"];
+    }
+    if url.contains("deepseek.com") {
+        return &["deepseek-chat", "deepseek-coder", "deepseek-reasoner"];
+    }
+    if url.contains("cohere.com") {
+        return &["command-r-plus", "command-r", "command-light", "command"];
+    }
+    if url.contains("openai.com") {
+        return &["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo", "o1-preview", "o1-mini", "o3-mini"];
+    }
+    match provider_type {
+        "anthropic" => &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"],
+        "google" => &["gemini-2.5-pro-preview-06-05", "gemini-2.5-flash-preview-05-20", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+        _ => &[],
+    }
+}
+
 /// ASCII anvil silhouette (44 cols wide, 9 rows) — fallback when PNG decode fails.
 const SPLASH_ANVIL: &[&str] = &[
     "              ┌──────────────┐              ",
@@ -142,6 +181,7 @@ struct ConfigWizard {
     env_var: Option<String>,
     api_key: Option<String>,
     no_auth: bool,   // true for local providers — skips credential steps
+    model_options: Vec<String>,
 
     binding_provider: Option<String>,
     binding_name: Option<String>,
@@ -1016,6 +1056,7 @@ impl App {
             env_var: None,
             api_key: None,
             no_auth: false,
+            model_options: vec![],
             binding_provider: None,
             binding_name: None,
             model: None,
@@ -1081,6 +1122,7 @@ impl App {
                     | WizardStep::ProviderType
                     | WizardStep::CredentialKind
                     | WizardStep::BindingProvider
+                    | WizardStep::ModelName
                     | WizardStep::RoleAssignment { .. }
             );
             let chosen = if listy && !w.list_items.is_empty() {
@@ -1264,8 +1306,16 @@ impl App {
                 if prov.is_empty() {
                     return;
                 }
+                // Look up provider connection to derive known model IDs (before mutable borrow).
+                let model_opts: Vec<String> = if let Some(cfg) = &self.cfg {
+                    if let Some(conn) = cfg.providers.get(prov) {
+                        models_for_connection(&conn.r#type, conn.base_url.as_deref())
+                            .iter().map(|s| s.to_string()).collect()
+                    } else { vec![] }
+                } else { vec![] };
                 if let Some(w) = &mut self.config_wizard {
                     w.binding_provider = Some(prov.to_string());
+                    w.model_options = model_opts;
                     w.step = WizardStep::BindingName;
                     w.list_items.clear();
                     w.list_title.clear();
@@ -1280,20 +1330,43 @@ impl App {
                 if bname.is_empty() {
                     return;
                 }
+                let has_model_list = self.config_wizard.as_ref()
+                    .map(|w| !w.model_options.is_empty())
+                    .unwrap_or(false);
                 if let Some(w) = &mut self.config_wizard {
                     w.binding_name = Some(bname.to_string());
                     w.step = WizardStep::ModelName;
-                    w.list_items.clear();
-                    w.list_title.clear();
+                    if has_model_list {
+                        w.list_items = w.model_options.clone();
+                        w.list_items.push("Other / type manually".to_string());
+                        w.list_selected = 0;
+                        w.list_title = "Select a model ID (↑↓ then Enter, or choose 'Other' to type):".to_string();
+                    } else {
+                        w.list_items.clear();
+                        w.list_title.clear();
+                    }
                 }
                 self.push_system(&format!("Nickname: '{}'.", bname));
-                self.push_system("Step 3 of 3: enter the exact model ID the provider uses.");
-                self.push_system("Find this in your provider's dashboard or API docs (e.g. claude-sonnet-4-6, gpt-4o, llama3.2):");
+                if has_model_list {
+                    self.push_system("Step 3 of 3: select the model from the list (↑↓ then Enter), or pick 'Other / type manually':");
+                } else {
+                    self.push_system("Step 3 of 3: enter the exact model ID the provider uses.");
+                    self.push_system("Find this in your provider's dashboard or API docs (e.g. claude-sonnet-4-6, gpt-4o, llama3.2):");
+                }
             }
 
             Some(WizardStep::ModelName) => {
                 let model = effective.trim();
                 if model.is_empty() {
+                    return;
+                }
+                if model == "Other / type manually" {
+                    if let Some(w) = &mut self.config_wizard {
+                        w.list_items.clear();
+                        w.list_title.clear();
+                    }
+                    self.input.clear();
+                    self.push_system("Type the model ID (e.g. claude-sonnet-4-6, gpt-4o, llama3.2):");
                     return;
                 }
                 if let Some(w) = &mut self.config_wizard {
@@ -1648,6 +1721,17 @@ impl App {
                     w.list_selected = 0;
                     w.list_title = "Which provider connection should this binding use?".to_string();
                 }
+                WizardStep::ModelName => {
+                    if !w.model_options.is_empty() {
+                        w.list_items = w.model_options.clone();
+                        w.list_items.push("Other / type manually".to_string());
+                        w.list_selected = 0;
+                        w.list_title = "Select a model ID (↑↓ then Enter, or choose 'Other' to type):".to_string();
+                    } else {
+                        w.list_items.clear();
+                        w.list_title.clear();
+                    }
+                }
                 WizardStep::RoleAssignment { role } => {
                     let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
                     w.list_items = cfg.model_bindings.keys().cloned().collect();
@@ -1926,6 +2010,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
                 | WizardStep::ProviderType
                 | WizardStep::CredentialKind
                 | WizardStep::BindingProvider
+                | WizardStep::ModelName
                 | WizardStep::RoleAssignment { .. }
         );
         if is_list_step && !wizard.list_items.is_empty() {

@@ -523,7 +523,7 @@ impl App {
                     // spawn_blocking so the sync run_plan (with its block_on calls) runs off the UI thread.
                     // All side effects (plan.md write, REVIEW_*.md writes with canonical headers, state.json hash) are identical to CLI.
                     let res = tokio::task::spawn_blocking(move || {
-                        crate::plan::run_plan(&root, /*fresh=*/ true)
+                        crate::plan::run_plan(&root, /*fresh=*/ true, /*context=*/ None)
                     })
                     .await;
 

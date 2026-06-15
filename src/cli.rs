@@ -290,35 +290,103 @@ pub fn cmd_config_add_provider(root: &Path) -> Result<()> {
 }
 
 pub fn cmd_status(root: &Path) -> Result<()> {
+    use crate::plan::simple_hash;
+    use crate::state::{load_state, reviews_dir};
+
+    println!("{}", "Anvil Project Status".bold());
+    println!("Root: {}", root.display());
+    println!();
+
+    // Config check
     let cfg = match load_config(root) {
         Ok(c) => c,
         Err(_) => {
-            println!("Not an Anvil project (no anvil.toml). Run `anvil init`.");
+            println!("{}", "Not initialized — run `anvil init` then `anvil setup`.".yellow());
             return Ok(());
         }
     };
 
-    println!("{}", "Project Status".bold());
-    println!("Root: {}", root.display());
+    let reviewer_a = cfg.roles.reviewer_a.as_deref().unwrap_or("(not set)");
+    let reviewer_b = cfg.roles.reviewer_b.as_deref().unwrap_or("(not set)");
+    let has_reviewers = cfg.roles.reviewer_a.is_some() && cfg.roles.reviewer_b.is_some();
 
-    let has_roles = cfg.roles.coder.is_some() && cfg.roles.reviewer_a.is_some() && cfg.roles.reviewer_b.is_some();
-    if !has_roles {
-        println!("{}", "Roles are not fully configured — run `anvil setup`.".yellow());
+    if !has_reviewers {
+        println!("{} Roles incomplete — run `anvil setup`.", "!".red());
+        println!("  reviewer-a: {}", reviewer_a);
+        println!("  reviewer-b: {}", reviewer_b);
+        println!();
     } else {
-        println!(
-            "Reviewers: {} vs {} (different bindings = {})",
-            cfg.roles.reviewer_a.as_deref().unwrap_or("?"),
-            cfg.roles.reviewer_b.as_deref().unwrap_or("?"),
-            if cfg.roles.reviewer_a != cfg.roles.reviewer_b { "yes".green() } else { "NO — bad for drift".red() }
-        );
+        let diversity = if cfg.roles.reviewer_a != cfg.roles.reviewer_b {
+            "diverse (good)".green()
+        } else {
+            "SAME BINDING — weakens drift protection".red()
+        };
+        println!("{}", "Roles:".underline());
+        println!("  coder:      {}", cfg.roles.coder.as_deref().unwrap_or("(not set)"));
+        println!("  planner:    {}", cfg.roles.planner.as_deref().unwrap_or("(not set)"));
+        println!("  reviewer-a: {}", reviewer_a);
+        println!("  reviewer-b: {} — {}", reviewer_b, diversity);
+        println!();
     }
 
-    // Very light state peek
-    let state_path = crate::config::state_path(root);
-    if state_path.exists() {
-        println!("State file present: {}", state_path.display());
+    // Derive workflow stage from disk artifacts (same logic as TUI reconcile_stage_from_disk)
+    println!("{}", "Workflow Stage:".underline());
+
+    if !has_reviewers {
+        println!("  {}", "UNCONFIGURED".red());
+        println!("  → Run `anvil setup` to configure providers, bindings, and roles.");
+        return Ok(());
+    }
+
+    let plan_path = root.join("plan.md");
+    let rev_dir = reviews_dir(root);
+    let r1 = rev_dir.join("REVIEW_plan_R1.md");
+    let r2 = rev_dir.join("REVIEW_plan_R2.md");
+    let state = load_state(root);
+
+    if plan_path.exists() && r1.exists() && r2.exists() {
+        let plan_txt = std::fs::read_to_string(&plan_path).unwrap_or_default();
+        let current_hash = simple_hash(&plan_txt);
+        let is_accepted = state.accepted_plan_hash.as_deref() == Some(current_hash.as_str());
+
+        if is_accepted {
+            println!("  {} PLAN ACCEPTED (hash matches)", "✓".green().bold());
+
+            if state.shipped_phases.is_empty() && state.current_phase.is_none() {
+                println!("  → Start first phase: `anvil phase start P0`");
+            } else {
+                if let Some(phase) = &state.current_phase {
+                    println!("  Current phase:  {}", phase.cyan());
+                }
+                if !state.shipped_phases.is_empty() {
+                    println!("  Shipped phases: {}", state.shipped_phases.join(", "));
+                }
+                println!("  → Review current phase: `anvil phase review <id>`");
+                println!("  → Accept phase:         `anvil phase accept <id>`");
+            }
+        } else {
+            println!("  {} PLAN REVIEWS COMPLETE — awaiting accept", "→".yellow());
+            println!("    plan.md and both review files exist, but plan has not been accepted yet.");
+            if state.accepted_plan_hash.is_some() {
+                println!("    {} plan.md has changed since last accept — re-review or re-accept.", "Note:".yellow());
+            }
+            println!("  → Address R1+R2 findings in plan.md, then: `anvil plan --accept`");
+        }
+
+        println!();
+        println!("{}", "Gate artifacts:".underline());
+        println!("  plan.md:           {}", if plan_path.exists() { "present".green() } else { "missing".red() });
+        println!("  REVIEW_plan_R1.md: {}", if r1.exists() { "present".green() } else { "missing".red() });
+        println!("  REVIEW_plan_R2.md: {}", if r2.exists() { "present".green() } else { "missing".red() });
     } else {
-        println!("No phase state yet (run `anvil plan` then `anvil phase start ...`).");
+        println!("  {} TALK — no plan gate yet", "○".dimmed());
+        println!("  → Chat and explore with `anvil talk`");
+        println!("  → When ready, generate + review the plan: `anvil plan`");
+        println!();
+        println!("{}", "Gate artifacts:".underline());
+        println!("  plan.md:           {}", if plan_path.exists() { "present".green() } else { "missing".dimmed() });
+        println!("  REVIEW_plan_R1.md: {}", if r1.exists() { "present".green() } else { "missing".dimmed() });
+        println!("  REVIEW_plan_R2.md: {}", if r2.exists() { "present".green() } else { "missing".dimmed() });
     }
 
     Ok(())

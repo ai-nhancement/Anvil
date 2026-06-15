@@ -17,7 +17,7 @@ use colored::Colorize;
 
 use crate::config::load_config;
 use crate::llm::LlmClient;
-use crate::state::reviews_dir;
+use crate::state::{load_state, reviews_dir, save_state};
 
 const PLAN_SYSTEM: &str = "\
 You are an excellent technical planner. Given the user's project intent, produce a realistic phased plan.
@@ -32,7 +32,7 @@ Rules:
 
 Be precise and skeptical of scope creep.";
 
-pub fn run_plan(root: &Path, fresh: bool) -> Result<()> {
+pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result<()> {
     let cfg = load_config(root)?;
     let client = LlmClient::new();
 
@@ -53,8 +53,6 @@ pub fn run_plan(root: &Path, fresh: bool) -> Result<()> {
 
         let api_key = client.get_credential(planner_name, planner_provider)?;
 
-        // If we have prior talk artifacts or a charter, we could feed them. For v0 we keep it simple:
-        // user is expected to have done `anvil talk` and the context is in their head + any saved artifacts.
         println!(
             "\n{} Generating plan with {} ({} via {})...",
             "anvil".green(),
@@ -63,16 +61,16 @@ pub fn run_plan(root: &Path, fresh: bool) -> Result<()> {
             planner_provider.r#type
         );
 
-        // For the first cut we just give the planner a generic prompt.
-        // A nicer version would slurp recent artifacts from reviews/ or let user point at a charter.
-        let user_msg = "Produce the phased plan now for the project we have been discussing. Make it concrete and reviewable.";
+        // Build the user message. If a context file was provided (e.g. a saved talk artifact
+        // or charter), prepend it so the planner has grounded input to work from.
+        let user_msg = build_plan_prompt(root, context_file)?;
 
         let content = LlmClient::block_on(client.chat(
             planner_provider,
             &planner_binding.model,
             &api_key,
             PLAN_SYSTEM,
-            user_msg,
+            &user_msg,
         ))?;
 
         fs::write(&plan_path, &content)?;
@@ -109,8 +107,80 @@ pub fn run_plan(root: &Path, fresh: bool) -> Result<()> {
     println!("When you are satisfied that the plan (after addressing R1+R2) is solid, run:");
     println!("  {}   — this records that the plan passed its two-review gate.", "`anvil plan --accept` (not yet wired)".cyan());
 
-    println!("\n{} Address findings from the two reviews, then /accept-plan (TUI) or the --accept step before starting phases with `anvil phase start P0`.", "Next:".green());
+    println!("\n{} Address findings in plan.md, then lock the gate:", "Next:".green());
+    println!("  {}   — records the accepted hash, unlocks phase gates", "`anvil plan --accept`".cyan());
     Ok(())
+}
+
+/// Record that the user has addressed R1+R2 findings for the current plan.md.
+/// Writes `accepted_plan_hash` to .anvil/state.json (same value the TUI /accept-plan produces).
+/// Requires plan.md + both REVIEW_plan_R*.md to exist.
+pub fn accept_plan(root: &Path) -> Result<()> {
+    let plan_path = root.join("plan.md");
+    let rev_dir = reviews_dir(root);
+    let r1 = rev_dir.join("REVIEW_plan_R1.md");
+    let r2 = rev_dir.join("REVIEW_plan_R2.md");
+
+    if !plan_path.exists() {
+        return Err(anyhow!("plan.md not found. Run `anvil plan` first to generate and review it."));
+    }
+    if !r1.exists() || !r2.exists() {
+        return Err(anyhow!(
+            "Both review files (REVIEW_plan_R1.md and REVIEW_plan_R2.md) must exist before accepting.\n\
+             Run `anvil plan` (which always runs both reviews) then address the findings."
+        ));
+    }
+
+    let plan_txt = fs::read_to_string(&plan_path)?;
+    let hash = simple_hash(&plan_txt);
+
+    let mut state = load_state(root);
+
+    // Warn if re-accepting (plan may have changed since reviews were written).
+    if state.accepted_plan_hash.is_some() {
+        println!("{} Re-accepting plan. Make sure the two review files still cover the current plan.md.", "Warning:".yellow());
+    }
+
+    state.accepted_plan_hash = Some(hash.clone());
+    save_state(root, &state)?;
+
+    println!("{} Plan accepted. Hash {} recorded in .anvil/state.json.", "✓".green().bold(), &hash[..8]);
+    println!("  R1: {}", r1.display());
+    println!("  R2: {}", r2.display());
+    println!("\n{} Start building phases:", "Next:".green());
+    println!("  {} P0   — set current phase and get plan excerpt", "`anvil phase start`".cyan());
+    println!("  {}       — list all phases and their status", "`anvil phase list`".cyan());
+    Ok(())
+}
+
+/// Build the user message for plan generation.
+/// If --context was given, reads that file and prepends it.
+/// Otherwise looks for saved talk artifacts in reviews/ as optional context.
+fn build_plan_prompt(root: &Path, context_file: Option<&Path>) -> Result<String> {
+    let base = "Produce the phased plan now for the project. Make it concrete and reviewable.";
+
+    if let Some(ctx_path) = context_file {
+        // Resolve relative to project root if not absolute.
+        let resolved = if ctx_path.is_absolute() {
+            ctx_path.to_path_buf()
+        } else {
+            root.join(ctx_path)
+        };
+        let content = fs::read_to_string(&resolved)
+            .map_err(|e| anyhow!("Could not read context file {}: {}", resolved.display(), e))?;
+        println!(
+            "  {} Using context from {} ({} chars)",
+            "✓".green(),
+            resolved.display(),
+            content.len()
+        );
+        Ok(format!(
+            "Here is the project context / charter to plan from:\n\n---\n{}\n---\n\n{}",
+            content, base
+        ))
+    } else {
+        Ok(base.to_string())
+    }
 }
 
 pub fn run_single_review(

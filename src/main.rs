@@ -63,6 +63,16 @@ enum Commands {
         /// Force a fresh plan generation even if one exists
         #[arg(long)]
         fresh: bool,
+
+        /// Record that R1+R2 findings have been addressed and lock the plan hash.
+        /// Unlocks `anvil phase start`. Requires plan.md + both review files to exist.
+        #[arg(long)]
+        accept: bool,
+
+        /// Path to a context file (e.g. a saved talk artifact) to feed into plan generation.
+        /// Use after `anvil talk` when you have saved a charter or goals doc.
+        #[arg(long, value_name = "FILE")]
+        context: Option<std::path::PathBuf>,
     },
 
     /// Work on a phase: implementation assistance + exactly two reviews when ready
@@ -138,7 +148,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             ConfigCmd::AddProvider => cli::cmd_config_add_provider(&cli.project),
         },
         Commands::Talk { model } => talk::run_talk(&cli.project, model.as_deref()),
-        Commands::Plan { fresh } => plan::run_plan(&cli.project, fresh),
+        Commands::Plan { fresh, accept, context } => {
+            if accept {
+                plan::accept_plan(&cli.project)
+            } else {
+                plan::run_plan(&cli.project, fresh, context.as_deref())
+            }
+        }
         Commands::Phase(sub) => match sub {
             PhaseCmd::Start { id } => phase::run_phase_start(&cli.project, &id),
             PhaseCmd::Review { id } => phase::run_phase_review(&cli.project, &id),

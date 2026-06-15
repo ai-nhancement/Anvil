@@ -19,30 +19,82 @@ use crate::llm::LlmClient;
 use crate::state::{load_state, save_state, reviews_dir};
 
 pub fn run_phase_list(root: &Path) -> Result<()> {
-    let cfg = load_config(root).ok();
     let state = load_state(root);
+    let rev_dir = reviews_dir(root);
 
     println!("{}", "Phases".bold());
+    println!();
 
-    if let Some(p) = &state.current_phase {
-        println!("Current phase: {}", p.cyan());
-    }
-
-    if state.shipped_phases.is_empty() {
-        println!("No phases accepted yet.");
+    // Parse phase declarations from plan.md
+    let plan_path = root.join("plan.md");
+    let phases = if plan_path.exists() {
+        let plan = fs::read_to_string(&plan_path).unwrap_or_default();
+        parse_plan_phases(&plan)
     } else {
-        println!("Accepted phases: {}", state.shipped_phases.join(", "));
+        vec![]
+    };
+
+    if phases.is_empty() {
+        println!("{}", "No plan found — run `anvil plan` to generate and review the plan first.".yellow());
+        return Ok(());
     }
 
-    if let Some(cfg) = cfg {
-        if let Ok((_, plan_binding, _)) = cfg.resolve_role_full("planner") {
-            println!("Plan was produced with: {}", plan_binding.model);
-        }
+    for (id, name) in &phases {
+        let r1 = rev_dir.join(format!("REVIEW_phase-{}_{}.md", id, "R1"));
+        let r2 = rev_dir.join(format!("REVIEW_phase-{}_{}.md", id, "R2"));
+        let is_shipped = state.shipped_phases.iter().any(|p| p == id);
+        let is_current = state.current_phase.as_deref() == Some(id.as_str());
+
+        let status = if is_shipped {
+            format!("{}", "✓ accepted".green())
+        } else if is_current && r1.exists() && r2.exists() {
+            format!("{}", "R1+R2 done — `anvil phase accept`".yellow())
+        } else if is_current && r1.exists() {
+            format!("{}", "R1 done — run `anvil phase review` for R2".yellow())
+        } else if is_current {
+            format!("{}", "in progress — `anvil phase review` when done".cyan())
+        } else {
+            format!("{}", "pending".dimmed())
+        };
+
+        let marker = if is_current { "→ " } else { "  " };
+        println!("{}{} — {}  [{}]", marker, id.cyan(), name, status);
     }
 
-    // In a fuller version we would parse plan.md for the list of phases.
-    println!("\nTip: Look at plan.md for the declared phases and their acceptance criteria.");
+    println!();
+    if let Some(phase) = &state.current_phase {
+        println!("Current phase: {}", phase.cyan());
+    }
+    if !state.shipped_phases.is_empty() {
+        println!("Shipped: {}", state.shipped_phases.join(", "));
+    }
+
     Ok(())
+}
+
+/// Extract (id, name) pairs from plan.md. Matches "## Px — Name" or "## Px: Name" style headers.
+fn parse_plan_phases(plan: &str) -> Vec<(String, String)> {
+    plan.lines()
+        .filter_map(|line| {
+            let stripped = line.trim_start_matches('#').trim();
+            // Match "P0", "P1", ... optionally followed by " — Name" or ": Name"
+            if let Some(rest) = stripped.strip_prefix('P') {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if digits.is_empty() {
+                    return None;
+                }
+                let id = format!("P{}", digits);
+                let after = &rest[digits.len()..];
+                let name = after
+                    .trim_start_matches([' ', '—', '-', ':'])
+                    .trim()
+                    .to_string();
+                Some((id, if name.is_empty() { "(unnamed)".to_string() } else { name }))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 pub fn run_phase_start(root: &Path, id: &str) -> Result<()> {

@@ -63,6 +63,33 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/view-reviews", "Open REVIEW_plan_R1 + R2 in a focused review popup — inspect the two independent reviews before /accept-plan"),
 ];
 
+const SPLASH_DURATION: u8 = 28; // 28 × 80 ms ≈ 2.2 s
+
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// ANVIL in block font (hand-kerned). Width ~38 cols.
+const SPLASH_LOGO: &[&str] = &[
+    " █████╗ ███╗  ██╗██╗   ██╗██╗██╗     ",
+    "██╔══██╗████╗ ██║██║   ██║██║██║     ",
+    "███████║██╔██╗██║╚██╗ ██╔╝██║██║     ",
+    "██╔══██║██║╚████║ ╚████╔╝ ██║██║     ",
+    "██║  ██║██║ ╚███║  ╚══╝   ██║███████╗",
+    "╚═╝  ╚═╝╚═╝  ╚══╝        ╚═╝╚══════╝",
+];
+
+/// ASCII anvil silhouette (44 cols wide, 9 rows).
+const SPLASH_ANVIL: &[&str] = &[
+    "              ┌──────────────┐              ",
+    "              │  ░░░░░░░░░░  │              ",
+    "     ┌────────┴──────────────┴────────┐     ",
+    "     │                                │     ",
+    "     │                                │     ",
+    "     └─────────────┬──────────────────┘     ",
+    "                   │                        ",
+    "             ┌─────┴──────┐                 ",
+    "             └────────────┘                 ",
+];
+
 /// Steps in the in-TUI configuration wizard (launched via /config or /setup).
 #[derive(Clone, Debug, PartialEq)]
 enum WizardStep {
@@ -182,6 +209,10 @@ struct App {
     // and the UI drives a step-by-step provider / binding / role + key flow.
     config_wizard: Option<ConfigWizard>,
 
+    // Animation state (frame counter + splash countdown)
+    splash_ticks: u8, // counts down from SPLASH_DURATION; 0 = show main UI
+    anim_tick: u64,   // increments every frame, drives spinner + cursor blink
+
     // When true the input characters are masked in the UI (for API keys)
     input_secret: bool,
 
@@ -224,6 +255,8 @@ impl App {
             showing_command_palette: false,
             command_selected: 0,
             config_wizard: None,
+            splash_ticks: SPLASH_DURATION,
+            anim_tick: 0,
             input_secret: false,
             active_context: vec![],
             viewing_doc: None,
@@ -1768,6 +1801,10 @@ fn run_app_loop<B: ratatui::backend::Backend>(
         // Non-blocking so the TUI stays responsive during long planner/reviewer calls.
         let _chat = app.drain_llm_stream();
         let _gate = app.drain_gate_events();
+        app.anim_tick = app.anim_tick.wrapping_add(1);
+        if app.splash_ticks > 0 {
+            app.splash_ticks -= 1;
+        }
 
         terminal.draw(|f| render_ui(f, app))?;
 
@@ -1793,6 +1830,11 @@ fn run_app_loop<B: ratatui::backend::Backend>(
 }
 
 fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
+    // Any keypress dismisses the splash screen.
+    if app.splash_ticks > 0 {
+        app.splash_ticks = 0;
+    }
+
     // Command palette navigation (when user pressed / and palette is visible).
     // Arrows move selection, Enter picks (replaces input with full command and executes),
     // Esc closes without executing, other keys (letters) fall through to live filter.
@@ -1996,36 +2038,371 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
 }
 
 fn render_ui(f: &mut Frame, app: &App) {
+    if app.splash_ticks > 0 {
+        render_splash(f, app);
+        return;
+    }
+    render_main(f, app);
+}
+
+// ─── Splash screen ────────────────────────────────────────────────────────────
+
+fn render_splash(f: &mut Frame, app: &App) {
+    use ratatui::layout::Rect;
+
+    let area = f.area();
+    let bg = Block::default().style(Style::default().bg(Color::Rgb(10, 10, 20)));
+    f.render_widget(bg, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Anvil silhouette (orange / amber)
+    for row in SPLASH_ANVIL {
+        lines.push(Line::from(Span::styled(
+            row.to_string(),
+            Style::default().fg(Color::Rgb(210, 120, 30)),
+        )));
+    }
+
+    lines.push(Line::from(Span::raw("".to_string())));
+
+    // ANVIL logo — gradient from bright yellow at top to deep orange at bottom
+    for (i, row) in SPLASH_LOGO.iter().enumerate() {
+        let color = if i < 2 {
+            Color::Rgb(255, 200, 50)
+        } else if i < 4 {
+            Color::Rgb(255, 160, 20)
+        } else {
+            Color::Rgb(220, 100, 10)
+        };
+        lines.push(Line::from(Span::styled(
+            row.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    lines.push(Line::from(Span::raw("".to_string())));
+
+    lines.push(Line::from(Span::styled(
+        "        Structure for vibe coding.        ".to_string(),
+        Style::default().fg(Color::White).add_modifier(Modifier::ITALIC),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Talk  →  Plan (R1+R2)  →  Build  →  Ship  ".to_string(),
+        Style::default().fg(Color::Rgb(150, 200, 255)),
+    )));
+
+    lines.push(Line::from(Span::raw("".to_string())));
+
+    let ver_line = format!("  v{}  —  model-agnostic, cross-provider  ", env!("CARGO_PKG_VERSION"));
+    lines.push(Line::from(Span::styled(
+        ver_line,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    if let Some(cfg) = &app.cfg {
+        let coder = splash_model_label(cfg, "coder");
+        let r1    = splash_model_label(cfg, "reviewer-a");
+        let r2    = splash_model_label(cfg, "reviewer-b");
+        if coder != "—" || r1 != "—" {
+            lines.push(Line::from(vec![
+                Span::styled("  CODER ".to_string(), Style::default().fg(Color::Cyan)),
+                Span::styled(coder, Style::default().fg(Color::White)),
+                Span::styled("   R1 ".to_string(), Style::default().fg(Color::Magenta)),
+                Span::styled(r1, Style::default().fg(Color::White)),
+                Span::styled("   R2 ".to_string(), Style::default().fg(Color::Magenta)),
+                Span::styled(r2, Style::default().fg(Color::White)),
+                Span::raw("  ".to_string()),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(Span::raw("".to_string())));
+
+    // Pulsing dismiss hint
+    let hint_color = if (app.anim_tick / 6) % 2 == 0 { Color::DarkGray } else { Color::Gray };
+    lines.push(Line::from(Span::styled(
+        "           Press any key to continue…           ".to_string(),
+        Style::default().fg(hint_color),
+    )));
+
+    let total_h = lines.len() as u16;
+    let top_pad = area.height.saturating_sub(total_h) / 2;
+
+    let max_w = lines.iter()
+        .map(|l| l.spans.iter().map(|s| s.content.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0) as u16;
+    let left_pad = area.width.saturating_sub(max_w) / 2;
+
+    for (i, line) in lines.into_iter().enumerate() {
+        let y = area.y + top_pad + i as u16;
+        if y >= area.y + area.height {
+            break;
+        }
+        let row_area = Rect {
+            x: area.x + left_pad,
+            y,
+            width: area.width.saturating_sub(left_pad),
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(line), row_area);
+    }
+}
+
+// ─── Main UI ─────────────────────────────────────────────────────────────────
+
+fn render_main(f: &mut Frame, app: &App) {
+    let area = f.area();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // header
-            Constraint::Min(3),     // chat
-            Constraint::Length(6),  // input (borders + several lines for multi-line messages; scrolls internally by showing tail)
+            Constraint::Length(5), // bordered header — 3 info rows
+            Constraint::Min(4),    // chat log
+            Constraint::Length(4), // bordered input — 2 content rows
         ])
-        .split(f.area());
+        .split(area);
 
-    // Header
-    let header = Paragraph::new(Span::styled(
-        &app.status_line,
-        Style::default().fg(Color::Cyan).bold(),
-    ))
-    .block(Block::default().borders(Borders::NONE));
-    f.render_widget(header, chunks[0]);
+    render_header(f, app, chunks[0]);
+    render_chat(f, app, chunks[1]);
+    render_input_box(f, app, chunks[2]);
 
-    // Chat area (simple scroll via view_offset + tail)
-    // Title adapts to workflow stage so the "plan then exactly-two-reviews then accept" flow is always obvious (production UX).
-    let chat_title = match app.stage {
-        WorkflowStage::PlanReviewsComplete => "Chat / Log — R1 + R2 reviews above. Inspect with /view-reviews, then /accept-plan (↑↓ scroll)",
-        WorkflowStage::PlanAccepted => "Chat / Log — Plan accepted (gates passed). Context + suggestions now extra powerful (↑↓ scroll)",
-        _ => "Chat / Log (↑↓ scroll, Enter=send, Shift+Enter=newline, s=setup, / = palette, Esc/q=quit)",
+    // Overlays rendered last so they float on top
+    render_palette_popup(f, app, chunks[1]);
+    render_wizard_popup(f, app, chunks[1]);
+    render_doc_popup(f, app, chunks[1]);
+}
+
+// ─── Header (3-row info panel) ────────────────────────────────────────────────
+
+fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    use ratatui::layout::Rect;
+
+    // ── Row 0: brand • stage • streaming indicator • context badge ──
+    let stage_text = if app.first_run || app.stage == WorkflowStage::Unconfigured {
+        "UNCONFIGURED — /config or press s".to_string()
+    } else {
+        match app.stage {
+            WorkflowStage::Talk                => "TALK — chat freely, then /plan".to_string(),
+            WorkflowStage::PlanReviewsComplete => "REVIEWS DONE — address findings, then /accept-plan".to_string(),
+            WorkflowStage::PlanAccepted        => "PLAN ACCEPTED — build phases".to_string(),
+            WorkflowStage::Unconfigured        => "UNCONFIGURED".to_string(),
+        }
     };
+    let stage_color = if app.first_run || app.stage == WorkflowStage::Unconfigured {
+        Color::Red
+    } else {
+        match app.stage {
+            WorkflowStage::Talk                => Color::Yellow,
+            WorkflowStage::PlanReviewsComplete => Color::Magenta,
+            WorkflowStage::PlanAccepted        => Color::LightGreen,
+            WorkflowStage::Unconfigured        => Color::Red,
+        }
+    };
+
+    let is_streaming = app.llm_rx.is_some() || app.gate_rx.is_some();
+    let stream_spans: Vec<Span<'static>> = if is_streaming {
+        let sp = SPINNER[(app.anim_tick as usize / 2) % SPINNER.len()];
+        vec![
+            Span::raw("  ".to_string()),
+            Span::styled(sp.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" thinking…".to_string(), Style::default().fg(Color::Cyan)),
+        ]
+    } else {
+        vec![
+            Span::raw("  ".to_string()),
+            Span::styled("ready".to_string(), Style::default().fg(Color::DarkGray)),
+        ]
+    };
+
+    let mut row0: Vec<Span<'static>> = vec![
+        Span::styled(
+            " ANVIL ".to_string(),
+            Style::default().fg(Color::Rgb(255, 180, 0)).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("v{}  ", env!("CARGO_PKG_VERSION")),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled("│ ".to_string(), Style::default().fg(Color::Rgb(60, 60, 80))),
+        Span::styled(
+            stage_text,
+            Style::default().fg(stage_color).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    row0.extend(stream_spans);
+    if !app.active_context.is_empty() {
+        row0.push(Span::styled(
+            format!("  [ctx:{}]", app.active_context.len()),
+            Style::default().fg(Color::Rgb(100, 200, 255)),
+        ));
+    }
+
+    // ── Row 1: coder / R1 / R2 model labels ──
+    let row1: Vec<Span<'static>> = if let Some(cfg) = &app.cfg {
+        let coder = header_model_label(cfg, "coder");
+        let r1    = header_model_label(cfg, "reviewer-a");
+        let r2    = header_model_label(cfg, "reviewer-b");
+        vec![
+            Span::styled(" CODER ".to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(coder, Style::default().fg(Color::White)),
+            Span::styled("  │  R1 ".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(r1, Style::default().fg(Color::White)),
+            Span::styled("  │  R2 ".to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(r2, Style::default().fg(Color::White)),
+        ]
+    } else {
+        vec![Span::styled(
+            " Run /config or press s for quick Ollama setup".to_string(),
+            Style::default().fg(Color::Yellow),
+        )]
+    };
+
+    // ── Row 2: project name + phase progress ──
+    let proj = app.root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(".")
+        .to_string();
+    let phases = build_phase_progress(app);
+
+    let row2: Vec<Span<'static>> = vec![
+        Span::styled(" project ".to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(proj, Style::default().fg(Color::Gray)),
+        Span::styled("  │  ".to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(phases, Style::default().fg(Color::Gray)),
+    ];
+
+    // Draw bordered block then overlay rows inside it
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+        .title(Span::styled(
+            " ⬡ anvil ",
+            Style::default().fg(Color::Rgb(255, 180, 0)).add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    for (i, spans) in [row0, row1, row2].into_iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let row_area = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        f.render_widget(Paragraph::new(Line::from(spans)), row_area);
+    }
+}
+
+/// Short model label for splash screen.
+fn splash_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
+    if let Ok((name, binding, _)) = cfg.resolve_role_full(role) {
+        let m = &binding.model;
+        let m = if m.len() > 18 { &m[..18] } else { m };
+        format!("{} ({})", name, m)
+    } else {
+        "—".to_string()
+    }
+}
+
+/// Full model label for the header row.
+fn header_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
+    if let Ok((name, binding, provider)) = cfg.resolve_role_full(role) {
+        let m = &binding.model;
+        let m = if m.len() > 20 { &m[..20] } else { m };
+        format!("{} ({} / {})", name, m, provider.r#type)
+    } else {
+        "not configured".to_string()
+    }
+}
+
+/// Inline phase progress: `P0✓ P1→ P2○ P3○`
+fn build_phase_progress(app: &App) -> String {
+    let state = load_state(&app.root);
+    let plan_path = app.root.join("plan.md");
+
+    if !plan_path.exists() {
+        return if state.accepted_plan_hash.is_some() {
+            "plan: accepted".to_string()
+        } else {
+            "no plan yet — /plan to generate".to_string()
+        };
+    }
+
+    let plan = std::fs::read_to_string(&plan_path).unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let phase_ids: Vec<String> = plan
+        .lines()
+        .filter_map(|line| {
+            let s = line.trim_start_matches('#').trim();
+            if let Some(rest) = s.strip_prefix('P') {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty() {
+                    let id = format!("P{}", digits);
+                    if seen.insert(id.clone()) { Some(id) } else { None }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if phase_ids.is_empty() {
+        return "phases: (none in plan.md)".to_string();
+    }
+
+    let parts: Vec<String> = phase_ids
+        .iter()
+        .map(|id| {
+            if state.shipped_phases.contains(id) {
+                format!("{}✓", id)
+            } else if state.current_phase.as_deref() == Some(id.as_str()) {
+                format!("{}→", id)
+            } else {
+                format!("{}○", id)
+            }
+        })
+        .collect();
+
+    format!("phases: {}", parts.join(" "))
+}
+
+// ─── Chat area ───────────────────────────────────────────────────────────────
+
+fn render_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let chat_title = match app.stage {
+        WorkflowStage::PlanReviewsComplete =>
+            " Reviews ready — /view-reviews then /accept-plan (↑↓ scroll) ",
+        WorkflowStage::PlanAccepted =>
+            " Plan accepted — build phases (↑↓ / for commands) ",
+        _ =>
+            " Chat log (↑↓ scroll, Enter=send, Shift+Enter=newline, / for commands) ",
+    };
+
+    let border_color = if app.first_run || app.stage == WorkflowStage::Unconfigured {
+        Color::Rgb(120, 80, 0)
+    } else {
+        match app.stage {
+            WorkflowStage::PlanAccepted        => Color::Rgb(40, 120, 40),
+            WorkflowStage::PlanReviewsComplete => Color::Rgb(100, 40, 120),
+            _                                  => Color::Rgb(50, 50, 70),
+        }
+    };
+
     let chat_block = Block::default()
-        .title(chat_title)
-        .borders(Borders::ALL);
+        .title(Span::styled(chat_title, Style::default().fg(Color::DarkGray)))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
 
     let visible: Vec<Line> = if app.messages.is_empty() {
-        vec![Line::from(Span::styled("(no messages yet — start typing)", Style::default().fg(Color::DarkGray)))]
+        vec![Line::from(Span::styled(
+            "(no messages yet — start typing or try /help)",
+            Style::default().fg(Color::DarkGray),
+        ))]
     } else {
         let start = app.view_offset.min(app.messages.len().saturating_sub(1));
         app.messages[start..]
@@ -2037,189 +2414,210 @@ fn render_ui(f: &mut Frame, app: &App) {
     let chat = Paragraph::new(visible)
         .block(chat_block)
         .wrap(Wrap { trim: false });
-    f.render_widget(chat, chunks[1]);
+    f.render_widget(chat, area);
+}
 
-    // Input bar — changes meaning when the config wizard is active.
-    // The input area supports multiple lines (taller fixed box) and auto-scrolls to the tail
-    // so the end of long/pasted/Shift+Enter content is always visible.
+// ─── Input box ───────────────────────────────────────────────────────────────
+
+fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let (prompt, title) = if let Some(wizard) = &app.config_wizard {
         let p = match &wizard.step {
-            WizardStep::ProviderName => "provider name> ",
-            WizardStep::BaseUrl => "base url> ",
-            WizardStep::EnvVarName => "env var name> ",
-            WizardStep::ApiKeySecret => "api key (hidden)> ",
-            WizardStep::BindingName => "binding name> ",
-            WizardStep::ModelName => "model> ",
-            WizardStep::BindingNote => "note (optional)> ",
-            _ => "config> ",
+            WizardStep::ProviderName  => "provider name> ",
+            WizardStep::BaseUrl       => "base url> ",
+            WizardStep::EnvVarName    => "env var name> ",
+            WizardStep::ApiKeySecret  => "api key (hidden)> ",
+            WizardStep::BindingName   => "binding name> ",
+            WizardStep::ModelName     => "model id> ",
+            WizardStep::BindingNote   => "note (optional)> ",
+            _                         => "config> ",
         };
         let t = if wizard.list_title.is_empty() {
-            "Config wizard — type answer + Enter (Shift+Enter for newline)".to_string()
+            " Config wizard — type answer + Enter (Esc=back) ".to_string()
         } else {
-            wizard.list_title.clone()
+            format!(" {} ", wizard.list_title)
         };
         (p, t)
-    } else if app.first_run {
-        ("> ", "Input (Enter=send, Shift+Enter=newline, Esc/q=quit)".to_string())
     } else {
-        ("> ", "Input (Enter=send, Shift+Enter=newline, Esc/q=quit)".to_string())
+        ("> ", " Input (Enter=send, Shift+Enter=newline, /=commands, Esc/q=quit) ".to_string())
     };
 
     let display = if app.input_secret {
-        // Secrets (API keys etc.) are entered as single-line; mask the buffer length.
-        "*".repeat(app.input.len())
+        "•".repeat(app.input.len())
     } else {
         app.input.clone()
     };
 
     let full_text = format!("{}{}", prompt, display);
-
-    // Show the tail of the input content (bottom N lines that fit) so typing/pasting long
-    // multi-line text automatically "scrolls" within the input box and you see the cursor end.
-    let inner_h = (chunks[2].height as usize).saturating_sub(2).max(1);
+    let inner_h = (area.height as usize).saturating_sub(2).max(1);
     let all_lines: Vec<&str> = full_text.lines().collect();
-    let start = if all_lines.len() > inner_h {
-        all_lines.len() - inner_h
+    let start = if all_lines.len() > inner_h { all_lines.len() - inner_h } else { 0 };
+    let visible_text = if start > 0 { all_lines[start..].join("\n") } else { full_text };
+
+    let border_color = if app.config_wizard.is_some() {
+        Color::Yellow
     } else {
-        0
-    };
-    let visible_text = if start > 0 {
-        all_lines[start..].join("\n")
-    } else {
-        full_text
+        Color::Rgb(60, 80, 100)
     };
 
-    let input = Paragraph::new(visible_text)
-        .block(Block::default().borders(Borders::ALL).title(title))
+    // Cursor blink: bright when on, dim when off
+    let cursor_on = (app.anim_tick / 7) % 2 == 0;
+    let text_style = if cursor_on && app.config_wizard.is_none() {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    let input_widget = Paragraph::new(visible_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(Span::styled(title, Style::default().fg(Color::DarkGray))),
+        )
+        .style(text_style)
         .wrap(Wrap { trim: false });
-    f.render_widget(input, chunks[2]);
+    f.render_widget(input_widget, area);
+}
 
-    // Slash command palette popup (dropdown-style, rendered on top of lower chat area).
-    // Appears as soon as the user types `/` ; live-filters as they continue typing.
-    // Arrows + Enter work while it is visible (see handle_key).
-    if app.showing_command_palette {
-        let filtered = app.filtered_commands();
-        if !filtered.is_empty() {
-            // Position a small floating list just above the input bar (over the bottom of chat).
-            // Keep it narrow and near the input for a "command bar" feel.
-            let mut popup = chunks[1];
-            let max_h: u16 = 9;
-            let needed = (filtered.len() as u16) + 2; // items + borders/title
-            let h = needed.min(max_h).min(popup.height.saturating_sub(1)).max(3);
-            popup.y = popup.y + popup.height.saturating_sub(h);
-            popup.height = h;
-            // Gentle inset so it doesn't touch the chat borders
-            popup.x = popup.x + 2;
-            popup.width = popup.width.saturating_sub(4);
+// ─── Floating overlays ────────────────────────────────────────────────────────
 
-            f.render_widget(Clear, popup);
-
-            let items: Vec<ListItem> = filtered
-                .iter()
-                .enumerate()
-                .map(|(i, &(cmd, desc))| {
-                    let is_sel = i == app.command_selected;
-                    let style = if is_sel {
-                        Style::default().fg(Color::Black).bg(Color::Cyan).bold()
-                    } else {
-                        Style::default().fg(Color::Cyan)
-                    };
-                    let desc_style = if is_sel {
-                        Style::default().fg(Color::Black).bg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    };
-                    let line = Line::from(vec![
-                        Span::styled(cmd, style),
-                        Span::raw("  "),
-                        Span::styled(desc, desc_style),
-                    ]);
-                    ListItem::new(line)
-                })
-                .collect();
-
-            let list = List::new(items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Commands (↑↓ pick, Enter to run, Esc to close, type to filter)"),
-            );
-            f.render_widget(list, popup);
-        }
+fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+    if !app.showing_command_palette {
+        return;
+    }
+    let filtered = app.filtered_commands();
+    if filtered.is_empty() {
+        return;
     }
 
-    // Wizard selection list popup (provider types, credential choices, bindings, roles, main menu, ...)
-    if let Some(wizard) = &app.config_wizard {
-        if !wizard.list_items.is_empty() {
-            let mut popup = chunks[1];
-            let max_h: u16 = 10;
-            let needed = (wizard.list_items.len() as u16) + 2;
-            let h = needed.min(max_h).min(popup.height.saturating_sub(1)).max(3);
-            popup.y = popup.y + popup.height.saturating_sub(h);
-            popup.height = h;
-            popup.x = popup.x + 2;
-            popup.width = popup.width.saturating_sub(4);
+    let max_h: u16 = 12;
+    let needed = (filtered.len() as u16) + 2;
+    let h = needed.min(max_h).min(chat_area.height.saturating_sub(1)).max(3);
+    let popup = ratatui::layout::Rect {
+        x: chat_area.x + 2,
+        y: chat_area.y + chat_area.height.saturating_sub(h),
+        width: chat_area.width.saturating_sub(4),
+        height: h,
+    };
 
-            f.render_widget(Clear, popup);
+    f.render_widget(Clear, popup);
 
-            let items: Vec<ListItem> = wizard
-                .list_items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| {
-                    let is_sel = i == wizard.list_selected;
-                    let style = if is_sel {
-                        Style::default().fg(Color::Black).bg(Color::Cyan).bold()
-                    } else {
-                        Style::default().fg(Color::Cyan)
-                    };
-                    ListItem::new(Line::from(Span::styled(item.as_str(), style)))
-                })
-                .collect();
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .map(|(i, &(cmd, desc))| {
+            if i == app.command_selected {
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", cmd),
+                        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}", desc),
+                        Style::default().fg(Color::Black).bg(Color::Cyan),
+                    ),
+                ]))
+            } else {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", cmd), Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("  {}", desc), Style::default().fg(Color::DarkGray)),
+                ]))
+            }
+        })
+        .collect();
 
-            let list = List::new(items).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(wizard.list_title.clone()),
-            );
-            f.render_widget(list, popup);
-        }
-    }
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(
+                " Commands (↑↓ pick, Enter run, Esc close, type to filter) ",
+                Style::default().fg(Color::DarkGray),
+            )),
+    );
+    f.render_widget(list, popup);
+}
 
-    // Document viewer popup (the "plan + approve" review card experience).
-    // Opened via /view-plan or /view-reviews. Uses the same rich code-block + header styling as the main chat
-    // so findings, diffs, and code in the reviews render with production quality (Cline-inspired visual cards).
-    // Esc closes (handled in handle_key). This makes the "read the two independent reviews then explicitly accept"
-    // step feel deliberate and high-quality, directly inspired by structured plan/approve flows.
-    if let Some((title, content)) = &app.viewing_doc {
-        let mut popup = chunks[1];
-        // Large but not full-screen so the chat log (with the same reviews) remains visible underneath for context.
-        let max_h: u16 = (popup.height.saturating_sub(4)).max(8);
-        popup.height = max_h.min(30);
-        popup.y = popup.y + 2;
-        popup.x = popup.x + 3;
-        popup.width = popup.width.saturating_sub(6);
+fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+    let wizard = match &app.config_wizard {
+        Some(w) if !w.list_items.is_empty() => w,
+        _ => return,
+    };
 
-        f.render_widget(Clear, popup);
+    let max_h: u16 = 12;
+    let needed = (wizard.list_items.len() as u16) + 2;
+    let h = needed.min(max_h).min(chat_area.height.saturating_sub(1)).max(3);
+    let popup = ratatui::layout::Rect {
+        x: chat_area.x + 2,
+        y: chat_area.y + chat_area.height.saturating_sub(h),
+        width: chat_area.width.saturating_sub(4),
+        height: h,
+    };
 
-        // Reuse the rich renderer so code fences inside the plan or REVIEW files get the nice box treatment.
-        let lines: Vec<Line> = content
-            .lines()
-            .flat_map(|l| {
-                // Small wrapper so we can style the whole viewed doc without the [review] prefix logic.
-                App::render_message_as_lines(&format!("[doc] {}", l))
-            })
-            .collect();
+    f.render_widget(Clear, popup);
 
-        let viewer = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title.as_str())
-                    .style(Style::default().fg(Color::White)),
-            )
-            .wrap(Wrap { trim: false });
-        f.render_widget(viewer, popup);
-    }
+    let items: Vec<ListItem> = wizard
+        .list_items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            if i == wizard.list_selected {
+                ListItem::new(Line::from(Span::styled(
+                    format!(" ▶ {} ", item),
+                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )))
+            } else {
+                ListItem::new(Line::from(Span::styled(
+                    format!("   {} ", item),
+                    Style::default().fg(Color::Yellow),
+                )))
+            }
+        })
+        .collect();
 
-    // Optional bottom hint line (we use the input block title for now; could add a 4th chunk later)
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(Span::styled(
+                format!(" {} ", wizard.list_title),
+                Style::default().fg(Color::DarkGray),
+            )),
+    );
+    f.render_widget(list, popup);
+}
+
+fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+    let (title, content) = match &app.viewing_doc {
+        Some(pair) => pair,
+        None => return,
+    };
+
+    let h = (chat_area.height.saturating_sub(4)).max(8).min(30);
+    let popup = ratatui::layout::Rect {
+        x: chat_area.x + 3,
+        y: chat_area.y + 2,
+        width: chat_area.width.saturating_sub(6),
+        height: h,
+    };
+
+    f.render_widget(Clear, popup);
+
+    let lines: Vec<Line> = content
+        .lines()
+        .flat_map(|l| App::render_message_as_lines(&format!("[doc] {}", l)))
+        .collect();
+
+    let viewer = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta))
+                .title(Span::styled(
+                    format!(" {} (Esc to close) ", title),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                )),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(viewer, popup);
 }

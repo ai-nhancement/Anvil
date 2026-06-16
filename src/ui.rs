@@ -56,6 +56,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
     ("/setup", "Alias for /config — providers, models, keys"),
     ("/status", "Show reviewers, config state, and current gate progress"),
+    ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes (cross-check vs live GPU header)"),
+    ("/unload [model]", "Force immediate unload (keep_alive=0) of one or all loaded models; header GPU stats refresh"),
     ("/help", "Show key bindings and available commands"),
     ("/quit", "Exit the TUI"),
     ("/phase-done", "Phase gates (R1+R2 + accept) — coming in phase 4"),
@@ -299,12 +301,16 @@ fn is_unconfigured(root: &Path) -> bool {
 }
 
 /// Lightweight live GPU stats (primarily NVIDIA via nvidia-smi).
-/// Refreshed periodically for local model users to see util + available VRAM at a glance.
+/// Refreshed periodically for local model users to see util + VRAM usage (used/total).
+/// Note: nvidia-smi "used" includes CUDA context overhead + driver reservations in addition
+/// to actual model weights/KV cache reported by Ollama /api/ps. Discrepancies of several GB
+/// are normal; use /loaded + header together to cross-check.
 #[derive(Clone, Debug, Default)]
 struct GpuStat {
     name: String,
     util: u8,       // 0-100
-    mem_free: u32,  // MiB available
+    mem_used: u32,  // MiB used (driver view)
+    mem_free: u32,  // MiB free
     mem_total: u32, // MiB total
 }
 
@@ -563,11 +569,13 @@ impl App {
             }
             let name = cols[0].to_owned();
             let util = cols[1].parse::<u8>().unwrap_or(0).clamp(0, 100);
+            let used: u32 = cols[2].parse().unwrap_or(0);
             let total: u32 = cols[3].parse().unwrap_or(0);
             let free: u32 = cols[4].parse().unwrap_or(0);
             stats.push(GpuStat {
                 name,
                 util,
+                mem_used: used,
                 mem_free: free,
                 mem_total: total,
             });
@@ -800,6 +808,39 @@ impl App {
                 configured,
                 self.messages.len()
             ));
+
+            // Snapshot to avoid long-lived & borrow of self while calling push_system (mut).
+            let gpu_snap: Vec<(usize, f32, f32, u8)> = self
+                .gpu_stats
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (i, g.mem_used as f32 / 1024.0, g.mem_total as f32 / 1024.0, g.util))
+                .collect();
+
+            // Quick VRAM/GPU snapshot in /status for convenience when debugging "full" cards.
+            if !gpu_snap.is_empty() {
+                self.push_system("GPUs (nvidia-smi):");
+                for (i, used_g, tot_g, util) in &gpu_snap {
+                    self.push_system(&format!("  {}: {:.1}/{:.1}G used @ {}% util", i, used_g, tot_g, util));
+                }
+            }
+
+            // Also surface how many models Ollama currently claims are loaded.
+            // Snapshot the summary first (block_on borrow of runtime).
+            let ollama_info: Option<(usize, f64)> = if let Some(rt) = &self.runtime {
+                match rt.block_on(self.llm.list_ollama_ps()) {
+                    Ok(models) if !models.is_empty() => {
+                        let total_vram: f64 = models.iter().map(|m| (m.size_vram.max(m.size)) as f64 / 1e9).sum();
+                        Some((models.len(), total_vram))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some((cnt, vram)) = ollama_info {
+                self.push_system(&format!("Ollama /ps: {} model(s) resident, ~{:.1} GB claimed VRAM", cnt, vram));
+            }
             return;
         }
 
@@ -992,9 +1033,27 @@ impl App {
         Ok(())
     }
 
-    /// Show currently loaded Ollama models (with VRAM sizes if reported).
-    /// Helps when you have multiple role models (coder + R1 + R2) and VRAM is filling up.
+    /// Show currently loaded Ollama models (with VRAM sizes if reported) + current nvidia-smi
+    /// per-GPU used/total snapshot for cross-check.
+    /// This is the best way to verify whether the header "full" numbers are accurate for your
+    /// 8000-series (or other) cards: Ollama reports what it has resident; nvidia-smi reports the
+    /// broader driver/CUDA allocation (always >= Ollama's number, often by several GB overhead).
     fn show_ollama_loaded(&mut self) {
+        // Snapshot GPU data up front so we can print while the Ollama runtime borrow is live.
+        let gpu_snap: Vec<(usize, f32, f32, f32)> = self
+            .gpu_stats
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                (
+                    i,
+                    g.mem_used as f32 / 1024.0,
+                    g.mem_total as f32 / 1024.0,
+                    g.mem_free as f32 / 1024.0,
+                )
+            })
+            .collect();
+
         if let Some(rt) = &self.runtime {
             match rt.block_on(self.llm.list_ollama_ps()) {
                 Ok(models) if !models.is_empty() => {
@@ -1009,10 +1068,31 @@ impl App {
                         };
                         self.push_system(&format!("  • {} — {}", m.name, v));
                     }
+                    // Side-by-side nvidia-smi numbers so user can judge if header "full" VRAM is accurate.
+                    // (Common: Ollama size_vram sum < nvidia-smi used because of CUDA contexts, KV cache during
+                    // inference, and driver reservations. After /unload the gap should shrink.)
+                    if !gpu_snap.is_empty() {
+                        self.push_system("nvidia-smi VRAM (driver view, for comparison):");
+                        for (i, used_g, tot_g, free_g) in &gpu_snap {
+                            self.push_system(&format!(
+                                "  GPU {}: {:.1}/{:.1}G used (free {:.1}G)",
+                                i, used_g, tot_g, free_g
+                            ));
+                        }
+                    }
                     self.push_system("Tip: /unload or /unload <exact-model-tag> to free VRAM immediately. New calls default to 30s keep-alive for local Ollama.");
                 }
                 Ok(_) => {
                     self.push_system("No models currently loaded in Ollama (api/ps empty).");
+                    if !gpu_snap.is_empty() {
+                        self.push_system("nvidia-smi VRAM (current):");
+                        for (i, used_g, tot_g, free_g) in &gpu_snap {
+                            self.push_system(&format!(
+                                "  GPU {}: {:.1}/{:.1}G used (free {:.1}G)",
+                                i, used_g, tot_g, free_g
+                            ));
+                        }
+                    }
                 }
                 Err(e) => {
                     self.push_system(&format!("Could not reach Ollama /api/ps: {}", e));
@@ -1441,10 +1521,26 @@ impl App {
         if let Some(rt) = &self.runtime {
             let llm = self.llm.clone();
             // Practical chat system prompt (lighter than the strict reviewer prompts used in gates).
-            let system = "You are a thoughtful technical thought partner helping with vibe-driven coding. \
-                          Keep answers practical and concrete. When suggesting code, be precise and include \
-                          only the relevant snippet or file context. The user is working inside Anvil's \
-                          Talk → Plan (R1+R2) → phased build flow.".to_string();
+            // Explicitly teaches the coder its full environment, the slash-command "tools" the user can invoke,
+            // exactly how /include context is delivered, the hard R1+R2 gates, and how to drive the workflow
+            // without drift. This ensures the model has everything it needs to guide perfectly.
+            let system = "You are a thoughtful technical thought partner helping with vibe-driven coding inside Anvil.\n\
+Keep answers practical, concrete and short. When suggesting code changes, be precise: always name the exact file and show only the minimal relevant snippet or diff.\n\n\
+The user follows a strict Talk → Plan (R1+R2) → phased build (each phase also R1+R2) discipline. Source of truth is always disk files (plan.md, REVIEW_*.md, .anvil/state.json). You have no direct FS or execution access — you guide the human.\n\n\
+Available commands the user can type (suggest these by name when the moment is right):\n\
+- /plan — generate/refresh plan.md then automatically run exactly two reviews (R1 then R2 from different configured models/bindings). After reviews, user addresses findings then /accept-plan.\n\
+- /include <relative/path> — include a real project file's full content for your next turn (you will see it in a tagged block below). Tell the user the exact files to include when you need ground truth.\n\
+- /context — list currently included files; /clear-context — drop them all.\n\
+- /status — show reviewers, GPU/VRAM live, Ollama /ps summary, gate progress.\n\
+- /loaded or /ps — detailed list of models currently in Ollama VRAM + sizes (cross-check the header GPU stats).\n\
+- /unload [model] — immediately free VRAM (keep_alive=0); omit model to unload all.\n\
+- /view-plan and /view-reviews — open focused cards for plan.md + the two REVIEW_plan_R*.md before accepting.\n\
+- /accept-plan — record that R1+R2 findings were addressed (writes accepted hash); unlocks phases.\n\
+- /config or /setup — reconfigure providers, bindings or roles.\n\
+- /help — show keybindings and command list.\n\n\
+When you need project information, say exactly: \"Please run /include src/foo.rs (or the paths you want) then ask me again.\"  Context from /include appears in the next user message after a '--- BEGIN PROJECT CONTEXT (files you asked to include) ---' header, with per-file --- path --- ```content``` blocks, ended by '--- END PROJECT CONTEXT ---'. Use those contents for accurate answers.\n\n\
+You may suggest the user emit structured artifacts inside <artifact name=\"charter\"> or <artifact name=\"plan-draft\"> tags during exploration (the headless `anvil talk` CLI can save them).\n\n\
+Be direct, surface assumptions and risks, ask clarifying questions. Always keep the two independent diverse reviews and explicit accept steps in mind — never pretend a change is done until the gates are passed on disk.".to_string();
 
             // Inject active file context (from /include) so the model has real code to work with.
             // This is the entry point for "agentic awareness" while the hard gates (exactly two diverse reviews,
@@ -2435,8 +2531,13 @@ impl App {
             }
         }
 
-        self.push_system("Provider ready. Use 'Assign roles' from the menu to pick from the live list (or built-in suggestions).");
-        self.populate_main_menu();
+        if self.first_run || !self.is_configured() {
+            self.push_system("Provider ready — launching role assignment to pick coder / reviewer-R1 / reviewer-R2 from the live models.");
+            self.start_role_assignment();
+        } else {
+            self.push_system("Provider ready. Use 'Assign roles' from the menu to pick from the live list (or built-in suggestions).");
+            self.populate_main_menu();
+        }
     }
 
     fn start_add_binding(&mut self, preselected_provider: Option<String>) {
@@ -3056,9 +3157,13 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             return Ok(true);
         }
 
-        KeyCode::Char('s') if key.modifiers.is_empty() && app.input.is_empty() => {
+        KeyCode::Char('s') if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() => {
             // Quick local Ollama setup / re-setup. Always available (when Ollama reachable) so users
             // can easily change the models assigned to CODER / R1 / R2 later by re-picking from live tags.
+            // Guarded by config_wizard.is_none() (like the 'q' hotkey) so that:
+            // - Pasting or typing an API key that starts with 's' (sk-... for OpenAI, many others) during
+            //   the provider key entry step does not hijack into Quick Ollama.
+            // - Accidental 's' while inside any part of /config or first-time setup is ignored.
             app.showing_command_palette = false;
             app.start_quick_ollama_setup();
             return Ok(false);
@@ -3558,8 +3663,11 @@ fn build_phase_progress(app: &App) -> String {
 }
 
 /// Build the spans for a single GPU's line in the right column (one GPU per line).
-/// Format example: "│ 0:4090  67% 18.2/24.0G"
-/// % is color-coded (green/yellow/red). Shows available/total VRAM.
+/// Format example: "│ 0:8000  12% 41.5/48.0G"
+/// GPU util % color-coded (green/yellow/red).
+/// VRAM shows driver-used/total (from nvidia-smi). High usage is colored to highlight "full" cards.
+/// (Ollama /loaded reports the actual weights+cache it thinks it has resident; the two numbers
+/// commonly differ by a few GB due to CUDA overhead, contexts, and KV cache.)
 fn render_gpu_line(stat: &GpuStat, idx: usize) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = vec![];
 
@@ -3584,11 +3692,23 @@ fn render_gpu_line(stat: &GpuStat, idx: usize) -> Vec<Span<'static>> {
         Style::default().fg(util_col).add_modifier(Modifier::BOLD),
     ));
 
-    let avail = stat.mem_free as f32 / 1024.0;
+    let used = stat.mem_used as f32 / 1024.0;
     let tot = stat.mem_total as f32 / 1024.0;
+    let mem_pct = if stat.mem_total > 0 {
+        (stat.mem_used as f32 / stat.mem_total as f32 * 100.0) as u8
+    } else {
+        0
+    };
+    let mem_col = if mem_pct >= 90 {
+        Color::Red
+    } else if mem_pct >= 70 {
+        Color::Rgb(255, 200, 80)
+    } else {
+        Color::Gray
+    };
     out.push(Span::styled(
-        format!(" {:.1}/{:.1}G", avail, tot),
-        Style::default().fg(Color::Gray),
+        format!(" {:.1}/{:.1}G", used, tot),
+        Style::default().fg(mem_col),
     ));
 
     out

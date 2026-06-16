@@ -8,11 +8,14 @@
 //! background multi-thread tokio runtime. No stdout writes from LLM code while in TUI.
 //! Headless paths (plan/phase/talk + their block_on + prints) untouched.
 
-use std::io::stdout;
+use std::fs::OpenOptions;
+use std::io::{stdout, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use chrono::Utc;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 use crossterm::{
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -28,8 +31,8 @@ use ratatui::{
 };
 
 use crate::config::{
-    ensure_anvil_dir, load_config, save_config, AnvilConfig, CredentialRef, ModelBinding,
-    ProviderConnection,
+    ensure_anvil_dir, load_config, load_local_env, save_config, set_local_env_var, AnvilConfig,
+    CredentialRef, ModelBinding, ProviderConnection,
 };
 use crate::llm::LlmClient;
 use crate::state::{load_state, reviews_dir, save_state};
@@ -68,10 +71,10 @@ const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Role-specific colors used consistently for labels, headers, splash, chat prefixes,
-/// and during quick-setup model picking. Coder=blue, R1=purple (magenta), R2=cyan (blue+green).
+/// and during quick-setup model picking. Coder=blue, R1=purple (magenta), R2=lime (bright green).
 const ROLE_CODER: Color = Color::LightBlue;
 const ROLE_R1: Color = Color::Magenta;
-const ROLE_R2: Color = Color::Cyan;
+const ROLE_R2: Color = Color::Rgb(50, 255, 127);
 
 /// Known providers: (display_name, suggested_connection_name, provider_type, base_url, needs_api_key)
 /// base_url = "" means the client uses the provider's SDK default (anthropic, google).
@@ -97,10 +100,46 @@ const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
     ("Other / custom",     "custom",     "openai_compat", "",                                          true),
 ];
 
+/// Suggest a conventional environment variable name for a provider connection.
+/// Used so that when the user pastes a key we can auto `std::env::set_var` it (current process),
+/// store CredentialRef::Env, and give the user exact `setx` / profile instructions.
+/// Prioritizes well-known names (XAI_API_KEY etc.) so tools and user scripts stay compatible.
+fn suggest_env_var_name(conn_name: &str, base_url: Option<&str>) -> String {
+    let n = conn_name.to_lowercase();
+    if n == "xai" || n.contains("xai") { return "XAI_API_KEY".to_string(); }
+    if n == "openai" || n.contains("openai") { return "OPENAI_API_KEY".to_string(); }
+    if n.contains("groq") { return "GROQ_API_KEY".to_string(); }
+    if n.contains("anthropic") { return "ANTHROPIC_API_KEY".to_string(); }
+    if n.contains("mistral") { return "MISTRAL_API_KEY".to_string(); }
+    if n.contains("together") { return "TOGETHER_API_KEY".to_string(); }
+    if n.contains("fireworks") { return "FIREWORKS_API_KEY".to_string(); }
+    if n.contains("perplexity") { return "PERPLEXITY_API_KEY".to_string(); }
+    if n.contains("deepseek") { return "DEEPSEEK_API_KEY".to_string(); }
+    if n.contains("cohere") { return "COHERE_API_KEY".to_string(); }
+    if n.contains("azure") { return "AZURE_OPENAI_API_KEY".to_string(); }
+    if n.contains("google") || n.contains("gemini") || n.contains("vertex") { return "GOOGLE_API_KEY".to_string(); }
+    if n.contains("aws") { return "AWS_BEDROCK_API_KEY".to_string(); }
+    if n.contains("ollama") { return "OLLAMA_API_KEY".to_string(); }
+    if n.contains("lmstudio") || n.contains("lm-studio") { return "LMSTUDIO_API_KEY".to_string(); }
+
+    // Generic fallback based on the connection name the user chose (e.g. "my-xai" -> MY_XAI_API_KEY)
+    let base = if let Some(u) = base_url { u } else { "" };
+    let mut stem = conn_name.to_uppercase();
+    stem = stem.replace(|c: char| !c.is_alphanumeric(), "_");
+    stem = stem.trim_matches('_').to_string();
+    if stem.is_empty() {
+        stem = "ANVIL".to_string();
+    }
+    if base.contains("x.ai") && !stem.contains("XAI") { stem = "XAI".to_string(); }
+    format!("{}_API_KEY", stem)
+}
+
 fn models_for_connection(provider_type: &str, base_url: Option<&str>) -> &'static [&'static str] {
     let url = base_url.unwrap_or("");
     if url.contains("x.ai") {
-        return &["grok-3", "grok-3-fast", "grok-3-mini", "grok-3-mini-fast", "grok-2-1212", "grok-beta"];
+        // Static suggestions as last-resort fallback only. The live /v1/models path (when the
+        // provider connection + key are valid) should return the current catalog for the key.
+        return &["grok-3", "grok-3-fast", "grok-3-mini", "grok-3-mini-fast", "grok-2-1212", "grok-beta", "grok-4.3", "grok-4.2", "grok-build-0.1"];
     }
     if url.contains("groq.com") {
         return &["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it", "llama-guard-3-8b"];
@@ -136,6 +175,8 @@ fn models_for_connection(provider_type: &str, base_url: Option<&str>) -> &'stati
     }
 }
 
+
+
 /// ASCII anvil silhouette (44 cols wide, 9 rows) — fallback when PNG decode fails.
 const SPLASH_ANVIL: &[&str] = &[
     "              ┌──────────────┐              ",
@@ -161,6 +202,7 @@ enum WizardStep {
     ProviderName,
     BaseUrl,
     CredentialKind,
+    #[allow(dead_code)]
     EnvVarName,
     ApiKeySecret,
     // Model binding flow
@@ -207,6 +249,11 @@ struct ConfigWizard {
 
 /// Entry point called from main when no subcommand (or `anvil ui`) is given.
 pub fn run_ui(root: &Path) -> Result<()> {
+    // Load any secrets from .anvil/.env into the process env *before* we do anything
+    // that might resolve credentials (providers, roles, chat, etc.). This is what makes
+    // "paste once during setup" work across PowerShell, bash, fish, WSL, Docker, CI, etc.
+    load_local_env(root);
+
     let mut app = App::new(root.to_path_buf());
 
     // Detect first-run (no anvil.toml or roles incomplete). This drives the prominent banner
@@ -251,11 +298,22 @@ fn is_unconfigured(root: &Path) -> bool {
     }
 }
 
+/// Lightweight live GPU stats (primarily NVIDIA via nvidia-smi).
+/// Refreshed periodically for local model users to see util + available VRAM at a glance.
+#[derive(Clone, Debug, Default)]
+struct GpuStat {
+    name: String,
+    util: u8,       // 0-100
+    mem_free: u32,  // MiB available
+    mem_total: u32, // MiB total
+}
+
 struct App {
     root: PathBuf,
     messages: Vec<String>,
     input: String,
-    view_offset: usize, // simple scroll control (index of first visible message from top)
+    view_offset: usize, // line offset into full transcript (used for manual scroll when !follow_bottom)
+    follow_bottom: bool, // when true, render auto-scrolls so newest content is visible at bottom of chat area
     should_quit: bool,
     first_run: bool,
     status_line: String,
@@ -299,10 +357,29 @@ struct App {
     // Gives a focused "card" experience for inspecting gate artifacts (plan + the two reviews)
     // before the explicit accept step — inspired by deliberate plan/approve flows.
     viewing_doc: Option<(String, String)>, // (title, full_content)
+
+    // Live GPU stats (NVIDIA etc.) polled for the top-right header display.
+    // Useful when running local models via Ollama / LM Studio / etc.
+    gpu_stats: Vec<GpuStat>,
+
+    // Active chat turn context for structured logging (turn_id correlates user + all deltas + full wire + final UI).
+    // Cleared on stream finish. Enables debugging truncation/chopping and later retrieval of prior interactions.
+    current_turn_id: Option<String>,
+    current_role: Option<String>,
+    current_binding: Option<String>,
+    current_model: Option<String>,
+
+    // Per-session transcript log file (one timestamped .jsonl inside .anvil/ per launch of the TUI).
+    // This replaces the single always-appending chat.jsonl so each session is isolated and easy to delete when not useful.
+    session_chat_log: Option<PathBuf>,
 }
 
 impl App {
     fn new(root: PathBuf) -> Self {
+        // Defensive: make sure any .anvil/.env secrets are visible even if someone constructs
+        // an App directly (the normal call site run_ui already calls load_local_env too).
+        load_local_env(&root);
+
         // Multi-thread runtime so that spawned LLM streaming tasks (reqwest + SSE parsing)
         // make progress on background worker threads. Tokens are sent over the mpsc to the
         // main UI thread which only does cheap non-blocking drains + redraws.
@@ -317,6 +394,7 @@ impl App {
             messages: vec![],
             input: String::new(),
             view_offset: 0,
+            follow_bottom: true,
             should_quit: false,
             first_run: false,
             status_line: String::new(),
@@ -335,7 +413,35 @@ impl App {
             ollama_available_cached: None,
             active_context: vec![],
             viewing_doc: None,
+            gpu_stats: vec![],
+            current_turn_id: None,
+            current_role: None,
+            current_binding: None,
+            current_model: None,
+            session_chat_log: None,
         };
+
+        // Establish the per-session chat log file *immediately*, before any push_system (which will now write into it).
+        // One file per TUI launch: .anvil/chat-YYYY-MM-DD-HH-MM-SS-mmm.jsonl
+        // This makes it trivial to look at exactly one session or rm old ones you don't care about.
+        if let Ok(dir) = ensure_anvil_dir(&app.root) {
+            let now = Utc::now();
+            // Use milliseconds and replace '.' so the filename is clean on all filesystems.
+            let ts = now.format("%Y-%m-%d-%H-%M-%S%.3f").to_string().replace('.', "-");
+            let filename = format!("chat-{}.jsonl", ts);
+            app.session_chat_log = Some(dir.join(&filename));
+
+            // Write a self-describing header record for this session (handy when you have many old session logs).
+            let start_rec = serde_json::json!({
+                "ts": now.to_rfc3339(),
+                "event": "session_start",
+                "root": app.root.display().to_string(),
+                "version": env!("CARGO_PKG_VERSION"),
+            });
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(app.session_chat_log.as_ref().unwrap()) {
+                let _ = writeln!(f, "{}", start_rec);
+            }
+        }
 
         // Best-effort load of existing config so we can do real chat immediately if roles are set.
         app.cfg = load_config(&app.root).ok();
@@ -363,21 +469,43 @@ impl App {
             let _ = app.is_ollama_available();
         }
 
+        // Initial GPU snapshot so the top-right stats appear immediately.
+        app.refresh_gpu_stats();
+
         app
     }
 
     fn push(&mut self, line: String) {
         self.messages.push(line);
-        // Auto-scroll to bottom by resetting offset (simple strategy for skeleton).
-        if self.messages.len() > 20 {
-            self.view_offset = self.messages.len() - 20;
-        } else {
-            self.view_offset = 0;
-        }
+        // Note: we no longer mutate view_offset here. Follow-bottom behavior (and manual scroll)
+        // is applied at render time using follow_bottom + Paragraph::scroll so the chat grows
+        // naturally toward the bottom without jumping the window on every token or submit.
     }
 
     fn push_system(&mut self, text: &str) {
+        self.log_chat_event("system", None, None, None, None, text);
         self.push(format!("[system] {}", text));
+    }
+
+    /// Write one JSON event line into this session's dedicated chat log file.
+    /// The file is created on first write for the session (timestamped name chosen in App::new).
+    /// All events for one launch of the TUI go into exactly one file so you can inspect or delete per-session.
+    fn log_chat_event(&self, event: &str, turn_id: Option<&str>, role: Option<&str>, binding: Option<&str>, model: Option<&str>, content: &str) {
+        if let Some(path) = &self.session_chat_log {
+            let ts = Utc::now().to_rfc3339();
+            let rec = serde_json::json!({
+                "ts": ts,
+                "event": event,
+                "turn_id": turn_id,
+                "role": role,
+                "binding": binding,
+                "model": model,
+                "content": content,
+            });
+            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{}", rec);
+            }
+        }
     }
 
     fn update_status(&mut self) {
@@ -403,6 +531,48 @@ impl App {
             String::new()
         };
         self.status_line = format!("Anvil — {}  |  {}{}", proj, stage, ctx);
+    }
+
+    /// Poll nvidia-smi (if present) for current GPU util + VRAM.
+    /// Safe to call often; clears on any failure so the UI simply omits the GPU box.
+    fn refresh_gpu_stats(&mut self) {
+        let output = match std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=name,utilization.gpu,memory.used,memory.total,memory.free",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => {
+                self.gpu_stats.clear();
+                return;
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut stats = vec![];
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let cols: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+            if cols.len() < 5 {
+                continue;
+            }
+            let name = cols[0].to_owned();
+            let util = cols[1].parse::<u8>().unwrap_or(0).clamp(0, 100);
+            let total: u32 = cols[3].parse().unwrap_or(0);
+            let free: u32 = cols[4].parse().unwrap_or(0);
+            stats.push(GpuStat {
+                name,
+                util,
+                mem_free: free,
+                mem_total: total,
+            });
+        }
+        self.gpu_stats = stats;
     }
 
     /// Include a file (relative to project root) into the active context.
@@ -504,7 +674,7 @@ impl App {
             // R1 / reviewer-a responses are purple.
             (Style::default().fg(ROLE_R1), m)
         } else if m.starts_with("[reviewer-b]") || m.starts_with("[R2]") {
-            // R2 / reviewer-b responses are the blue/green (cyan) mixed color.
+            // R2 / reviewer-b responses use the dedicated bright lime role color.
             (Style::default().fg(ROLE_R2), m)
         } else if m.starts_with("[reviewer") {
             // Generic reviewer prefix fallback.
@@ -613,6 +783,7 @@ impl App {
         } else {
             self.push(format!("[you] {}", trimmed));
         }
+        self.follow_bottom = true;
         let cmd = trimmed.to_lowercase();
 
         // Built-in slash commands for the skeleton (real gates added in later phases)
@@ -760,6 +931,18 @@ impl App {
         if cmd == "/help" || cmd == "?" {
             self.push_system("Keys: Enter=chat (streams), Esc/Ctrl-C/q=quit, s=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
             self.push_system("Context: /include <path>  •  /context  •  /clear-context   (gives the model real file contents for better suggestions after gates)");
+            self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");
+            return;
+        }
+
+        if cmd == "/ps" || cmd == "/ollama" || cmd == "/loaded" || cmd == "/ollama-ps" {
+            self.show_ollama_loaded();
+            return;
+        }
+
+        if cmd.starts_with("/unload") {
+            let arg = cmd.strip_prefix("/unload").unwrap_or("").trim().to_string();
+            self.unload_ollama_models(&arg);
             return;
         }
 
@@ -801,11 +984,75 @@ impl App {
                 base_url: Some("http://localhost:11434/v1".to_string()),
                 credential: CredentialRef::None,
                 extra: Default::default(),
+                keep_alive: Some("30s".to_string()),
             },
         );
         save_config(&self.root, &cfg)?;
         self.cfg = load_config(&self.root).ok();
         Ok(())
+    }
+
+    /// Show currently loaded Ollama models (with VRAM sizes if reported).
+    /// Helps when you have multiple role models (coder + R1 + R2) and VRAM is filling up.
+    fn show_ollama_loaded(&mut self) {
+        if let Some(rt) = &self.runtime {
+            match rt.block_on(self.llm.list_ollama_ps()) {
+                Ok(models) if !models.is_empty() => {
+                    self.push_system("Ollama loaded models (from /api/ps):");
+                    for m in &models {
+                        let v = if m.size_vram > 0 {
+                            format!("{:.1} GB VRAM", m.size_vram as f64 / 1_000_000_000.0)
+                        } else if m.size > 0 {
+                            format!("{:.1} GB", m.size as f64 / 1_000_000_000.0)
+                        } else {
+                            "size unknown".to_string()
+                        };
+                        self.push_system(&format!("  • {} — {}", m.name, v));
+                    }
+                    self.push_system("Tip: /unload or /unload <exact-model-tag> to free VRAM immediately. New calls default to 30s keep-alive for local Ollama.");
+                }
+                Ok(_) => {
+                    self.push_system("No models currently loaded in Ollama (api/ps empty).");
+                }
+                Err(e) => {
+                    self.push_system(&format!("Could not reach Ollama /api/ps: {}", e));
+                }
+            }
+        } else {
+            self.push_system("No runtime available for Ollama query.");
+        }
+    }
+
+    /// Unload one or all models from Ollama to free VRAM.
+    /// With no arg: unloads everything currently reported by /api/ps.
+    /// With arg: unloads the exact model name you pass (use the full tag from /ps).
+    fn unload_ollama_models(&mut self, specific: &str) {
+        if let Some(rt) = &self.runtime {
+            if !specific.trim().is_empty() {
+                let _ = rt.block_on(self.llm.ollama_unload(specific));
+                self.push_system(&format!("Requested unload for '{}'. (Ollama will drop it from VRAM.)", specific));
+                // Give nvidia-smi a moment on next refresh
+                self.refresh_gpu_stats();
+                return;
+            }
+
+            // No arg: unload everything that is currently loaded.
+            match rt.block_on(self.llm.list_ollama_ps()) {
+                Ok(models) if !models.is_empty() => {
+                    for m in &models {
+                        let _ = rt.block_on(self.llm.ollama_unload(&m.name));
+                    }
+                    self.push_system(&format!("Unloaded {} model(s). VRAM should be freeing up.", models.len()));
+                    self.refresh_gpu_stats();
+                }
+                Ok(_) => {
+                    self.push_system("Nothing to unload (no models reported by Ollama).");
+                }
+                Err(e) => {
+                    self.push_system(&format!("Could not list for unload: {}", e));
+                }
+            }
+        }
     }
 
     /// Entry point for the improved Quick local Ollama first-run experience.
@@ -867,7 +1114,7 @@ impl App {
         self.update_status();
 
         self.push_system("Local Ollama provider added (http://localhost:11434/v1, no key).");
-        self.push_system("Scroll ↑↓ and Enter to choose your model for CODER (blue). You will then pick for R1 (purple) and R2 (cyan).");
+        self.push_system("Scroll ↑↓ and Enter to choose your model for CODER (blue). You will then pick for R1 (purple) and R2 (lime).");
         self.push_system("This keeps the quick path fast while letting you use exactly the tags you have pulled.");
     }
 
@@ -886,10 +1133,244 @@ impl App {
         self.push_system(&format!("Now pick for {} (scroll and Enter).", display));
     }
 
+    /// For local Ollama (detected by base_url or provider name), fetch the *live* tags via
+    /// the same probe the quick setup uses. For any other configured openai_compat / openai /
+    /// azure_openai provider (xAI, Groq, OpenAI, Together, custom gateways, etc.) we call its
+    /// /models endpoint (authenticated via the provider's credential) so the role assignment
+    /// and "add model" pickers show the provider's current actual catalog instead of a stale
+    /// static list. Always falls back to models_for_connection static suggestions on failure,
+    /// missing base, no runtime, or non-compat provider types (anthropic/google keep their statics).
+    /// When falling back for a remote provider we emit a visible [system] note so you can see
+    /// why the live list wasn't used (bad/missing key, endpoint returned nothing, network, etc.).
+    fn live_or_static_models_for_provider(&mut self, prov_name: &str, ptype: &str, base_url: Option<&str>) -> Vec<String> {
+        let base = base_url.unwrap_or("");
+        let is_local_ollama = base.contains("11434") || prov_name.to_lowercase().contains("ollama");
+        if is_local_ollama {
+            if let Some(rt) = &self.runtime {
+                match rt.block_on(self.llm.list_ollama_models()) {
+                    Ok(m) if !m.is_empty() => return m,
+                    _ => {}
+                }
+            }
+        } else if ptype == "openai_compat" || ptype == "openai" || ptype.starts_with("azure") {
+            // Live pull for any set-up openai-compat provider (the key case for xAI etc.).
+            if let Some(cfg) = &self.cfg {
+                if let Some(conn) = cfg.providers.get(prov_name) {
+                    let b = conn.base_url.as_deref().unwrap_or(base).trim();
+                    if !b.is_empty() {
+                        match self.llm.get_credential(prov_name, conn) {
+                            Ok(key) => {
+                                if let Some(rt) = &self.runtime {
+                                    match rt.block_on(self.llm.list_openai_compat_models(b, &key)) {
+                                        Ok(m) if !m.is_empty() => return m,
+                                        Ok(_) => {
+                                            self.push_system(&format!("[models] '{}' live /models returned no models — using built-in suggestions.", prov_name));
+                                        }
+                                        Err(e) => {
+                                            self.push_system(&format!("[models] Live list error for '{}': {} (using suggestions)", prov_name, e));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.push_system(&format!("[models] Could not get credential for '{}' ({}). Live model list skipped.", prov_name, e));
+                            }
+                        }
+                    } else {
+                        self.push_system(&format!("[models] Provider '{}' has no base_url configured; skipping live model fetch.", prov_name));
+                    }
+                }
+            }
+        }
+        models_for_connection(ptype, base_url)
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Returns true if the user has already configured at least one connection
+    /// that appears to correspond to this provider preset (by name containing the
+    /// suggested key, by type for strong-typed presets, or by base_url signature
+    /// for well-known local endpoints like Ollama). Used to show a green check
+    /// in the "Add / update a provider connection" list.
+    fn is_provider_preset_configured(&self, display_name: &str, suggested_name: &str, ptype: &str) -> bool {
+        let Some(cfg) = &self.cfg else { return false; };
+        if suggested_name == "custom" {
+            return false;
+        }
+        let s_lower = suggested_name.to_lowercase();
+        let d_lower = display_name.to_lowercase();
+        cfg.providers.iter().any(|(name, conn)| {
+            let n = name.to_lowercase();
+            // Name contains suggested (covers "local-ollama", "my-groq", "prod-anthropic" etc.)
+            if n == s_lower || n.contains(&s_lower) || s_lower.contains(&n) {
+                return true;
+            }
+            if n == d_lower || n.contains(&d_lower.replace(" (local)", "").replace(" (", "").replace(")", "").replace(" ", "")) {
+                return true;
+            }
+            // Strong type match for non-openai_compat presets (e.g. "anthropic", "google", "azure_openai")
+            if conn.r#type == ptype && ptype != "openai_compat" {
+                return true;
+            }
+            // Distinctive localhost ports for local openai_compat presets
+            let base = conn.base_url.as_deref().unwrap_or("");
+            if suggested_name == "ollama" && base.contains("11434") {
+                return true;
+            }
+            if suggested_name == "lmstudio" && base.contains("1234") {
+                return true;
+            }
+            false
+        })
+    }
+
+    /// Build the list of choices shown when assigning a role (coder / reviewer-R1 / reviewer-R2).
+    /// Now discovers *all* models from *all* configured providers (using live /models fetch for
+    /// any openai_compat provider that is set up — xAI, Groq, OpenAI, Together, Ollama, custom etc. —
+    /// and live tags for local Ollama; static suggestions only as last-resort fallback).
+    /// Entries are grouped by provider (for visual separation) and each provider gets its own
+    /// consistent color in the list. Plain binding nicknames (e.g. from quick setup) are included
+    /// as a fallback at the end. Picking a model that has no binding yet auto-creates one using
+    /// the correct provider.
+    fn build_available_bindings_for_roles(&mut self) -> Vec<String> {
+        let mut choices: Vec<String> = vec![];
+
+        // Snapshot providers + existing bindings first. This ends the &self.cfg borrow
+        // before we do any live model fetches (which require &mut self).
+        let (provider_infos, binding_keys): (Vec<(String, String, Option<String>)>, Vec<String>) =
+            if let Some(cfg) = &self.cfg {
+                let provs = cfg.providers.iter()
+                    .map(|(name, conn)| (name.clone(), conn.r#type.clone(), conn.base_url.clone()))
+                    .collect();
+                let binds = cfg.model_bindings.keys().cloned().collect();
+                (provs, binds)
+            } else {
+                (vec![], vec![])
+            };
+
+        if !provider_infos.is_empty() {
+            // Collect models from every configured provider (live for Ollama-compatible,
+            // static suggestions for others). Group by provider (sorted for stable order)
+            // so the list visually separates models by their source provider.
+            let mut by_prov: Vec<(String, Vec<String>)> = provider_infos
+                .into_iter()
+                .map(|(name, ptype, base)| {
+                    let mods = self.live_or_static_models_for_provider(
+                        &name,
+                        &ptype,
+                        base.as_deref(),
+                    );
+                    (name, mods)
+                })
+                .collect();
+            by_prov.sort_by(|a, b| a.0.cmp(&b.0));
+
+            for (prov, models) in by_prov {
+                for m in models {
+                    // Encode provider in the choice string so render can color by provider
+                    // and the selection handler can auto-bind to the correct provider.
+                    choices.push(format!("{}  [{}]", m, prov));
+                }
+            }
+        }
+
+        // Include any existing binding keys (custom nicknames like "local-coder" from quick setup,
+        // or ad-hoc names) that aren't already represented by a direct model entry above.
+        // These go at the end; primary content is the per-provider models.
+        for bname in binding_keys {
+            let already = choices.iter().any(|c| {
+                c == &bname || c.starts_with(&format!("{}  [", bname))
+            });
+            if !already {
+                choices.push(bname);
+            }
+        }
+
+        choices
+    }
+
     fn is_configured(&self) -> bool {
         self.cfg
             .as_ref()
             .map_or(false, |c| c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some())
+    }
+
+    /// Parse a choice string from the role assignment list (which may be a plain binding
+    /// nickname or an encoded "model  [provider]" entry) into (binding_name, provider, model).
+    fn parse_role_choice(&self, choice: &str) -> (String, String, String) {
+        let trimmed = choice.trim();
+        if let Some(start) = trimmed.find('[') {
+            if let Some(end_rel) = trimmed[start..].find(']') {
+                let end = start + end_rel;
+                let model = trimmed[..start].trim().to_string();
+                let prov = trimmed[start + 1..end].trim().to_string();
+                if !model.is_empty() && !prov.is_empty() {
+                    // For encoded entries, use the short model as the binding key (consistent
+                    // with prior live-tag and "add a model" behavior) and the indicated provider.
+                    return (model.clone(), prov, model);
+                }
+            }
+        }
+
+        // Plain binding name (existing nickname or legacy entry). Use it as-is for binding/model,
+        // and look up (or guess) the provider so auto-register would use the right one if needed.
+        let prov = if let Some(cfg) = &self.cfg {
+            if let Some(b) = cfg.model_bindings.get(trimmed) {
+                b.provider.clone()
+            } else if cfg.providers.contains_key("local-ollama") {
+                "local-ollama".to_string()
+            } else if let Some(first) = cfg.providers.keys().next() {
+                first.clone()
+            } else {
+                "local-ollama".to_string()
+            }
+        } else {
+            "local-ollama".to_string()
+        };
+        (trimmed.to_string(), prov, trimmed.to_string())
+    }
+
+    fn extract_provider_for_choice(&self, choice: &str) -> String {
+        if let Some(start) = choice.find('[') {
+            if let Some(end_rel) = choice[start..].find(']') {
+                let p = choice[start + 1..start + end_rel].trim();
+                if !p.is_empty() {
+                    return p.to_string();
+                }
+            }
+        }
+        if let Some(cfg) = &self.cfg {
+            if let Some(b) = cfg.model_bindings.get(choice) {
+                return b.provider.clone();
+            }
+        }
+        "unknown".to_string()
+    }
+
+    fn color_for_provider(&self, prov: &str) -> Color {
+        if prov == "unknown" || prov.is_empty() {
+            return Color::White;
+        }
+        const PALETTE: &[Color] = &[
+            Color::Cyan,
+            Color::LightGreen,
+            Color::LightCyan,
+            Color::Yellow,
+            Color::LightMagenta,
+            Color::Blue,
+            Color::Green,
+            Color::LightRed,
+            Color::Rgb(255, 165, 0),   // orange
+            Color::Rgb(180, 100, 255), // distinct purple-ish
+        ];
+        // Stable hash on provider name so the same provider always gets the same color.
+        let mut h: u32 = 2166136261;
+        for &b in prov.as_bytes() {
+            h ^= b as u32;
+            h = h.wrapping_mul(16777619);
+        }
+        PALETTE[(h as usize) % PALETTE.len()]
     }
 
     /// Send user text as a real chat turn to the "planner" role (falling back to coder).
@@ -918,10 +1399,10 @@ impl App {
             }
         };
 
-        let api_key = match self.llm.get_credential(binding_name, provider) {
+        let api_key = match self.llm.get_credential(&binding.provider, provider) {
             Ok(k) => k,
             Err(e) => {
-                self.push_system(&format!("Credential error for {}: {}", binding_name, e));
+                self.push_system(&format!("Credential error for binding '{}' (provider '{}'): {}", binding_name, binding.provider, e));
                 self.push_system("For local providers (Ollama etc.) use the quick setup or /config and pick 'No authentication' / CredentialRef::None. Real providers need a key in the keyring or a valid env var.");
                 return;
             }
@@ -929,18 +1410,32 @@ impl App {
 
         // Clone what we need for the async task + the UI prefix *before* any mutable calls on self.
         // This releases the immutable borrow on self.cfg / binding / provider.
+        let binding_name = binding_name.to_string();
         let model = binding.model.clone();
         let conn_for_task = provider.clone();
         let key_for_task = api_key.clone();
 
+        // Per-turn correlation id for the jsonl log. All user / deltas / wire-full / ui-final for this exchange share it.
+        let turn_id = Uuid::new_v4().to_string();
+        self.current_turn_id = Some(turn_id.clone());
+        self.current_role = Some(role.to_string());
+        self.current_binding = Some(binding_name.clone());
+        self.current_model = Some(model.clone());
+
+        // Log the human input that started the turn (raw, as typed). Context augmentation is logged separately below as user_sent.
+        self.log_chat_event("user", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), text);
+
         // Create the (unbounded) channel. The receiver lives in the App; the sender is moved into the spawned task.
         let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let tx_for_full = tx.clone();
         self.llm_rx = Some(rx);
 
         // Start the visible streaming line with the role prefix (tokens appended live to this entry).
         // Model name is not shown here (kept only in the top header bar for CODER/R1/R2).
         let prefix = format!("[{}] ", role);
-        self.push(prefix);
+        self.push(prefix.clone());
+        self.follow_bottom = true;
+        self.log_chat_event("assistant_begin", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), &prefix);
 
         // Spawn the actual streaming work on our runtime so the TUI loop is not blocked.
         if let Some(rt) = &self.runtime {
@@ -978,12 +1473,22 @@ impl App {
                 user.push_str("Use the above file contents to give accurate, grounded answers and concrete code suggestions.");
             }
 
+            // Log the exact system + (augmented) user that will be sent over the wire. Useful for retrieval and to diagnose prompt issues.
+            self.log_chat_event("system", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), &system);
+            self.log_chat_event("user_sent", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), &user);
+
             rt.spawn(async move {
                 // The tx is consumed by the call; when the future ends the sender is dropped and
                 // the receiver in the UI loop will observe disconnect (stream finished).
-                let _ = llm
+                let res = llm
                     .chat_stream_to_channel(&conn_for_task, &model, &key_for_task, &system, &user, tx)
                     .await;
+                if let Ok(full) = res {
+                    // Send the *exact* full string returned by the SSE handler (authoritative wire response).
+                    // Drain will log it under "assistant_full_wire" for chopping diagnosis (compare to concat of deltas and to final_ui)
+                    // but will NOT append this to the visible message (the incremental deltas already built it).
+                    let _ = tx_for_full.send(format!("[llm-full-wire]{}", full));
+                }
             });
         } else {
             self.push_system("(internal) no runtime available for LLM task");
@@ -1014,6 +1519,12 @@ impl App {
             }
         }
 
+        // Snapshot turn info so we can attribute every delta/full/final even as we mutate self.
+        let turn = self.current_turn_id.clone();
+        let role = self.current_role.clone();
+        let binding = self.current_binding.clone();
+        let model = self.current_model.clone();
+
         for delta in deltas {
             // Special handling for errors injected by the streaming layer (so the user
             // sees *why* there was no reply, e.g. Ollama not running, model not pulled,
@@ -1032,10 +1543,22 @@ impl App {
                     .trim_start_matches(": ")
                     .trim_start_matches(' ')
                     .to_string();
+                self.log_chat_event("error", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), &clean);
                 self.push_system(&format!("model error: {}", clean));
                 changed = true;
                 continue;
             }
+
+            if let Some(wire) = delta.strip_prefix("[llm-full-wire]") {
+                // Authoritative full text returned by the llm layer (concat of everything it parsed + sent over the channel).
+                // Logged for comparison against the individual deltas (to detect SSE buffer remnant loss etc) and against final_ui.
+                // Never appended to the visible chat line (deltas already produced the same content).
+                self.log_chat_event("assistant_full_wire", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), wire);
+                continue;
+            }
+
+            // Raw chunk as it arrived from the provider (via SSE parse in llm.rs). Timestamped in the jsonl.
+            self.log_chat_event("assistant_delta", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), &delta);
 
             if let Some(last) = self.messages.last_mut() {
                 last.push_str(&delta);
@@ -1048,11 +1571,24 @@ impl App {
             // Clear the receiver so we don't keep checking a dead channel.
             self.llm_rx = None;
             // Ensure the line ends neatly if the model didn't send a trailing newline.
-            if let Some(last) = self.messages.last_mut() {
-                if !last.ends_with('\n') {
-                    last.push('\n');
+            // Ensure trailing newline on the stored message (original behavior).
+            {
+                if let Some(last) = self.messages.last_mut() {
+                    if !last.ends_with('\n') {
+                        last.push('\n');
+                    }
                 }
             }
+            // Log the final UI string for the turn. We take a fresh immutable borrow here so it doesn't overlap
+            // with the previous mutable borrow from last_mut() when calling the &self logging method.
+            if let Some(last) = self.messages.last() {
+                self.log_chat_event("assistant_final_ui", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), last);
+            }
+            // Clear turn correlation so next chat gets a fresh id.
+            self.current_turn_id = None;
+            self.current_role = None;
+            self.current_binding = None;
+            self.current_model = None;
             changed = true;
         }
 
@@ -1194,52 +1730,56 @@ impl App {
     }
 
     fn populate_main_menu(&mut self) {
-        // Probe (and cache) *before* we take a &mut borrow on the wizard, to satisfy borrow checker.
-        let ollama_here = if self.first_run { self.is_ollama_available() } else { false };
+        // Always probe (cached) so that after initial quick setup users can still easily
+        // re-enter the live model picker to change which pulled tags are used for CODER/R1/R2.
+        let ollama_here = self.is_ollama_available();
 
         if let Some(w) = &mut self.config_wizard {
             w.step = WizardStep::MainMenu;
             if self.first_run {
                 if ollama_here {
-                    // Only present the Quick Ollama option when we can actually reach a running Ollama.
-                    // This avoids confusing new users who don't have it installed/running.
                     w.list_items = vec![
-                        "1. Quick local Ollama setup (recommended first try — no keys, ~10 seconds)".to_string(),
-                        "2. Add / update a provider connection (Anthropic, OpenAI, xAI, Google, Azure, AWS, Groq, Gradient, Ollama, ...)".to_string(),
-                        "3. Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
-                        "4. Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
-                        "5. Show current configuration".to_string(),
-                        "6. Finish & return to chat".to_string(),
-                    ];
-                    w.list_title = "First-time setup — ↑↓ to the top item then Enter (or just type 1). This is the simplest on-ramp.".to_string();
-                } else {
-                    // No Ollama probe success → do not offer the quick item at all.
-                    w.list_items = vec![
-                        "1. Add / update a provider connection (Anthropic, OpenAI, xAI, Google, Azure, AWS, Groq, Gradient, Ollama, ...)".to_string(),
-                        "2. Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
-                        "3. Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
+                        "1. Quick local Ollama setup (pick models for CODER / R1 / R2 from live `ollama list`)".to_string(),
+                        "2. Add / update a provider connection (Anthropic, OpenAI, xAI, Google, Azure, AWS, Groq, Gradient, local, custom, ...)".to_string(),
+                        "3. Assign roles  (coder / reviewer-R1 / reviewer-R2)".to_string(),
                         "4. Show current configuration".to_string(),
                         "5. Finish & return to chat".to_string(),
                     ];
-                    w.list_title = "First-time setup — Ollama not detected on :11434. Pick 1 to add any provider (including local Ollama later).".to_string();
+                    w.list_title = "First-time setup — ↑↓ to the top item then Enter (or just type 1). This is the simplest on-ramp.".to_string();
+                } else {
+                    w.list_items = vec![
+                        "1. Add / update a provider connection (Anthropic, OpenAI, xAI, Google, Azure, AWS, Groq, Gradient, local, custom, ...)".to_string(),
+                        "2. Assign roles  (coder / reviewer-R1 / reviewer-R2)".to_string(),
+                        "3. Show current configuration".to_string(),
+                        "4. Finish & return to chat".to_string(),
+                    ];
+                    w.list_title = "First-time setup — Ollama not detected on :11434. Pick 1 to add any provider (including local providers later).".to_string();
                 }
                 w.list_selected = 0;
             } else {
-                w.list_items = vec![
+                let mut items = vec![];
+                if ollama_here {
+                    items.push("Quick local Ollama — re-pick / change models for CODER, R1, R2 (live from what you have pulled)".to_string());
+                }
+                items.extend([
                     "Add / update a provider connection".to_string(),
-                    "Add a model  (choose a provider + model ID, give it a nickname)".to_string(),
-                    "Assign roles  (coder / reviewer-a / reviewer-b)".to_string(),
+                    "Assign roles  (coder / reviewer-R1 / reviewer-R2)".to_string(),
                     "Show current configuration".to_string(),
                     "Finish & return to chat".to_string(),
-                ];
+                ]);
+                w.list_items = items;
                 w.list_selected = 0;
-                w.list_title = "What would you like to do? (↑↓ Enter)".to_string();
+                w.list_title = if ollama_here {
+                    "Config"
+                } else {
+                    "What would you like to do? (↑↓ Enter)"
+                }.to_string();
             }
         }
         if self.first_run {
             self.push_system("Main menu — first-run mode. Pick the top item (or arrow + Enter).");
         } else {
-            self.push_system("Main menu — use arrows then Enter, or type a number 1-5.");
+            self.push_system("Main menu — use arrows then Enter, or type a number / keywords.");
         }
     }
 
@@ -1273,23 +1813,25 @@ impl App {
         match &self.config_wizard.as_ref().map(|w| w.step.clone()) {
             Some(WizardStep::MainMenu) => {
                 let s = effective.trim().to_lowercase();
-                // First-run Quick Ollama (only shown if probe says Ollama is reachable).
-                // It seeds the provider then switches the wizard into live model-list pickers
-                // for CODER (blue) → R1 (purple) → R2 (cyan). No auto-finish until picks complete.
-                if self.first_run && (s.contains("quick") || s.contains("ollama")) {
+                // Quick local Ollama (live model list) — available on first run and later so users
+                // can re-pick different tags for the roles without going through manual add+assign.
+                if s.contains("quick local ollama") || s.contains("re-pick / change models") {
                     self.start_quick_ollama_setup();
-                    // The picker steps will call finish_config_wizard() themselves after the third choice.
-                } else if (s == "1" || s == "2") || s.contains("provider") {
-                    // Covers normal (provider=1) and first-run (provider=2) layouts.
+                    // The picker steps will call finish_config_wizard() themselves after the third choice
+                    // (or update the local-coder/local-r1/local-r2 bindings on re-runs).
+                } else if (s == "1" || s == "2") || s.contains("add / update a provider") || s.contains("provider connection") || s.contains("provider") {
+                    // Covers first-run layouts (provider at 1 or 2 depending on Ollama presence).
+                    // Uses distinctive phrases from the actual menu item labels (list selection gives "1. Add..." or "Add / update...").
                     self.start_add_provider();
-                } else if (s == "2" || s == "3") || s.starts_with("add") || s.contains("binding") {
+                } else if s.starts_with("add") || s.contains("binding") || s.contains("model") {
+                    // Hidden keyword access to full "add model for provider" flow (no longer listed in main menu).
                     self.start_add_binding(None);
-                } else if (s == "3" || s == "4") || s.contains("role") || s.contains("assign") {
+                } else if (s == "2" || s == "3") || s.contains("role") || s.contains("assign") {
                     self.start_role_assignment();
-                } else if (s == "4" || s == "5") || s.contains("show") || s.contains("current") {
+                } else if (s == "3" || s == "4") || s.contains("show") || s.contains("current") {
                     self.show_current_config();
                     self.populate_main_menu();
-                } else if (s == "5" || s == "6") || s.contains("finish") || s.contains("return") || s.contains("done") {
+                } else if (s == "4" || s == "5") || s.contains("finish") || s.contains("return") || s.contains("done") {
                     self.finish_config_wizard();
                 } else {
                     self.push_system("Please choose a number or use the arrow keys + Enter on the list.");
@@ -1374,7 +1916,8 @@ impl App {
 
             Some(WizardStep::CredentialKind) => {
                 let kind = effective.to_lowercase();
-                if kind.contains("keyring") || kind == "1" {
+                if kind.contains("keyring") || kind == "3" {
+                    // Keyring is last / advanced because it has been unreliable for some users on Windows.
                     if let Some(w) = &mut self.config_wizard {
                         w.cred_kind = Some("keyring".to_string());
                         w.step = WizardStep::ApiKeySecret;
@@ -1382,9 +1925,9 @@ impl App {
                         w.list_title.clear();
                     }
                     self.input_secret = true;
-                    self.push_system("Using OS keyring (recommended).");
+                    self.push_system("Using OS keyring (may not be readable on all Windows setups).");
                     self.push_system("Paste or type the API key / token now (input will be hidden):");
-                } else if kind.contains("no auth") || kind.contains("none") || kind == "3" {
+                } else if kind.contains("no auth") || kind.contains("none") || kind == "2" {
                     if let Some(w) = &mut self.config_wizard {
                         w.cred_kind = Some("none".to_string());
                         w.list_items.clear();
@@ -1393,14 +1936,17 @@ impl App {
                     self.push_system("No authentication required for this provider.");
                     self.finish_add_provider();
                 } else {
+                    // Recommended path (1): env var. Route to secret paste so we can auto-capture the value,
+                    // set it in the process env immediately, derive a conventional name, and print persistence help.
                     if let Some(w) = &mut self.config_wizard {
                         w.cred_kind = Some("env".to_string());
-                        w.step = WizardStep::EnvVarName;
+                        w.step = WizardStep::ApiKeySecret;
                         w.list_items.clear();
                         w.list_title.clear();
                     }
-                    self.push_system("Using environment variable.");
-                    self.push_system("Enter the environment variable name (e.g. ANTHROPIC_API_KEY):");
+                    self.input_secret = true;
+                    self.push_system("Using environment variable (auto-captured from the key you paste).");
+                    self.push_system("Paste or type the API key / token now (input will be hidden):");
                 }
             }
 
@@ -1437,11 +1983,16 @@ impl App {
                     return;
                 }
                 // Look up provider connection to derive known model IDs (before mutable borrow).
-                let model_opts: Vec<String> = if let Some(cfg) = &self.cfg {
-                    if let Some(conn) = cfg.providers.get(prov) {
-                        models_for_connection(&conn.r#type, conn.base_url.as_deref())
-                            .iter().map(|s| s.to_string()).collect()
-                    } else { vec![] }
+                // For local Ollama: live tags. For xAI / Groq / OpenAI / any openai_compat provider
+                // that is already set up: live /models pull (so the picker shows the provider's real
+                // current catalog rather than a hardcoded snapshot).
+                let (ptype_for_live, base_for_live) = if let Some(cfg) = &self.cfg {
+                    cfg.providers.get(prov)
+                        .map(|c| (c.r#type.clone(), c.base_url.clone()))
+                        .unwrap_or_default()
+                } else { (String::new(), None) };
+                let model_opts: Vec<String> = if !prov.is_empty() && !ptype_for_live.is_empty() {
+                    self.live_or_static_models_for_provider(prov, &ptype_for_live, base_for_live.as_deref())
                 } else { vec![] };
                 if let Some(w) = &mut self.config_wizard {
                     w.binding_provider = Some(prov.to_string());
@@ -1504,20 +2055,67 @@ impl App {
             }
 
             Some(WizardStep::RoleAssignment { role }) => {
-                let binding = effective.trim();
-                if binding.is_empty() {
+                let picked = effective.trim();
+                if picked.is_empty() {
                     return;
                 }
 
+                let (binding_name, prov, model) = self.parse_role_choice(picked);
+
+                let mut did_auto_register = false;
                 if let Some(cfg) = &mut self.cfg {
+                    if !cfg.model_bindings.contains_key(&binding_name) {
+                        // Auto-create a binding for a model chosen directly from a provider's
+                        // available list (now supports all providers, not just local-ollama).
+                        // The choice string may encode "model [prov]" so we use the parsed prov.
+                        // (Also keeps the old local-ollama auto-register path working for plain picks.)
+                        if !cfg.providers.contains_key(&prov) {
+                            // As a safety net, ensure a plausible local-ollama entry exists
+                            // (mirrors prior behavior for the very first quick-ollama case).
+                            if prov == "local-ollama" || !cfg.providers.contains_key("local-ollama") {
+                                cfg.providers.insert(
+                                    "local-ollama".to_string(),
+                                    ProviderConnection {
+                                        r#type: "openai_compat".to_string(),
+                                        base_url: Some("http://localhost:11434/v1".to_string()),
+                                        credential: CredentialRef::None,
+                                        extra: Default::default(),
+                                        keep_alive: Some("30s".to_string()),
+                                    },
+                                );
+                            }
+                        }
+                        cfg.model_bindings.insert(
+                            binding_name.clone(),
+                            ModelBinding {
+                                provider: prov.clone(),
+                                model: model.clone(),
+                                note: Some("from role assignment (provider models list)".to_string()),
+                            },
+                        );
+                        did_auto_register = true;
+                    }
+
                     match role.as_str() {
-                        "coder" => cfg.roles.coder = Some(binding.to_string()),
-                        "reviewer_a" => cfg.roles.reviewer_a = Some(binding.to_string()),
-                        "reviewer_b" => cfg.roles.reviewer_b = Some(binding.to_string()),
+                        "coder" => cfg.roles.coder = Some(binding_name.clone()),
+                        "reviewer_a" => cfg.roles.reviewer_a = Some(binding_name.clone()),
+                        "reviewer_b" => cfg.roles.reviewer_b = Some(binding_name.clone()),
                         _ => {}
                     }
                 }
-                self.push_system(&format!("Set {} → {}", role, binding));
+
+                // Borrows on cfg have ended; safe to call other &mut self methods now.
+                self.save_current_config();
+                if did_auto_register {
+                    self.push_system(&format!("✓ Auto-registered model binding '{}' via {}.", binding_name, prov));
+                }
+                let display_role = match role.as_str() {
+                    "coder" => "coder",
+                    "reviewer_a" => "reviewer-R1",
+                    "reviewer_b" => "reviewer-R2",
+                    _ => role,
+                };
+                self.push_system(&format!("Set {} → {}", display_role, binding_name));
 
                 let next_role = match role.as_str() {
                     "coder" => Some("reviewer_a".to_string()),
@@ -1595,11 +2193,11 @@ impl App {
                 if role == "coder" {
                     self.enter_next_quick_pick("reviewer_a", "R1 (purple)");
                 } else if role == "reviewer_a" {
-                    self.enter_next_quick_pick("reviewer_b", "R2 (cyan)");
+                    self.enter_next_quick_pick("reviewer_b", "R2 (lime)");
                 } else {
                     // All three chosen — finish the quick flow.
                     self.push_system("Quick setup complete!");
-                    self.push_system("CODER (blue) • R1 (purple) • R2 (cyan) are now assigned from your live Ollama models.");
+                    self.push_system("CODER (blue) • R1 (purple) • R2 (lime) are now assigned from your live Ollama models.");
                     self.push_system("Type to chat, or run /plan for the full R1+R2 gated workflow.");
                     self.finish_config_wizard();
                 }
@@ -1630,9 +2228,9 @@ impl App {
         if let Some(w) = &mut self.config_wizard {
             w.step = WizardStep::CredentialKind;
             w.list_items = vec![
-                "1. Store in OS keyring (recommended — secure, works everywhere)".to_string(),
-                "2. Environment variable (you will set the var yourself)".to_string(),
-                "3. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string(),
+                "1. Environment variable (recommended — paste the key once; we auto-set e.g. XAI_API_KEY for this session + print persistence steps)".to_string(),
+                "2. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string(),
+                "3. OS keyring (advanced; known to be unreliable on some Windows Credential Manager setups — you may see 'No matching entry')".to_string(),
             ];
             w.list_selected = 0;
             w.list_title = "How will the API key be provided?".to_string();
@@ -1660,32 +2258,83 @@ impl App {
             return;
         }
 
-        let cred = if cred_kind.as_deref() == Some("keyring") {
+        // When the user pastes a key we *always* go through the env path (std::env + CredentialRef::Env).
+        // This is the only reliable cross-platform mechanism:
+        //   - Works in PowerShell, cmd, bash, zsh, fish, WSL, Git Bash, etc.
+        //   - Works in CI (GitHub Actions secrets, GitLab CI vars, etc.)
+        //   - Works in Docker, systemd, launchd, etc. (just pass the var in the environment).
+        //   - We also write the secret to .anvil/.env so that "future anvil runs from this
+        //     project directory just work" with zero shell profile changes on any OS.
+        //
+        // The var *name* (e.g. XAI_API_KEY) is stored in anvil.toml. The secret value lives
+        // only in the OS environment or the local .anvil/.env file.
+        let (cred, auto_var) = if let Some(key) = &api_key {
+            let var_name = suggest_env_var_name(&name, base.as_deref());
+
+            // This does the set_var for the running process + writes/updates .anvil/.env
+            // (and tries to chmod 600 on Unix). Future calls to load_local_env (done at the
+            // top of run_ui, run_talk, run_plan, run_phase_*) will pick it up.
+            set_local_env_var(&self.root, &var_name, key);
+
+            // Best-effort dual write to keyring (backup only; we will use the Env ref below).
+            if cred_kind.as_deref() == Some("keyring") {
+                let entry_name = format!("provider:{}", name);
+                if let Ok(entry) = keyring::Entry::new("anvil", &entry_name) {
+                    if entry.set_password(key).is_ok() {
+                        self.push_system("  (Also stored a copy in the OS keyring as a bonus.)");
+                    }
+                }
+            }
+
+            // Cross-platform explanation printed right after the user pastes the key.
+            self.push_system(&format!("✓ Key captured as environment variable {} (current session).", var_name));
+            self.push_system("  We also wrote it to .anvil/.env (plain text — keep the .anvil directory private).");
+            self.push_system("  Any future `anvil` run from this project directory will auto-load it (no shell config required).");
+            self.push_system("");
+            self.push_system("  How this works everywhere (PowerShell, bash, Docker, CI, WSL, macOS, Linux servers...):");
+            self.push_system("    • The *runtime* (std::env::var + set_var) is the same on every OS and shell.");
+            self.push_system("    • .anvil/.env is loaded automatically by anvil on every start (TUI + all CLI commands).");
+            self.push_system("    • For global use or when running anvil from other directories, set the variable");
+            self.push_system("      in your normal environment:");
+            self.push_system(&format!("        Windows (PowerShell):  $env:{} = \"<key>\"     (or use setx)", var_name));
+            self.push_system(&format!("        Windows (cmd):         set {}=\"<key>\"", var_name));
+            self.push_system(&format!("        Linux / macOS / WSL / Git Bash:   export {}=\"<key>\"", var_name));
+            self.push_system(&format!("        fish:                  set -x {} \"<key>\"", var_name));
+            self.push_system("    • CI / Docker / scripts / systemd: just make sure the variable is present in the");
+            self.push_system("      environment of the process that executes `anvil` (GitHub secrets, -e flags, etc.).");
+            self.push_system("    • The exact same variable names (XAI_API_KEY, OPENAI_API_KEY, ...) are used by");
+            self.push_system("      many other tools, so you can often reuse existing secrets.");
+
+            (CredentialRef::Env { var_name: var_name.clone() }, Some(var_name))
+        } else if cred_kind.as_deref() == Some("keyring") {
             if let Some(key) = &api_key {
                 let entry_name = format!("provider:{}", name);
                 match keyring::Entry::new("anvil", &entry_name) {
                     Ok(entry) => {
                         if let Err(e) = entry.set_password(key) {
                             self.push_system(&format!("Warning: could not store key in keyring: {}", e));
-                        } else {
+                        } else if entry.get_password().is_ok() {
                             self.push_system("✓ Key stored securely in OS keyring.");
+                        } else {
+                            self.push_system("✓ Key passed to OS keyring (readback not confirmed on this Windows setup).");
                         }
                     }
                     Err(e) => {
-                        self.push_system(&format!("Warning: keyring unavailable ({}). Falling back to env var.", e));
+                        self.push_system(&format!("Warning: keyring unavailable ({}).", e));
                     }
                 }
             }
-            CredentialRef::Keyring
+            (CredentialRef::Keyring, None)
         } else if cred_kind.as_deref() == Some("none") {
-            CredentialRef::None
+            (CredentialRef::None, None)
         } else {
-            CredentialRef::Env {
+            (CredentialRef::Env {
                 var_name: env_var.unwrap_or_else(|| "API_KEY".to_string()),
-            }
+            }, None)
         };
 
-        let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
+        let cred = cred;  // for use below
+        let _auto_var = auto_var; // already explained in the messages above
 
         let normalized_type = if ptype.starts_with("openai_compat") {
             "openai_compat".to_string()
@@ -1696,27 +2345,106 @@ impl App {
         } else {
             ptype.clone()
         };
+        let is_remote_compat = normalized_type == "openai_compat" || normalized_type == "openai" || normalized_type.starts_with("azure");
 
-        cfg.providers.insert(
-            name.clone(),
-            ProviderConnection {
-                r#type: normalized_type,
-                base_url: base,
+        {
+            let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
+
+            let mut pc = ProviderConnection {
+                r#type: normalized_type.clone(),
+                base_url: base.clone(),
                 credential: cred,
                 extra: Default::default(),
-            },
-        );
+                keep_alive: None,
+            };
+            // Default a friendly keep-alive for any local Ollama the user adds via the wizard.
+            if let Some(b) = &pc.base_url {
+                if b.contains("11434") || name.to_lowercase().contains("ollama") {
+                    pc.keep_alive = Some("30s".to_string());
+                }
+            }
+            cfg.providers.insert(name.clone(), pc);
+        } // end the get_or_insert borrow
 
         self.save_current_config();
+        // Reload so subsequent &self.cfg borrows in the probe (and any later wizard steps) are clean.
+        self.cfg = load_config(&self.root).ok();
         self.push_system(&format!("✓ Provider '{}' saved.", name));
-        self.push_system("Provider ready. Use 'Add a model' from the menu to register model IDs for this provider.");
+
+        // Proactively try the live /models fetch right after setup so the user gets
+        // immediate feedback whether the dynamic list worked for this provider (especially xAI etc.).
+        // For keyring (or env) we prefer the plaintext `api_key` captured from the wizard step
+        // (the value the user just pasted/typed). This bypasses get_credential/keyring read for
+        // the one-time post-add verification. Windows Credential Manager can report set success
+        // while the entry is not yet visible to a get_password in the same process.
+        // Subsequent "Assign roles" / live_or_static calls still use the normal stored credential path.
+        if is_remote_compat {
+            let b = base.as_deref().unwrap_or("").trim().to_string();
+            let probe_key: Option<String> = if cred_kind.as_deref() == Some("keyring") || cred_kind.as_deref() == Some("env") {
+                api_key.clone().filter(|k| !k.trim().is_empty())
+            } else {
+                None
+            };
+            let note = if let Some(key) = probe_key {
+                // Use the just-entered key directly so the live list succeeds even if keyring readback is flaky right now.
+                if let Some(rt) = &self.runtime {
+                    match rt.block_on(self.llm.list_openai_compat_models(&b, &key)) {
+                        Ok(models) if !models.is_empty() => {
+                            let preview: Vec<String> = models.iter().take(3).cloned().collect();
+                            format!("✓ Live model list for '{}': {} models. Examples: {}  (using just-entered key)", name, models.len(), preview.join(", "))
+                        }
+                        Ok(_) => {
+                            format!("[models] '{}' live /models returned no results (or auth issue). Role/model pickers will use built-in suggestions.", name)
+                        }
+                        Err(e) => {
+                            format!("[models] Error fetching live models for '{}': {} (using suggestions)", name, e)
+                        }
+                    }
+                } else { String::new() }
+            } else if let Some(c) = &self.cfg {
+                // No just-entered key available (e.g. pure env var flow); fall back to normal credential lookup.
+                if let Some(conn) = c.providers.get(&name) {
+                    let bb = conn.base_url.as_deref().unwrap_or(&b).trim().to_string();
+                    if !bb.is_empty() {
+                        match self.llm.get_credential(&name, conn) {
+                            Ok(key) => {
+                                if let Some(rt) = &self.runtime {
+                                    match rt.block_on(self.llm.list_openai_compat_models(&bb, &key)) {
+                                        Ok(models) if !models.is_empty() => {
+                                            let preview: Vec<String> = models.iter().take(3).cloned().collect();
+                                            format!("✓ Live model list for '{}': {} models. Examples: {}", name, models.len(), preview.join(", "))
+                                        }
+                                        Ok(_) => {
+                                            format!("[models] '{}' live /models returned no results (or auth issue). Role/model pickers will use built-in suggestions.", name)
+                                        }
+                                        Err(e) => {
+                                            format!("[models] Error fetching live models for '{}': {} (using suggestions)", name, e)
+                                        }
+                                    }
+                                } else { String::new() }
+                            }
+                            Err(e) => {
+                                format!("[models] Could not read credential for '{}' after add ({}). Live models unavailable.", name, e)
+                            }
+                        }
+                    } else { String::new() }
+                } else { String::new() }
+            } else { String::new() };
+            if !note.is_empty() {
+                self.push_system(&note);
+            }
+        }
+
+        self.push_system("Provider ready. Use 'Assign roles' from the menu to pick from the live list (or built-in suggestions).");
         self.populate_main_menu();
     }
 
     fn start_add_binding(&mut self, preselected_provider: Option<String>) {
-        let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
-
-        if cfg.providers.is_empty() {
+        // Use shared view for the emptiness test so we don't hold a long-lived &mut borrow on .cfg
+        // (which would conflict with later &self calls to live_or_static or &mut wizard).
+        if self.cfg.as_ref().map_or(true, |c| c.providers.is_empty()) {
+            // Match original side-effect: materialize a default cfg if there was none.
+            let _ = self.cfg.get_or_insert_with(AnvilConfig::default);
             self.push_system("No providers configured yet. Add a provider first.");
             self.populate_main_menu();
             return;
@@ -1724,9 +2452,15 @@ impl App {
 
         if let Some(prov) = preselected_provider {
             // Provider is already known — go straight to model selection.
-            let model_opts: Vec<String> = if let Some(conn) = cfg.providers.get(&prov) {
-                models_for_connection(&conn.r#type, conn.base_url.as_deref())
-                    .iter().map(|s| s.to_string()).collect()
+            // Use live fetch for local Ollama (same as the BindingProvider -> ModelName path)
+            // so reconfig after quick setup can surface currently-pulled tags instead of [] .
+            let (ptype_for_live, base_for_live) = if let Some(cfg) = &self.cfg {
+                cfg.providers.get(&prov)
+                    .map(|c| (c.r#type.clone(), c.base_url.clone()))
+                    .unwrap_or_default()
+            } else { (String::new(), None) };
+            let model_opts: Vec<String> = if !prov.is_empty() && !ptype_for_live.is_empty() {
+                self.live_or_static_models_for_provider(&prov, &ptype_for_live, base_for_live.as_deref())
             } else { vec![] };
 
             if let Some(w) = &mut self.config_wizard {
@@ -1753,7 +2487,9 @@ impl App {
             }
         } else {
             // Show the provider list for the user to choose from.
-            let prov_names: Vec<String> = cfg.providers.keys().cloned().collect();
+            let prov_names: Vec<String> = if let Some(cfg) = &self.cfg {
+                cfg.providers.keys().cloned().collect()
+            } else { vec![] };
             if let Some(w) = &mut self.config_wizard {
                 w.step = WizardStep::BindingProvider;
                 w.list_items = prov_names;
@@ -1798,45 +2534,48 @@ impl App {
 
         self.save_current_config();
         self.push_system(&format!("✓ Model '{}' saved via provider '{}'.", model, prov));
-        self.push_system("Use 'Assign roles' from the menu to assign it to coder / reviewer-a / reviewer-b.");
+        self.push_system("Use 'Assign roles' from the menu to assign it to coder / reviewer-R1 / reviewer-R2.");
 
         self.populate_main_menu();
     }
 
     fn start_role_assignment(&mut self) {
-        let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
-        if cfg.model_bindings.is_empty() {
-            self.push_system("No models added yet — add at least one model first (config menu → option 3).");
-            self.populate_main_menu();
-            return;
-        }
+        // Delegate to start_role_list. It now pulls live/static models from *all* configured
+        // providers (grouped + color-coded in the UI) and falls back gracefully with a message
+        // if nothing is available yet.
         self.start_role_list("coder");
     }
 
     fn start_role_list(&mut self, role: &str) {
-        let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
-        let binding_names: Vec<String> = cfg.model_bindings.keys().cloned().collect();
+        let binding_names = self.build_available_bindings_for_roles();
+
+        if binding_names.is_empty() {
+            self.push_system("No models available from configured providers yet — add a provider via Config / 'Assign roles', or use Quick local Ollama setup first.");
+            self.populate_main_menu();
+            return;
+        }
 
         if let Some(w) = &mut self.config_wizard {
             w.step = WizardStep::RoleAssignment { role: role.to_string() };
             w.list_items = binding_names;
             w.list_selected = 0;
             w.current_role = Some(role.to_string());
-            let hint = match role {
-                "reviewer_a" | "reviewer_b" => " — pick a DIFFERENT model than the other reviewer",
-                _ => "",
+            w.list_title = match role {
+                "coder" => "Choose model for coder".to_string(),
+                "reviewer_a" => "Choose model for reviewer-R1".to_string(),
+                "reviewer_b" => "Choose model for reviewer-R2".to_string(),
+                other => format!("Choose model for {}", other),
             };
-            w.list_title = format!("Which model should be the '{}'{}?", role, hint);
         }
 
         let role_desc = match role {
             "coder"      => "coder  (your primary model — used for chat, planning, and code)",
-            "reviewer_a" => "reviewer-a  (first independent review — use a different model than coder)",
-            "reviewer_b" => "reviewer-b  (second independent review — should be a DIFFERENT model than reviewer-a)",
+            "reviewer_a" => "reviewer-R1  (first independent review — use a different model than coder)",
+            "reviewer_b" => "reviewer-R2  (second independent review — should be a DIFFERENT model than reviewer-R1)",
             other        => other,
         };
         self.push_system(&format!("Assigning role: {}", role_desc));
-        self.push_system("Select a model nickname from the list (↑↓ then Enter):");
+        self.push_system("Select a binding or live Ollama tag from the list (↑↓ then Enter):");
     }
 
     fn go_back_in_wizard(&mut self) {
@@ -1898,6 +2637,15 @@ impl App {
             }
         };
 
+        // Snapshot role list (with live models) *before* taking the long &mut borrow on .config_wizard.
+        // The build now performs &mut self live fetches (for the per-provider /models calls), so
+        // we do the snapshot early while no wizard state is mutably borrowed.
+        let role_list_items: Option<Vec<String>> = if matches!(prev, WizardStep::RoleAssignment { .. }) {
+            Some(self.build_available_bindings_for_roles())
+        } else {
+            None
+        };
+
         // Now take a short-lived mutable borrow to apply the back step + update lists/input state.
         if let Some(w) = &mut self.config_wizard {
             w.step = prev;
@@ -1937,14 +2685,21 @@ impl App {
                     }
                 }
                 WizardStep::RoleAssignment { role } => {
-                    let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
-                    w.list_items = cfg.model_bindings.keys().cloned().collect();
+                    // Use the pre-snapshot list (includes live tags) so backing up still offers
+                    // the full set of models for re-assigning roles.
+                    if let Some(items) = &role_list_items {
+                        w.list_items = items.clone();
+                    } else {
+                        w.list_items = vec![];
+                    }
                     w.list_selected = 0;
                     w.current_role = Some(role.clone());
-                    w.list_title = format!(
-                        "Choose binding for role '{}' (make reviewer_a and reviewer_b different)",
-                        role
-                    );
+                    w.list_title = match role.as_str() {
+                        "coder" => "Choose model for coder".to_string(),
+                        "reviewer_a" => "Choose model for reviewer-R1".to_string(),
+                        "reviewer_b" => "Choose model for reviewer-R2".to_string(),
+                        other => format!("Choose model for {}", other),
+                    };
                 }
                 WizardStep::QuickOllamaModelPick { role } => {
                     w.list_items = w.ollama_model_list.clone();
@@ -1955,7 +2710,7 @@ impl App {
                     let display = match role.as_str() {
                         "coder" => "CODER (blue)",
                         "reviewer_a" => "R1 (purple)",
-                        "reviewer_b" => "R2 (cyan)",
+                        "reviewer_b" => "R2 (lime)",
                         _ => role,
                     };
                     w.list_title = format!("Quick local Ollama — pick model for {}:", display);
@@ -2043,7 +2798,12 @@ impl App {
                             _ => &None,
                         };
                         if let Some(name) = assigned {
-                            if let Some(idx) = w.list_items.iter().position(|s| s == name) {
+                            if let Some(idx) = w.list_items.iter().position(|s| {
+                                s == name
+                                    || s.starts_with(name)
+                                    || s.starts_with(&format!("{}  [", name))
+                                    || s.contains(name)
+                            }) {
                                 w.list_selected = idx;
                             }
                         }
@@ -2061,7 +2821,7 @@ impl App {
             let mut out = vec![
                 "--- Current Configuration ---".to_string(),
                 format!(
-                    "Roles: coder={} reviewer_a={} reviewer_b={}",
+                    "Roles: coder={} reviewer-R1={} reviewer-R2={}",
                     cfg.roles.coder.as_deref().unwrap_or("(none)"),
                     cfg.roles.reviewer_a.as_deref().unwrap_or("(none)"),
                     cfg.roles.reviewer_b.as_deref().unwrap_or("(none)")
@@ -2075,7 +2835,8 @@ impl App {
                     CredentialRef::Keyring => "auth=keyring".to_string(),
                     CredentialRef::Env { var_name } => format!("auth=env:{}", var_name),
                 };
-                out.push(format!("  {} (type={}, base={}, {})", name, p.r#type, base, auth));
+                let ka = p.keep_alive.as_deref().map(|k| format!(" keep_alive={}", k)).unwrap_or_default();
+                out.push(format!("  {} (type={}, base={}, {}{})", name, p.r#type, base, auth, ka));
             }
             out.push("Model Bindings:".to_string());
             for (name, b) in &cfg.model_bindings {
@@ -2144,6 +2905,11 @@ fn run_app_loop<B: ratatui::backend::Backend>(
         let _chat = app.drain_llm_stream();
         let _gate = app.drain_gate_events();
         app.anim_tick = app.anim_tick.wrapping_add(1);
+
+        // Live GPU stats ~every 2 seconds (80ms * 25). Cheap and useful for local models.
+        if app.anim_tick % 25 == 0 {
+            app.refresh_gpu_stats();
+        }
 
         terminal.draw(|f| render_ui(f, app))?;
 
@@ -2290,9 +3056,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             return Ok(true);
         }
 
-        KeyCode::Char('s') if app.first_run && key.modifiers.is_empty() && app.input.is_empty() => {
-            // Quick first-run setup. Guarded by Ollama probe (only offered when reachable).
-            // Starts (or switches) the wizard into the live model scroller for CODER/R1/R2 picks.
+        KeyCode::Char('s') if key.modifiers.is_empty() && app.input.is_empty() => {
+            // Quick local Ollama setup / re-setup. Always available (when Ollama reachable) so users
+            // can easily change the models assigned to CODER / R1 / R2 later by re-picking from live tags.
             app.showing_command_palette = false;
             app.start_quick_ollama_setup();
             return Ok(false);
@@ -2352,25 +3118,26 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         }
 
         KeyCode::Up => {
+            app.follow_bottom = false;
             if app.view_offset > 0 {
                 app.view_offset -= 1;
             }
             return Ok(false);
         }
         KeyCode::Down => {
-            if app.view_offset + 1 < app.messages.len() {
-                app.view_offset += 1;
-            }
+            app.follow_bottom = false;
+            app.view_offset = app.view_offset.saturating_add(1);
             return Ok(false);
         }
 
         KeyCode::PageUp => {
+            app.follow_bottom = false;
             app.view_offset = app.view_offset.saturating_sub(10);
             return Ok(false);
         }
         KeyCode::PageDown => {
-            let max = app.messages.len().saturating_sub(1);
-            app.view_offset = (app.view_offset + 10).min(max);
+            app.follow_bottom = false;
+            app.view_offset = app.view_offset.saturating_add(10);
             return Ok(false);
         }
 
@@ -2464,8 +3231,9 @@ fn render_splash(f: &mut Frame, app: &App) {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     // PNG logo — fill the screen, reserving ~10 rows for tagline/version/hint below.
-    let img_max_cols = area.width.saturating_sub(6);
-    let img_max_rows = area.height.saturating_sub(10).max(8);
+    // Make the PNG 1 column and 1 row smaller (in terminal cells) per request.
+    let img_max_cols = area.width.saturating_sub(6).saturating_sub(1);
+    let img_max_rows = area.height.saturating_sub(10).max(8).saturating_sub(1);
     let img_rows = render_png_as_halfblocks(LOGO_BYTES, img_max_cols, img_max_rows);
     if !img_rows.is_empty() {
         lines.extend(img_rows);
@@ -2552,7 +3320,7 @@ fn render_main(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // bordered header — 3 info rows
+            Constraint::Length(7), // bordered header — 5 info rows (taller for GPUs on right + breathing room)
             Constraint::Min(4),    // chat log
             Constraint::Length(4), // bordered input — 2 content rows
         ])
@@ -2568,7 +3336,7 @@ fn render_main(f: &mut Frame, app: &App) {
     render_doc_popup(f, app, chunks[1]);
 }
 
-// ─── Header (3-row info panel) ────────────────────────────────────────────────
+// ─── Header (5-row info panel, top-right column used for per-GPU status) ──────
 
 fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     use ratatui::layout::Rect;
@@ -2610,21 +3378,13 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ]
     };
 
-    let mut row0: Vec<Span<'static>> = vec![
-        Span::styled(
-            " ANVIL ".to_string(),
-            Style::default().fg(Color::Rgb(255, 180, 0)).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("v{}  ", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled("│ ".to_string(), Style::default().fg(Color::Rgb(60, 60, 80))),
-        Span::styled(
-            stage_text,
-            Style::default().fg(stage_color).add_modifier(Modifier::BOLD),
-        ),
-    ];
+    // Row 0 (top of header): stage + streaming + ctx on left.
+    // When GPUs present: right column (top rows) shows 1 GPU per line; left is narrowed.
+    // (The prominent "Anvil vX" with version lives in the orange block title on the border.)
+    let mut row0: Vec<Span<'static>> = vec![Span::styled(
+        stage_text,
+        Style::default().fg(stage_color).add_modifier(Modifier::BOLD),
+    )];
     row0.extend(stream_spans);
     if !app.active_context.is_empty() {
         row0.push(Span::styled(
@@ -2673,20 +3433,54 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
         .title(Span::styled(
-            " ⬡ anvil ",
+            format!(" ⬡ Anvil v{} ", env!("CARGO_PKG_VERSION")),
             Style::default().fg(Color::Rgb(255, 180, 0)).add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    // When GPUs are present we carve out a right column (one GPU per line).
+    // Otherwise left content uses the full inner width (no wasted space).
+    let has_gpus = !app.gpu_stats.is_empty();
+    let right_width: u16 = if has_gpus { 30 } else { 0 };
+    let left_width = inner.width.saturating_sub(right_width);
+
     for (i, spans) in [row0, row1, row2].into_iter().enumerate() {
         let y = inner.y + i as u16;
         if y >= inner.y + inner.height {
             break;
         }
-        let row_area = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        let row_area = Rect {
+            x: inner.x,
+            y,
+            width: left_width,
+            height: 1,
+        };
         f.render_widget(Paragraph::new(Line::from(spans)), row_area);
+    }
+
+    // Live GPU list — each GPU gets its own dedicated line in the top-right column.
+    // With the header expanded to 5 rows we have plenty of vertical room.
+    // Refreshes live ~every 2s via nvidia-smi.
+    if has_gpus {
+        for (i, g) in app.gpu_stats.iter().enumerate() {
+            if i >= 5 {
+                break;
+            }
+            let y = inner.y + i as u16;
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let gpu_spans = render_gpu_line(g, i);
+            let gpu_area = Rect {
+                x: inner.x + left_width,
+                y,
+                width: right_width,
+                height: 1,
+            };
+            f.render_widget(Paragraph::new(Line::from(gpu_spans)), gpu_area);
+        }
     }
 }
 
@@ -2763,6 +3557,73 @@ fn build_phase_progress(app: &App) -> String {
     format!("phases: {}", parts.join(" "))
 }
 
+/// Build the spans for a single GPU's line in the right column (one GPU per line).
+/// Format example: "│ 0:4090  67% 18.2/24.0G"
+/// % is color-coded (green/yellow/red). Shows available/total VRAM.
+fn render_gpu_line(stat: &GpuStat, idx: usize) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = vec![];
+
+    // Subtle column separator so the right GPU list is visually distinct from left content.
+    out.push(Span::styled("│ ", Style::default().fg(Color::Rgb(60, 60, 80))));
+
+    let short = short_gpu_name(&stat.name);
+    out.push(Span::styled(
+        format!("{}:{}", idx, short),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    let util_col = if stat.util >= 85 {
+        Color::Red
+    } else if stat.util >= 50 {
+        Color::Rgb(255, 200, 80)
+    } else {
+        Color::Rgb(90, 200, 130)
+    };
+    out.push(Span::styled(
+        format!("  {}%", stat.util),
+        Style::default().fg(util_col).add_modifier(Modifier::BOLD),
+    ));
+
+    let avail = stat.mem_free as f32 / 1024.0;
+    let tot = stat.mem_total as f32 / 1024.0;
+    out.push(Span::styled(
+        format!(" {:.1}/{:.1}G", avail, tot),
+        Style::default().fg(Color::Gray),
+    ));
+
+    out
+}
+
+fn short_gpu_name(name: &str) -> String {
+    let tokens: Vec<&str> = name.split_whitespace().collect();
+    // Prefer a token containing digits or common accelerator prefixes (last-to-first).
+    for &t in tokens.iter().rev() {
+        let tu = t.to_ascii_uppercase();
+        if tu.chars().any(|c| c.is_ascii_digit())
+            || tu.starts_with('A')
+            || tu.starts_with("MI")
+            || tu.starts_with('H')
+            || tu.len() <= 8
+        {
+            let mut s = t.to_string();
+            if s.len() > 10 {
+                s.truncate(10);
+            }
+            return s;
+        }
+    }
+    tokens
+        .last()
+        .map(|s| {
+            let mut x = s.to_string();
+            if x.len() > 10 {
+                x.truncate(10);
+            }
+            x
+        })
+        .unwrap_or_else(|| "GPU".to_string())
+}
+
 // ─── Chat area ───────────────────────────────────────────────────────────────
 
 fn render_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -2790,22 +3651,36 @@ fn render_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
-    let visible: Vec<Line> = if app.messages.is_empty() {
-        vec![Line::from(Span::styled(
+    let chat = if app.messages.is_empty() {
+        Paragraph::new(vec![Line::from(Span::styled(
             "(no messages yet — start typing or try /help)",
             Style::default().fg(Color::DarkGray),
-        ))]
+        ))])
+        .block(chat_block)
+        .wrap(Wrap { trim: false })
     } else {
-        let start = app.view_offset.min(app.messages.len().saturating_sub(1));
-        app.messages[start..]
+        // Build the full transcript lines every frame (cheap for normal chat lengths).
+        // When follow_bottom, compute a scroll offset that places the tail of the content
+        // so the newest text appears anchored toward the bottom of the chat area as the
+        // conversation (and live stream) grows. This eliminates the "jumps to top on Enter"
+        // and gives natural downward scroll/progress.
+        let all_lines: Vec<Line> = app.messages
             .iter()
             .flat_map(|m| App::render_message_as_lines(m))
-            .collect()
+            .collect();
+        let total = all_lines.len() as u16;
+        let h = area.height.saturating_sub(2).max(1);
+        let scroll_y = if app.follow_bottom {
+            total.saturating_sub(h)
+        } else {
+            // Manual scroll position (now line-granular). Clamp to valid range.
+            (app.view_offset as u16).min(total.saturating_sub(1))
+        };
+        Paragraph::new(all_lines)
+            .block(chat_block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_y, 0))
     };
-
-    let chat = Paragraph::new(visible)
-        .block(chat_block)
-        .wrap(Wrap { trim: false });
     f.render_widget(chat, area);
 }
 
@@ -2881,9 +3756,14 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
         return;
     }
 
-    let max_h: u16 = 12;
+    // Give the palette more vertical room than before (was hard-capped at 12 → ~10 visible).
+    // When there are more commands than fit, we use a ListState + render_stateful_widget
+    // so that the current selection is always scrolled into the visible window (no more
+    // selectable-but-invisible items).
+    let available = chat_area.height.saturating_sub(2).max(5);
+    let max_h = available.min(18);
     let needed = (filtered.len() as u16) + 2;
-    let h = needed.min(max_h).min(chat_area.height.saturating_sub(1)).max(3);
+    let h = needed.min(max_h).max(3);
     let popup = ratatui::layout::Rect {
         x: chat_area.x + 2,
         y: chat_area.y + chat_area.height.saturating_sub(h),
@@ -2893,11 +3773,12 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
 
     f.render_widget(Clear, popup);
 
+    let selected = app.command_selected.min(filtered.len().saturating_sub(1));
     let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
         .map(|(i, &(cmd, desc))| {
-            if i == app.command_selected {
+            if i == selected {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!(" {} ", cmd),
@@ -2926,7 +3807,10 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
                 Style::default().fg(Color::DarkGray),
             )),
     );
-    f.render_widget(list, popup);
+
+    let mut state = ListState::default();
+    state.select(Some(selected));
+    f.render_stateful_widget(list, popup, &mut state);
 }
 
 fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
@@ -2952,15 +3836,57 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
     let items: Vec<ListItem> = wizard
         .list_items
         .iter()
-        .map(|item| ListItem::new(format!("  {}  ", item)))
+        .map(|item| {
+            let display = item.as_str();
+            if matches!(wizard.step, WizardStep::RoleAssignment { .. }) {
+                // Color each row according to the provider that offers the model.
+                // Choices are either "model  [prov]" (from the new per-provider discovery)
+                // or plain binding names (looked up for their provider color).
+                // Models from the same provider appear consecutively (grouped in build fn)
+                // and share the same color.
+                let prov = app.extract_provider_for_choice(display);
+                let col = app.color_for_provider(&prov);
+                ListItem::new(Line::from(Span::styled(
+                    format!("  {}  ", display),
+                    Style::default().fg(col),
+                )))
+            } else {
+                let has_check = if matches!(wizard.step, WizardStep::ProviderType) {
+                    if let Some(p) = PROVIDER_PRESETS.iter().find(|p| p.0 == display) {
+                        let (dname, sname, ptyp, _, _) = *p;
+                        app.is_provider_preset_configured(dname, sname, ptyp)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if has_check {
+                    // Green checkmark for already-configured providers. Names left-aligned within this list.
+                    ListItem::new(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("✓ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::raw(format!("{}  ", display)),
+                    ]))
+                } else if matches!(wizard.step, WizardStep::ProviderType) {
+                    // Extra indent so that unchecked provider names align with "✓ Name" ones.
+                    ListItem::new(format!("    {}  ", display))
+                } else {
+                    ListItem::new(format!("  {}  ", display))
+                }
+            }
+        })
         .collect();
 
-    // Color the wizard popup border + title for the quick Ollama role picks so the
-    // CODER/R1/R2 identity is visible even while choosing (blue / purple / cyan).
+    // Color the wizard popup border + title for role assignment (and quick Ollama picks)
+    // so CODER/R1/R2 identity is visible (blue / purple / lime).
     let (wiz_border, wiz_title_fg) = match &wizard.step {
         WizardStep::QuickOllamaModelPick { role } if role == "coder" => (ROLE_CODER, ROLE_CODER),
         WizardStep::QuickOllamaModelPick { role } if role == "reviewer_a" => (ROLE_R1, ROLE_R1),
         WizardStep::QuickOllamaModelPick { role } if role == "reviewer_b" => (ROLE_R2, ROLE_R2),
+        WizardStep::RoleAssignment { role } if role == "coder" => (ROLE_CODER, ROLE_CODER),
+        WizardStep::RoleAssignment { role } if role == "reviewer_a" => (ROLE_R1, ROLE_R1),
+        WizardStep::RoleAssignment { role } if role == "reviewer_b" => (ROLE_R2, ROLE_R2),
         _ => (Color::Yellow, Color::DarkGray),
     };
 

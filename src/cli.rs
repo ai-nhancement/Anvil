@@ -31,6 +31,7 @@ pub fn cmd_init(root: &Path) -> Result<()> {
             // No key required for stock Ollama. The client supplies a conventional placeholder.
             credential: CredentialRef::None,
             extra: Default::default(),
+            keep_alive: Some("30s".to_string()),
         },
     );
 
@@ -41,6 +42,7 @@ pub fn cmd_init(root: &Path) -> Result<()> {
             base_url: None,
             credential: CredentialRef::Keyring,
             extra: Default::default(),
+            keep_alive: None,
         },
     );
 
@@ -51,6 +53,7 @@ pub fn cmd_init(root: &Path) -> Result<()> {
             base_url: Some("https://api.openai.com/v1".to_string()),
             credential: CredentialRef::Keyring,
             extra: Default::default(),
+            keep_alive: None,
         },
     );
 
@@ -145,12 +148,19 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
             CredentialRef::Env { var_name: var }
         };
 
-        let conn = ProviderConnection {
+        let mut conn = ProviderConnection {
             r#type: ptype,
             base_url,
             credential,
             extra: Default::default(),
+            keep_alive: None,
         };
+        // Sensible default for anyone adding a local Ollama provider through the classic setup wizard too.
+        if let Some(b) = &conn.base_url {
+            if b.contains("11434") || name.to_lowercase().contains("ollama") {
+                conn.keep_alive = Some("30s".to_string());
+            }
+        }
 
         cfg.providers.insert(name.clone(), conn);
         println!("  {} Added provider connection '{}'", "✓".green(), name);

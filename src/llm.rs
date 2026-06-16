@@ -107,30 +107,11 @@ impl LlmClient {
     /// Prefers the OpenAI-compat /v1/models (exact IDs for chat calls).
     /// Falls back to native /api/tags if needed.
     pub async fn list_ollama_models(&self) -> Result<Vec<String>> {
-        // Compat path (recommended — the "id" values are what /v1/chat/completions accepts)
-        let url = "http://localhost:11434/v1/models";
-        #[derive(Deserialize, Debug)]
-        struct M {
-            id: String,
-        }
-        #[derive(Deserialize, Debug)]
-        struct L {
-            data: Vec<M>,
-        }
-        if let Ok(resp) = self
-            .http
-            .get(url)
-            .timeout(std::time::Duration::from_secs(3))
-            .send()
-            .await
-        {
-            if resp.status().is_success() {
-                if let Ok(list) = resp.json::<L>().await {
-                    let ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
-                    if !ids.is_empty() {
-                        return Ok(ids);
-                    }
-                }
+        // Compat path via the general helper (exact IDs for /v1/chat/completions).
+        // Uses the conventional placeholder key that unauthenticated Ollama accepts.
+        if let Ok(ids) = self.list_openai_compat_models("http://localhost:11434/v1", "ollama").await {
+            if !ids.is_empty() {
+                return Ok(ids);
             }
         }
 
@@ -156,6 +137,56 @@ impl LlmClient {
         }
         let t: Tags = resp.json().await?;
         Ok(t.models.into_iter().map(|x| x.name).collect())
+    }
+
+    /// Live list of models for OpenAI-compatible providers (xAI, Groq, OpenAI, Together, Fireworks,
+    /// Ollama's compat endpoint, custom vLLM servers, many gateways, and Azure in compat mode).
+    /// Calls the standard GET {base}/models and parses the common { "data": [ {"id": "..." }, ... ] } shape.
+    /// Returns Ok([]) on network error, non-2xx, or empty/unparseable response so callers can
+    /// silently fall back to static suggestions.
+    /// Sends Bearer token; for Azure bases also sends api-key header (both are harmless together).
+    pub async fn list_openai_compat_models(&self, base_url: &str, api_key: &str) -> Result<Vec<String>> {
+        let base = base_url.trim_end_matches('/');
+        if base.is_empty() {
+            return Ok(vec![]);
+        }
+        let url = format!("{}/models", base);
+
+        #[derive(Deserialize, Debug)]
+        struct M {
+            id: String,
+        }
+        #[derive(Deserialize, Debug)]
+        struct L {
+            data: Vec<M>,
+        }
+
+        let mut rb = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .timeout(std::time::Duration::from_secs(4));
+
+        if base.contains("azure") {
+            rb = rb.header("api-key", api_key);
+        }
+
+        let resp = match rb.send().await {
+            Ok(r) => r,
+            Err(_) => return Ok(vec![]),
+        };
+
+        if !resp.status().is_success() {
+            return Ok(vec![]);
+        }
+
+        match resp.json::<L>().await {
+            Ok(list) => {
+                let ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
+                Ok(ids)
+            }
+            Err(_) => Ok(vec![]),
+        }
     }
 
     /// Non-streaming chat. Returns the full assistant message.
@@ -286,12 +317,24 @@ impl LlmClient {
             stream: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             temperature: Option<f32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            keep_alive: Option<String>,
         }
         #[derive(Serialize)]
         struct Message<'a> {
             role: &'a str,
             content: &'a str,
         }
+
+        let base_for_detect = conn.base_url.as_deref().unwrap_or("");
+        let is_ollama = base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
+        let keep_alive = if let Some(k) = &conn.keep_alive {
+            Some(k.clone())
+        } else if is_ollama {
+            Some("30s".to_string())
+        } else {
+            None
+        };
 
         let req = Req {
             model,
@@ -301,6 +344,7 @@ impl LlmClient {
             ],
             stream,
             temperature: None,
+            keep_alive,
         };
 
         let mut request = self
@@ -431,12 +475,24 @@ impl LlmClient {
             stream: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             temperature: Option<f32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            keep_alive: Option<String>,
         }
         #[derive(Serialize)]
         struct Message<'a> {
             role: &'a str,
             content: &'a str,
         }
+
+        let base_for_detect = conn.base_url.as_deref().unwrap_or("");
+        let is_ollama = base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
+        let keep_alive = if let Some(k) = &conn.keep_alive {
+            Some(k.clone())
+        } else if is_ollama {
+            Some("30s".to_string())
+        } else {
+            None
+        };
 
         let req = Req {
             model,
@@ -446,6 +502,7 @@ impl LlmClient {
             ],
             stream: true,
             temperature: None,
+            keep_alive,
         };
 
         let mut request = self
@@ -507,6 +564,26 @@ impl LlmClient {
                     if data == "[DONE]" {
                         return Ok(full);
                     }
+                    if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
+                        if let Some(delta) = chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
+                            if !delta.is_empty() {
+                                full.push_str(&delta);
+                                let _ = token_tx.send(delta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Flush remnant: the final chunk(s) often lack a trailing '\n' so the last "data: {...}"
+        // (or partial) can be left in the buffer. Without this, tail tokens of a response are
+        // silently dropped (classic source of "chopped" replies) even though [llm-full-wire] path
+        // still captures the authoritative full for logging.
+        if !buffer.trim().is_empty() {
+            let line = buffer.trim_end_matches('\r').to_string();
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data != "[DONE]" {
                     if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
                         if let Some(delta) = chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
                             if !delta.is_empty() {
@@ -833,6 +910,55 @@ impl LlmClient {
             .join("");
         Ok(text)
     }
+
+    /// Query Ollama's /api/ps to see which models are currently resident (and how much VRAM they occupy).
+    pub async fn list_ollama_ps(&self) -> Result<Vec<OllamaPsModel>> {
+        let url = "http://localhost:11434/api/ps";
+        #[derive(Deserialize)]
+        struct Ps {
+            #[serde(default)]
+            models: Vec<OllamaPsModel>,
+        }
+        if let Ok(resp) = self
+            .http
+            .get(url)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(ps) = resp.json::<Ps>().await {
+                    return Ok(ps.models);
+                }
+            }
+        }
+        Ok(vec![])
+    }
+
+    /// Ask Ollama to unload a specific model immediately (by sending a generate request with keep_alive=0).
+    /// This is the supported way to drop a model from VRAM without restarting the server.
+    pub async fn ollama_unload(&self, model: &str) -> Result<()> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Ok(());
+        }
+        let url = "http://localhost:11434/api/generate";
+        let body = serde_json::json!({
+            "model": model,
+            "prompt": "",
+            "stream": false,
+            "keep_alive": 0
+        });
+        // Best-effort; timeouts or errors are non-fatal (model may have already been evicted).
+        let _ = self
+            .http
+            .post(url)
+            .timeout(std::time::Duration::from_secs(8))
+            .json(&body)
+            .send()
+            .await;
+        Ok(())
+    }
 }
 
 // ── Stream event shapes (best effort, we only care about the text deltas) ─────
@@ -863,4 +989,14 @@ struct AnthStreamEvent {
 #[derive(Deserialize)]
 struct AnthDelta {
     text: Option<String>,
+}
+
+/// Public so the TUI can display loaded models + VRAM usage from `ollama ps`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct OllamaPsModel {
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default, rename = "size_vram")]
+    pub size_vram: u64,
 }

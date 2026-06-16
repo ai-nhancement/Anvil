@@ -14,7 +14,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 
-use crate::config::load_config;
+use crate::config::{load_config, load_local_env};
 use crate::llm::LlmClient;
 use crate::state::{load_state, save_state, reviews_dir};
 
@@ -98,6 +98,7 @@ fn parse_plan_phases(plan: &str) -> Vec<(String, String)> {
 }
 
 pub fn run_phase_start(root: &Path, id: &str) -> Result<()> {
+    load_local_env(root);
     let mut state = load_state(root);
     state.current_phase = Some(id.to_string());
     save_state(root, &state)?;
@@ -127,6 +128,7 @@ pub fn run_phase_start(root: &Path, id: &str) -> Result<()> {
 }
 
 pub fn run_phase_review(root: &Path, id: &str) -> Result<()> {
+    load_local_env(root);
     let cfg = load_config(root)?;
     let client = LlmClient::new();
     let reviews = reviews_dir(root);
@@ -183,7 +185,7 @@ fn run_phase_review_one(
 ) -> Result<String> {
     let (name, binding, provider) = cfg.resolve_role_full(reviewer_role)?;
 
-    let api_key = client.get_credential(name, provider)?;
+    let api_key = client.get_credential(&binding.provider, provider)?;
 
     let system = "You are performing the mandatory second-opinion review on a completed phase. \
                   Different model family from the implementer is the whole point. \
@@ -210,6 +212,7 @@ fn run_phase_review_one(
 }
 
 pub fn run_phase_accept(root: &Path, id: &str, note: Option<&str>) -> Result<()> {
+    load_local_env(root);
     let reviews = reviews_dir(root);
     let r1_path = reviews.join(format!("REVIEW_phase-{}_R1.md", id));
     let r2_path = reviews.join(format!("REVIEW_phase-{}_R2.md", id));

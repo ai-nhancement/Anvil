@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 
-use crate::config::load_config;
+use crate::config::{load_config, load_local_env};
 use crate::llm::LlmClient;
 use crate::state::{load_state, reviews_dir, save_state};
 
@@ -33,6 +33,10 @@ Rules:
 Be precise and skeptical of scope creep.";
 
 pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result<()> {
+    // Make .anvil/.env secrets (written during interactive add) available no matter
+    // what shell / OS / CI environment launched us.
+    load_local_env(root);
+
     let cfg = load_config(root)?;
     let client = LlmClient::new();
 
@@ -49,7 +53,7 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
             .resolve_role_full("coder")
             .map_err(|_| anyhow!("Configure a 'coder' role via `anvil setup`."))?;
 
-        let api_key = client.get_credential(planner_name, planner_provider)?;
+        let api_key = client.get_credential(&planner_binding.provider, planner_provider)?;
 
         println!(
             "\n{} Generating plan with {} ({} via {})...",
@@ -193,7 +197,7 @@ pub fn run_single_review(
     let (name, binding, provider) = cfg.resolve_role_full(reviewer_role)
         .map_err(|_| anyhow!("reviewer role '{}' is not fully configured", reviewer_role))?;
 
-    let api_key = client.get_credential(name, provider)?;
+    let api_key = client.get_credential(&binding.provider, provider)?;
 
     let system = "You are a skeptical, experienced engineer from a *different* model family than the planner. \
                   Your job is to find real problems, scope issues, hidden risks, and weak acceptance criteria. \

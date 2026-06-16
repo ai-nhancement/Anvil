@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 
-use crate::config::load_config;
+use crate::config::{load_config, load_local_env};
 use crate::llm::LlmClient;
 
 const DEFAULT_SYSTEM: &str = "\
@@ -28,6 +28,9 @@ Help them clarify:
 Be direct, ask clarifying questions, and surface assumptions. When the user seems ready, you can offer to emit a structured summary inside <artifact name=\"charter\">...</artifact> or <artifact name=\"plan-draft\">...</artifact> tags. The user can then save those to disk.";
 
 pub fn run_talk(root: &Path, role_or_binding: Option<&str>) -> Result<()> {
+    // Make .anvil/.env secrets available (cross-shell, cross-OS, CI, Docker, etc.)
+    load_local_env(root);
+
     let cfg = load_config(root)?;
     let client = LlmClient::new();
 
@@ -46,7 +49,7 @@ pub fn run_talk(root: &Path, role_or_binding: Option<&str>) -> Result<()> {
             .map_err(|_| anyhow!("No coder role configured. Run `anvil setup` first."))?
     };
 
-    let api_key = client.get_credential(binding_name, provider)?;
+    let api_key = client.get_credential(&binding.provider, provider)?;
 
     println!(
         "\n{} Talking with {} ({} via {})",

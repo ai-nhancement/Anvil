@@ -67,6 +67,17 @@ pub struct ProviderConnection {
     /// Extra headers or provider-specific hints (rarely needed).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, String>,
+
+    /// keep_alive duration passed to Ollama (per request) for this provider connection.
+    /// Controls how long the *model used in the request* stays loaded after the call finishes.
+    /// Special for local Ollama (ignored or harmless for other providers).
+    /// Common values:
+    ///   "0s" or 0   — unload immediately after the request (saves VRAM when using many models)
+    ///   "30s", "2m" — keep the model hot for a short time (good compromise for role switching)
+    ///   "5m", "1h"  — longer keep-alive (Ollama default is often 5m)
+    /// If not set for a local-ollama provider, Anvil defaults to "30s" at call time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -203,5 +214,125 @@ impl AnvilConfig {
         let binding = self.get_binding(name)?;
         let provider = self.get_provider(&binding.provider)?;
         Ok((name, binding, provider))
+    }
+}
+
+/// Path to the per-project local env file that `anvil` can load automatically.
+/// We keep it inside .anvil/ so it stays with the rest of the project's anvil artifacts
+/// and can be .gitignored easily.
+fn local_env_path(root: &Path) -> PathBuf {
+    anvil_dir(root).join(".env")
+}
+
+/// Loads a very simple KEY=val (or KEY="val") file from `.anvil/.env` (if present)
+/// into the current process environment using `std::env::set_var`.
+///
+/// - Only sets a variable if it is **not** already present in the environment.
+///   This respects variables coming from the outer shell, CI system, Docker -e, etc.
+/// - Comments (`# ...`) and blank lines are ignored.
+/// - This is deliberately minimal (no new dependencies, no full dotenv spec).
+/// - Called early by the TUI and all CLI commands that may need credentials.
+///
+/// This gives a cross-platform, cross-shell "paste the key once during /config and
+/// future `anvil` runs in this directory just work" experience without requiring
+/// users to edit shell profiles on Windows, Linux, macOS, WSL, etc.
+pub fn load_local_env(root: &Path) {
+    let path = local_env_path(root);
+    if !path.exists() {
+        return;
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim();
+            if key.is_empty() {
+                continue;
+            }
+            let mut val = line[eq + 1..].trim().to_string();
+            // Strip a single pair of matching outer quotes (common when people copy examples)
+            if (val.starts_with('"') && val.ends_with('"')) || (val.starts_with('\'') && val.ends_with('\'')) {
+                if val.len() >= 2 {
+                    val = val[1..val.len() - 1].to_string();
+                }
+            }
+            // Only set if the outer environment didn't already provide it
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, val);
+            }
+        }
+    }
+}
+
+/// Persists `key=value` into `.anvil/.env` (creating the directory and file as needed)
+/// and also calls `std::env::set_var` so the current process sees it immediately.
+///
+/// This is used by the interactive "add provider" wizard: when you paste an API key,
+/// we store the *name* of the variable in anvil.toml (as CredentialRef::Env) **and**
+/// write the actual secret to the local .env file + inject it into the running process.
+///
+/// Result: after one paste in the TUI, chat/plan/etc. work right away, *and* future
+/// invocations of `anvil` from the same project directory will pick up the secret
+/// from the file with no further shell configuration on any OS.
+pub fn set_local_env_var(root: &Path, key: &str, value: &str) {
+    // Make sure the *current* process (the TUI or CLI command) can see it right now.
+    std::env::set_var(key, value);
+
+    let dir = match ensure_anvil_dir(root) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let path = dir.join(".env");
+
+    // Read existing content so we can update in place instead of always appending duplicates.
+    let mut lines: Vec<String> = if path.exists() {
+        match std::fs::read_to_string(&path) {
+            Ok(c) => c.lines().map(|s| s.to_string()).collect(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    let prefix = format!("{}=", key);
+    let mut replaced = false;
+    for line in &mut lines {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&prefix) || trimmed.starts_with(&format!("{} =", key)) {
+            *line = format!("{}={}", key, value);
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        if !lines.is_empty() {
+            if let Some(last) = lines.last() {
+                if !last.trim().is_empty() {
+                    lines.push(String::new());
+                }
+            }
+        }
+        lines.push(format!("{}={}", key, value));
+    }
+
+    let _ = std::fs::write(&path, lines.join("\n") + "\n");
+
+    // Best-effort restrictive permissions on Unix-like systems.
+    // On Windows the file is typically only readable by the current user anyway,
+    // but we still try.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&path, perms);
+        }
     }
 }

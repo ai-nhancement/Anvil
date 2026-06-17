@@ -37,7 +37,7 @@ use crate::config::{
     CredentialRef, ModelBinding, ProviderConnection,
 };
 use crate::agent::{Agent, ConfirmHandle};
-use crate::llm::LlmClient;
+use crate::llm::{ChatMessage, LlmClient, Role};
 use crate::state::{load_state, reviews_dir, save_state};
 
 /// Turn the CLI's project argument (often ".") into a real absolute path for
@@ -392,6 +392,13 @@ pub fn run_ui(root: &Path) -> Result<()> {
             "Working in {}. The coder reads, edits, and runs the project directly — just tell it what to build.",
             app.root.display()
         ));
+        // Continuity: if a prior session was persisted for this project, show a
+        // short transcript tail so the chat doesn't look blank. The agent itself
+        // reloads the full bounded history when it's first used this run.
+        let prior = crate::agent::load_session(&app.root);
+        if !prior.is_empty() {
+            app.restore_session_preview(&prior);
+        }
     }
 
     // Setup terminal (raw mode + alternate screen). We must restore on any exit path.
@@ -657,6 +664,38 @@ impl App {
             }
             self.assistant_open = false;
         }
+    }
+
+    /// Show a short tail of a restored session so a relaunched TUI isn't blank.
+    /// Renders only the last few user/assistant lines (one line each); the agent
+    /// reloads the full bounded history (including tool turns) for its context.
+    fn restore_session_preview(&mut self, msgs: &[ChatMessage]) {
+        let turns = msgs
+            .iter()
+            .filter(|m| matches!(m.role, Role::User | Role::Assistant) && !m.text.trim().is_empty())
+            .count();
+        if turns == 0 {
+            return;
+        }
+        self.push_system(&format!(
+            "Session continued — the coder remembers {} prior message(s) from this project. Recent tail:",
+            turns
+        ));
+        let convo: Vec<&ChatMessage> = msgs
+            .iter()
+            .filter(|m| matches!(m.role, Role::User | Role::Assistant) && !m.text.trim().is_empty())
+            .collect();
+        let start = convo.len().saturating_sub(6);
+        for m in &convo[start..] {
+            let first = m.text.lines().next().unwrap_or("").trim();
+            let more = if m.text.lines().count() > 1 { " …" } else { "" };
+            match m.role {
+                Role::User => self.push(format!("[you] {}{}", first, more)),
+                Role::Assistant => self.push(format!("[coder] {}{}", first, more)),
+                _ => {}
+            }
+        }
+        self.follow_bottom = true;
     }
 
     /// Drive the forge heat (0.0 cold .. 1.0 amber). The forge is hottest while

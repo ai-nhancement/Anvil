@@ -35,7 +35,7 @@ use crate::config::{CredentialRef, ProviderConnection};
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Who authored a turn in the conversation history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Assistant,
@@ -45,7 +45,8 @@ pub enum Role {
 
 /// One turn of conversation history. An assistant turn may carry `tool_calls`;
 /// a `Tool` turn carries the result for a prior call (`tool_call_id`).
-#[derive(Debug, Clone)]
+/// Serializable so the session can be persisted to `.anvil/session.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
     pub text: String,
@@ -79,7 +80,7 @@ pub struct ToolDef {
 }
 
 /// A single tool invocation requested by the model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -1692,6 +1693,20 @@ mod tests {
         assert_eq!(msgs[1]["content"].as_array().unwrap().len(), 2);
         assert_eq!(msgs[1]["content"][0]["tool_use_id"], "a");
         assert_eq!(msgs[1]["content"][1]["tool_use_id"], "b");
+    }
+
+    #[test]
+    fn chat_messages_round_trip_json() {
+        let history = sample_history();
+        let json = serde_json::to_string(&history).unwrap();
+        let back: Vec<ChatMessage> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), history.len());
+        assert_eq!(back[0].role, Role::User);
+        assert_eq!(back[1].role, Role::Assistant);
+        assert_eq!(back[1].tool_calls[0].name, "read_file");
+        assert_eq!(back[1].tool_calls[0].arguments["path"], "README.md");
+        assert_eq!(back[2].role, Role::Tool);
+        assert_eq!(back[2].tool_call_id.as_deref(), Some("call_1"));
     }
 
     #[test]

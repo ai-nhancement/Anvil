@@ -16,14 +16,39 @@
 //!
 //! For headless use (tests, CLI), pass `ConfirmHandle::AlwaysAllow`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::config::anvil_dir;
 use crate::config::ProviderConnection;
-use crate::llm::{ChatMessage, LlmClient};
+use crate::llm::{ChatMessage, LlmClient, Role};
 use crate::{reality, tools};
+
+/// How many trailing history messages we persist across restarts. Bounded so the
+/// session file (and the reloaded context) can't grow without limit.
+const MAX_PERSIST_MESSAGES: usize = 80;
+
+/// Where the rolling conversation history is persisted for this project.
+pub fn session_path(root: &Path) -> PathBuf {
+    anvil_dir(root).join("session.json")
+}
+
+/// Load the persisted conversation history for `root` (empty if none / unreadable).
+/// Drops any leading partial exchange so the restored history always begins on a
+/// clean user turn — never an orphaned tool result or tool-call assistant turn
+/// (which would violate the providers' strict message ordering on the next call).
+pub fn load_session(root: &Path) -> Vec<ChatMessage> {
+    let mut msgs: Vec<ChatMessage> = match std::fs::read_to_string(session_path(root)) {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Err(_) => vec![],
+    };
+    while msgs.first().map(|m| m.role != Role::User).unwrap_or(false) {
+        msgs.remove(0);
+    }
+    msgs
+}
 
 /// How `run_command` confirmations are resolved.
 pub enum ConfirmHandle {
@@ -71,6 +96,9 @@ impl Agent {
         root: PathBuf,
         confirm: ConfirmHandle,
     ) -> Self {
+        // Restore any persisted history for this project so the coder picks up
+        // where we left off across `anvil` restarts.
+        let history = load_session(&root);
         Self {
             client,
             conn,
@@ -78,9 +106,23 @@ impl Agent {
             api_key,
             system,
             root,
-            history: vec![],
+            history,
             confirm,
             max_steps: 25,
+        }
+    }
+
+    /// Persist a bounded tail of the conversation history to `.anvil/session.json`.
+    /// Called at the end of each completed turn.
+    fn save_session(&self) {
+        let start = self.history.len().saturating_sub(MAX_PERSIST_MESSAGES);
+        let slice = &self.history[start..];
+        if let Ok(json) = serde_json::to_string(slice) {
+            let path = session_path(&self.root);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, json);
         }
     }
 
@@ -132,6 +174,7 @@ impl Agent {
 
             // No tool calls → the model gave its final answer for this turn.
             if turn.tool_calls.is_empty() {
+                self.save_session();
                 return Ok(());
             }
 
@@ -160,6 +203,41 @@ impl Agent {
             "\n[agent] stopped after {} tool steps this turn (safety cap). Ask me to continue if needed.",
             self.max_steps
         ));
+        self.save_session();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::ChatMessage;
+
+    #[test]
+    fn load_session_drops_leading_partial_exchange() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Persisted history that begins mid-exchange (an orphan tool result +
+        // a dangling assistant turn) — the front must be trimmed to a clean user turn.
+        let history = vec![
+            ChatMessage::tool_result("x", "orphan"),
+            ChatMessage::assistant("dangling", vec![]),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi", vec![]),
+        ];
+        let path = session_path(root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_string(&history).unwrap()).unwrap();
+
+        let loaded = load_session(root);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].role, Role::User);
+        assert_eq!(loaded[0].text, "hello");
+    }
+
+    #[test]
+    fn load_session_empty_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_session(dir.path()).is_empty());
     }
 }

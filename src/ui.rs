@@ -3743,8 +3743,10 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let right_width: u16 = if has_gpus { 30 } else { 0 };
     let left_width = inner.width.saturating_sub(right_width);
 
+    // Space the three info rows with a blank line between each (inner rows 0, 2, 4)
+    // so the stage / role-labels / project lines don't read as one jumbled block.
     for (i, spans) in [row0, row1, row2].into_iter().enumerate() {
-        let y = inner.y + i as u16;
+        let y = inner.y + (i as u16) * 2;
         if y >= inner.y + inner.height {
             break;
         }

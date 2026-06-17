@@ -101,6 +101,11 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "project_state".into(),
+            description: "Get a live snapshot of where the project stands: workflow stage, current phase and its plan excerpt, shipped phases, and git status/diff stat. Call this to re-ground yourself instead of guessing — it reads disk + git directly.".into(),
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
             name: "run_command".into(),
             description: "Run a shell command from the project root (e.g. `cargo build`, `cargo test`, `git diff`). Returns combined stdout+stderr and the exit code. Requires user confirmation.".into(),
             input_schema: json!({
@@ -160,6 +165,7 @@ pub fn result_summary(name: &str, result: &str) -> String {
                 format!("ok — {} matches", n)
             }
         }
+        "project_state" => "ok — snapshot".to_string(),
         "run_command" => {
             // Result begins with "exit code: N".
             let code = result
@@ -210,6 +216,7 @@ fn run(call: &ToolCall, root: &Path) -> Result<String> {
         ),
         "list_dir" => list_dir(root, &arg_str(call, "path").unwrap_or_else(|_| ".".into())),
         "grep" => grep(root, &arg_str(call, "pattern")?, arg_opt(call, "path")),
+        "project_state" => Ok(crate::reality::snapshot(root)),
         "run_command" => run_command(root, &arg_str(call, "command")?),
         other => bail!("unknown tool '{}'", other),
     }

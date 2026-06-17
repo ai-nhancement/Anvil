@@ -117,6 +117,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/phase-start <id>", "Set the current phase (e.g. P0). Optional — you can also just tell the coder to start"),
     ("/accept-phase [id]", "Run R1 + R2 reviewers on the current git diff for the phase (the phase gate)"),
     ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
+    ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/y", "Approve a pending run_command"),
     ("/n", "Deny a pending run_command"),
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
@@ -1175,6 +1176,15 @@ impl App {
             return;
         }
 
+        if cmd == "/refresh" || cmd == "/reground" {
+            // Show the live reality snapshot the coder is grounded on every turn.
+            let snap = crate::reality::snapshot(&self.root);
+            self.push_system("Reality snapshot (the coder receives this each turn):");
+            self.push(snap);
+            self.follow_bottom = true;
+            return;
+        }
+
         if cmd == "/config" || cmd == "/setup" {
             self.start_config_wizard();
             return;
@@ -1225,6 +1235,7 @@ impl App {
         if cmd == "/help" || cmd == "?" {
             self.push_system("Keys: Enter=chat (streams), Esc/Ctrl-C/q=quit, s=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
+            self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
             self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2 auto) → coder revises → /accept-plan.");
             self.push_system("Phase gate: build the phase with the coder → /accept-phase (R1+R2 on the diff) → fix findings → /ship-phase.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");

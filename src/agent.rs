@@ -23,7 +23,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::ProviderConnection;
 use crate::llm::{ChatMessage, LlmClient};
-use crate::tools;
+use crate::{reality, tools};
 
 /// How `run_command` confirmations are resolved.
 pub enum ConfirmHandle {
@@ -99,7 +99,20 @@ impl Agent {
         self.history.push(ChatMessage::user(user_input));
         let tools = tools::tool_defs();
 
+        // Re-ground at the start of every turn: a fresh, bounded reality snapshot
+        // (stage / phase / plan slice / git) prepended to the messages we send —
+        // kept OUT of persistent history so it's always current and never piles up.
+        // Pure disk+git, so this is cheap and model-agnostic.
+        let grounding = ChatMessage::user(format!(
+            "Here is the current project reality. Treat it as ground truth for where we are; the files on disk remain authoritative.\n\n{}",
+            reality::snapshot(&self.root)
+        ));
+
         for _ in 0..self.max_steps {
+            let mut sent: Vec<ChatMessage> = Vec::with_capacity(self.history.len() + 1);
+            sent.push(grounding.clone());
+            sent.extend(self.history.iter().cloned());
+
             let turn = self
                 .client
                 .chat_turn_stream(
@@ -107,7 +120,7 @@ impl Agent {
                     &self.model,
                     &self.api_key,
                     &self.system,
-                    &self.history,
+                    &sent,
                     &tools,
                     tx.clone(),
                 )

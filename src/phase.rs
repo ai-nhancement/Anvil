@@ -333,7 +333,7 @@ pub fn run_phase_r2_diff(root: &Path, id: &str) -> Result<String> {
     crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", &reviews, id)
 }
 
-fn extract_phase(plan: &str, id: &str) -> Option<String> {
+pub(crate) fn extract_phase(plan: &str, id: &str) -> Option<String> {
     let marker = format!("## {}", id);
     if let Some(start) = plan.find(&marker) {
         let rest = &plan[start..];

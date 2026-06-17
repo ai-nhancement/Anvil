@@ -18,6 +18,7 @@ mod config;
 mod llm;
 mod tools;
 mod agent;
+mod reality;
 mod state;
 mod talk;
 mod plan;

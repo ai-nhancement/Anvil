@@ -132,7 +132,53 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 
 const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, not a timer
 
-const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Forge "heat pulse" spinner — a glowing ember that swells and fades while the
+/// smith works. Rendered in the live heat color (see `heat_color`).
+const FORGE_SPINNER: &[&str] = &["·", "∘", "○", "◉", "●", "◉", "○", "∘"];
+
+/// Anvil's molten brand orange (#FF8C00) — title bar + the ⬡ mark.
+const FORGE_MOLTEN: Color = Color::Rgb(255, 140, 0);
+
+/// Blacksmith heat scale: stops from cold iron (steel blue-grey) up through
+/// dull red, cherry, and orange to amber. `heat_color` interpolates between them.
+const HEAT_STOPS: &[(f32, (u8, u8, u8))] = &[
+    (0.00, (84, 96, 120)),   // cold iron
+    (0.30, (120, 60, 50)),   // warming
+    (0.50, (170, 55, 38)),   // dull red
+    (0.72, (210, 75, 30)),   // cherry
+    (0.88, (226, 110, 34)),  // orange ember
+    (1.00, (255, 150, 20)),  // amber / molten
+];
+
+/// Color for a heat value in 0.0..=1.0, linearly interpolated across HEAT_STOPS.
+fn heat_color(h: f32) -> Color {
+    let h = h.clamp(0.0, 1.0);
+    let mut lo = HEAT_STOPS[0];
+    let mut hi = HEAT_STOPS[HEAT_STOPS.len() - 1];
+    for w in HEAT_STOPS.windows(2) {
+        if h >= w[0].0 && h <= w[1].0 {
+            lo = w[0];
+            hi = w[1];
+            break;
+        }
+    }
+    let span = (hi.0 - lo.0).max(f32::EPSILON);
+    let t = ((h - lo.0) / span).clamp(0.0, 1.0);
+    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    Color::Rgb(lerp(lo.1 .0, hi.1 .0), lerp(lo.1 .1, hi.1 .1), lerp(lo.1 .2, hi.1 .2))
+}
+
+/// The blacksmith's name for a heat level — shown in the title bar.
+fn heat_name(h: f32) -> &'static str {
+    match h {
+        x if x < 0.12 => "cold",
+        x if x < 0.34 => "warming",
+        x if x < 0.55 => "dull red",
+        x if x < 0.74 => "cherry",
+        x if x < 0.90 => "orange",
+        _ => "amber",
+    }
+}
 
 /// Role-specific colors used consistently for labels, headers, splash, chat prefixes,
 /// and during quick-setup model picking. Coder=blue, R1=purple (magenta), R2=lime (bright green).
@@ -437,6 +483,11 @@ struct App {
     splash_ticks: u8, // nonzero = showing splash; cleared on first keypress
     anim_tick: u64,   // increments every frame, drives spinner + cursor blink
 
+    // Forge "heat" 0.0 (cold iron) .. 1.0 (amber). Ramps up while the agent works
+    // (streaming / tool calls) or the GPU is busy, and cools slowly when idle —
+    // the header borders + spinner glow along the blacksmith heat scale.
+    forge_heat: f32,
+
     // When true the input characters are masked in the UI (for API keys)
     input_secret: bool,
 
@@ -511,6 +562,7 @@ impl App {
             config_wizard: None,
             splash_ticks: SPLASH_DURATION,
             anim_tick: 0,
+            forge_heat: 0.0,
             input_secret: false,
             ollama_available_cached: None,
             viewing_doc: None,
@@ -604,6 +656,31 @@ impl App {
             }
             self.assistant_open = false;
         }
+    }
+
+    /// Drive the forge heat (0.0 cold .. 1.0 amber). The forge is hottest while
+    /// the agent is actively streaming/calling tools, spikes on fresh activity,
+    /// and is kept warm by GPU load (so local-model inference glows too). Heat
+    /// ramps up fast and cools slowly, so embers linger after a turn ends.
+    fn update_forge_heat(&mut self, fresh_activity: bool) {
+        let active = self.llm_rx.is_some() || self.gate_rx.is_some();
+        // Hottest GPU utilization as a 0..1 contribution.
+        let gpu = self
+            .gpu_stats
+            .iter()
+            .map(|g| g.util as f32 / 100.0)
+            .fold(0.0_f32, f32::max);
+
+        let mut target: f32 = if active { 0.85 } else { 0.0 };
+        if fresh_activity {
+            target = 1.0; // spike on new tokens / tool events
+        }
+        target = target.max(gpu * 0.9);
+
+        // Asymmetric easing: stoke quickly, cool gradually.
+        let rate = if target > self.forge_heat { 0.35 } else { 0.06 };
+        self.forge_heat += (target - self.forge_heat) * rate;
+        self.forge_heat = self.forge_heat.clamp(0.0, 1.0);
     }
 
     /// Write one JSON event line into this session's dedicated chat log file.
@@ -1791,7 +1868,7 @@ impl App {
             if let Some(label) = delta.strip_prefix("[tool-start]") {
                 self.close_assistant_line();
                 self.log_chat_event("tool_start", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
-                self.push(format!("  ⚙ {}", label.trim()));
+                self.push(format!("  ⚒ {}", label.trim()));
                 changed = true;
                 continue;
             }
@@ -3181,14 +3258,17 @@ fn run_app_loop<B: ratatui::backend::Backend>(
     loop {
         // Drain live LLM chat tokens + any plan-gate completion signals.
         // Non-blocking so the TUI stays responsive during long planner/reviewer calls.
-        let _chat = app.drain_llm_stream();
-        let _gate = app.drain_gate_events();
+        let chat = app.drain_llm_stream();
+        let gate = app.drain_gate_events();
         app.anim_tick = app.anim_tick.wrapping_add(1);
 
         // Live GPU stats ~every 2 seconds (80ms * 25). Cheap and useful for local models.
         if app.anim_tick % 25 == 0 {
             app.refresh_gpu_stats();
         }
+
+        // Stoke / cool the forge based on agent activity (and GPU load).
+        app.update_forge_heat(chat || gate);
 
         terminal.draw(|f| render_ui(f, app))?;
 
@@ -3629,9 +3709,9 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         "UNCONFIGURED — /config or press s".to_string()
     } else {
         match app.stage {
-            WorkflowStage::Talk                => "TALK — chat with coder; /plan to write plan, /lock-plan to start R1".to_string(),
-            WorkflowStage::PlanReviewsComplete => "PLAN R1+R2 COMPLETE — /accept-plan (after /lock + /approve-r1 + coder fixes + /approve-r2)".to_string(),
-            WorkflowStage::PlanAccepted        => "PLAN ACCEPTED — phases (coder writes R1/R2 review docs; use /critical-r1 etc + human gates)".to_string(),
+            WorkflowStage::Talk                => "TALK — build with the coder; it writes plan.md, then /lock-plan".to_string(),
+            WorkflowStage::PlanReviewsComplete => "PLAN REVIEWED (R1+R2) — /accept-plan to approve".to_string(),
+            WorkflowStage::PlanAccepted        => "PLAN ACCEPTED — build phases; /accept-phase then /ship-phase".to_string(),
             WorkflowStage::Unconfigured        => "UNCONFIGURED".to_string(),
         }
     };
@@ -3647,12 +3727,13 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
 
     let is_streaming = app.llm_rx.is_some() || app.gate_rx.is_some();
+    let ember = heat_color(app.forge_heat);
     let stream_spans: Vec<Span<'static>> = if is_streaming {
-        let sp = SPINNER[(app.anim_tick as usize / 2) % SPINNER.len()];
+        let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
         vec![
             Span::raw("  ".to_string()),
-            Span::styled(sp.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(" thinking…".to_string(), Style::default().fg(Color::Cyan)),
+            Span::styled(sp.to_string(), Style::default().fg(ember).add_modifier(Modifier::BOLD)),
+            Span::styled(" forging…".to_string(), Style::default().fg(ember)),
         ]
     } else {
         vec![
@@ -3676,11 +3757,11 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let r1    = header_model_label(cfg, "reviewer-a");
         let r2    = header_model_label(cfg, "reviewer-b");
         vec![
-            Span::styled(" CODER ".to_string(), Style::default().fg(ROLE_CODER).add_modifier(Modifier::BOLD)),
+            Span::styled(" ⚒ CODER ".to_string(), Style::default().fg(ROLE_CODER).add_modifier(Modifier::BOLD)),
             Span::styled(coder, Style::default().fg(Color::White)),
-            Span::styled("  │  R1 ".to_string(), Style::default().fg(ROLE_R1).add_modifier(Modifier::BOLD)),
+            Span::styled("   ◈ R1 ".to_string(), Style::default().fg(ROLE_R1).add_modifier(Modifier::BOLD)),
             Span::styled(r1, Style::default().fg(Color::White)),
-            Span::styled("  │  R2 ".to_string(), Style::default().fg(ROLE_R2).add_modifier(Modifier::BOLD)),
+            Span::styled("   ◈ R2 ".to_string(), Style::default().fg(ROLE_R2).add_modifier(Modifier::BOLD)),
             Span::styled(r2, Style::default().fg(Color::White)),
         ]
     } else {
@@ -3717,7 +3798,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
 
     let row2: Vec<Span<'static>> = vec![
-        Span::styled(" project ".to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(" ⬡ ".to_string(), Style::default().fg(FORGE_MOLTEN).add_modifier(Modifier::BOLD)),
         Span::styled(proj, Style::default().fg(Color::Rgb(170, 200, 255))),
         Span::styled("  │  ".to_string(), Style::default().fg(Color::DarkGray)),
     ];
@@ -3725,13 +3806,14 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let mut row2 = row2;
     row2.extend(phase_spans);
 
-    // Draw bordered block then overlay rows inside it
+    // Draw bordered block then overlay rows inside it. The border glows along
+    // the forge heat scale (cold steel when idle → amber while forging).
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 80)))
+        .border_style(Style::default().fg(heat_color(app.forge_heat)))
         .title(Span::styled(
-            format!(" ⬡ Anvil v{} ", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(Color::Rgb(255, 180, 0)).add_modifier(Modifier::BOLD),
+            format!(" ⚒ Anvil v{}  ·  forge: {} ", env!("CARGO_PKG_VERSION"), heat_name(app.forge_heat)),
+            Style::default().fg(FORGE_MOLTEN).add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);

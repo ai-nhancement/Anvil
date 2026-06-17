@@ -3726,30 +3726,13 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         }
     };
 
-    let is_streaming = app.llm_rx.is_some() || app.gate_rx.is_some();
-    let ember = heat_color(app.forge_heat);
-    let stream_spans: Vec<Span<'static>> = if is_streaming {
-        let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
-        vec![
-            Span::raw("  ".to_string()),
-            Span::styled(sp.to_string(), Style::default().fg(ember).add_modifier(Modifier::BOLD)),
-            Span::styled(" forging…".to_string(), Style::default().fg(ember)),
-        ]
-    } else {
-        vec![
-            Span::raw("  ".to_string()),
-            Span::styled("ready".to_string(), Style::default().fg(Color::DarkGray)),
-        ]
-    };
-
-    // Row 0 (top of header): stage + streaming + ctx on left.
-    // When GPUs present: right column (top rows) shows 1 GPU per line; left is narrowed.
-    // (The prominent "Anvil vX" with version lives in the orange block title on the border.)
-    let mut row0: Vec<Span<'static>> = vec![Span::styled(
+    // Row 0 (top of header): stage on the left. The live "forging…/ready"
+    // indicator now lives on the chat box's bottom-left border (render_chat),
+    // right where the user is looking, so it's impossible to miss.
+    let row0: Vec<Span<'static>> = vec![Span::styled(
         stage_text,
         Style::default().fg(stage_color).add_modifier(Modifier::BOLD),
     )];
-    row0.extend(stream_spans);
 
     // ── Row 1: coder / R1 / R2 model labels ──
     let row1: Vec<Span<'static>> = if let Some(cfg) = &app.cfg {
@@ -4042,8 +4025,25 @@ fn render_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         }
     };
 
+    // Live forge status pinned to the bottom-left of the chat box border, in the
+    // current heat color — "forging…" (pulsing ember) while the agent works,
+    // "ready" (dim) when idle. This is the at-a-glance "is it doing something?"
+    // signal, right where the user's attention is.
+    let is_streaming = app.llm_rx.is_some() || app.gate_rx.is_some();
+    let status_line: Line = if is_streaming {
+        let ember = heat_color(app.forge_heat);
+        let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
+        Line::from(vec![
+            Span::styled(format!(" {} ", sp), Style::default().fg(ember).add_modifier(Modifier::BOLD)),
+            Span::styled("forging… ", Style::default().fg(ember).add_modifier(Modifier::BOLD)),
+        ])
+    } else {
+        Line::from(Span::styled(" ready ", Style::default().fg(Color::DarkGray)))
+    };
+
     let chat_block = Block::default()
         .title(Span::styled(chat_title, Style::default().fg(Color::DarkGray)))
+        .title_bottom(status_line.left_aligned())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 

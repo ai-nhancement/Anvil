@@ -1868,7 +1868,7 @@ impl App {
             if let Some(label) = delta.strip_prefix("[tool-start]") {
                 self.close_assistant_line();
                 self.log_chat_event("tool_start", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
-                self.push(format!("  ⚒ {}", label.trim()));
+                self.push(format!("  🔨 {}", label.trim()));
                 changed = true;
                 continue;
             }
@@ -3757,7 +3757,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         let r1    = header_model_label(cfg, "reviewer-a");
         let r2    = header_model_label(cfg, "reviewer-b");
         vec![
-            Span::styled(" ⚒ CODER ".to_string(), Style::default().fg(ROLE_CODER).add_modifier(Modifier::BOLD)),
+            Span::styled(" 🔨 CODER ".to_string(), Style::default().fg(ROLE_CODER).add_modifier(Modifier::BOLD)),
             Span::styled(coder, Style::default().fg(Color::White)),
             Span::styled("   ◈ R1 ".to_string(), Style::default().fg(ROLE_R1).add_modifier(Modifier::BOLD)),
             Span::styled(r1, Style::default().fg(Color::White)),

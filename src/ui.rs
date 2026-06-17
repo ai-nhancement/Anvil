@@ -40,6 +40,39 @@ use crate::agent::{Agent, ConfirmHandle};
 use crate::llm::LlmClient;
 use crate::state::{load_state, reviews_dir, save_state};
 
+/// Turn the CLI's project argument (often ".") into a real absolute path for
+/// display and tool use. Canonicalizes when possible and strips Windows'
+/// `\\?\` verbatim prefix; falls back to joining the current dir.
+fn resolve_project_root(root: &Path) -> PathBuf {
+    let abs = std::fs::canonicalize(root).ok().or_else(|| {
+        std::env::current_dir().ok().map(|cwd| cwd.join(root))
+    });
+    match abs {
+        Some(p) => {
+            let s = p.to_string_lossy();
+            // \\?\C:\Anvil -> C:\Anvil ; \\?\UNC\server\share -> \\server\share
+            let cleaned = s
+                .strip_prefix(r"\\?\UNC\")
+                .map(|rest| format!(r"\\{}", rest))
+                .or_else(|| s.strip_prefix(r"\\?\").map(|rest| rest.to_string()));
+            cleaned.map(PathBuf::from).unwrap_or(p)
+        }
+        None => root.to_path_buf(),
+    }
+}
+
+/// A short, human-friendly name for the project root (its final component),
+/// e.g. "Anvil" for C:\Anvil. Falls back to the full path, then "project".
+fn project_display_name(root: &Path) -> String {
+    root.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty() && s != ".")
+        .unwrap_or_else(|| {
+            let d = root.display().to_string();
+            if d.is_empty() || d == "." { "project".to_string() } else { d }
+        })
+}
+
 /// System prompt for the coder agent. Short and agentic: the model has real
 /// tools and works directly on the repo. Structure is imposed at exactly two
 /// human gates (lock the plan, accept a phase); everything else is free-form.
@@ -435,6 +468,12 @@ struct App {
 
 impl App {
     fn new(root: PathBuf) -> Self {
+        // Resolve the project root to a real absolute path. The CLI default is ".",
+        // which is useless to display and awkward for the agent's tools — turn it into
+        // the actual directory (e.g. C:\Anvil). Strip Windows' \\?\ verbatim prefix so
+        // it reads cleanly in the header and "Working in ..." line.
+        let root = resolve_project_root(&root);
+
         // Defensive: make sure any .anvil/.env secrets are visible even if someone constructs
         // an App directly (the normal call site run_ui already calls load_local_env too).
         load_local_env(&root);
@@ -589,12 +628,7 @@ impl App {
     }
 
     fn update_status(&mut self) {
-        let proj = self
-            .root
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.root.display().to_string());
+        let proj = project_display_name(&self.root);
         let stage = if self.first_run || self.stage == WorkflowStage::Unconfigured {
             "UNCONFIGURED — press s for quick setup (when Ollama present)"
         } else {
@@ -3657,10 +3691,8 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
 
     // ── Row 2: project name + phase progress ──
-    // Show the actual repo root path (e.g. C:\Anvil or \Anvil) instead of falling back to ".".
-    // This is the visible "project <path>" line in the top header.
-    let proj = app.root.display().to_string();
-    let proj = if proj.is_empty() { ".".to_string() } else { proj };
+    // Show the actual project directory name (e.g. "Anvil"), not a bare ".".
+    let proj = project_display_name(&app.root);
     let phases = build_phase_progress(app);
 
     // Color any checkmarks inside the phases progress string green (e.g. P0✓).

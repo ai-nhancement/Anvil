@@ -65,8 +65,8 @@ pub fn cmd_init(root: &Path) -> Result<()> {
         root.display()
     );
     println!("  Created anvil.toml + .anvil/");
-    println!("  Run {} to configure your providers and model bindings.", "`anvil setup`".cyan());
-    println!("  Then: {}  →  {}  → work in phases with forced R1+R2 reviews.", "`anvil talk`".cyan(), "`anvil plan`".cyan());
+    println!("  Run {} to configure providers + roles (coder + reviewer-a + reviewer-b).", "`anvil setup`".cyan());
+    println!("  Then launch {} (TUI) — the coder reads/edits/runs the repo directly; structure at two gates (/lock-plan + /accept-plan, /accept-phase + /ship-phase).", "`anvil`".cyan());
     Ok(())
 }
 
@@ -248,10 +248,10 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
 
     save_config(root, &cfg)?;
     println!("\n{} Setup complete. Configuration saved to anvil.toml", "✓".green());
-    println!("Next steps:");
-    println!("  {}              — have a conversation to capture intent", "`anvil talk`".cyan());
-    println!("  {}              — generate plan + forced R1 + R2 reviews", "`anvil plan`".cyan());
-    println!("  {} <id>         — start working on a phase", "`anvil phase start`".cyan());
+    println!("Next steps (TUI preferred — the coder works directly in the repo):");
+    println!("  {}              — interactive TUI chat with the coder (reads/edits/runs the project)", "`anvil` or `anvil ui`".cyan());
+    println!("  {}     — discuss, the coder writes plan.md, then /lock-plan + /accept-plan", "`anvil` (plan gate)".cyan());
+    println!("  {} — build the phase, then /accept-phase + /ship-phase", "`anvil` (phase gate)".cyan());
     Ok(())
 }
 
@@ -363,10 +363,10 @@ pub fn cmd_status(root: &Path) -> Result<()> {
         let is_accepted = state.accepted_plan_hash.as_deref() == Some(current_hash.as_str());
 
         if is_accepted {
-            println!("  {} PLAN ACCEPTED (hash matches)", "✓".green().bold());
+            println!("  {} PLAN ACCEPTED (hash matches) — reviewed by R1 + R2 and approved", "✓".green().bold());
 
             if state.shipped_phases.is_empty() && state.current_phase.is_none() {
-                println!("  → Start first phase: `anvil phase start P0`");
+                println!("  → Build the first phase with the coder (TUI). When done: /accept-phase then /ship-phase.");
             } else {
                 if let Some(phase) = &state.current_phase {
                     println!("  Current phase:  {}", phase.cyan());
@@ -374,29 +374,23 @@ pub fn cmd_status(root: &Path) -> Result<()> {
                 if !state.shipped_phases.is_empty() {
                     println!("  Shipped phases: {}", state.shipped_phases.join(", "));
                 }
-                println!("  → Review current phase: `anvil phase review <id>`");
-                println!("  → Accept phase:         `anvil phase accept <id>`");
+                println!("  → In the TUI: /accept-phase (R1+R2 review the git diff), fix findings, then /ship-phase.");
             }
         } else {
-            println!("  {} PLAN REVIEWS COMPLETE — awaiting accept", "→".yellow());
-            println!("    plan.md and both review files exist, but plan has not been accepted yet.");
-            if state.accepted_plan_hash.is_some() {
-                println!("    {} plan.md has changed since last accept — re-review or re-accept.", "Note:".yellow());
-            }
-            println!("  → Address R1+R2 findings in plan.md, then: `anvil plan --accept`");
+            println!("  {} PLAN REVIEWS PRESENT (R1+R2 files at root) — approve with /accept-plan (TUI) or `anvil plan --accept`", "→".yellow());
         }
 
         println!();
-        println!("{}", "Gate artifacts:".underline());
+        println!("{}", "Gate artifacts (now at repo root per PHASE_REVIEW_WORKFLOW.md):".underline());
         println!("  plan.md:           {}", if plan_path.exists() { "present".green() } else { "missing".red() });
         println!("  REVIEW_plan_R1.md: {}", if r1.exists() { "present".green() } else { "missing".red() });
         println!("  REVIEW_plan_R2.md: {}", if r2.exists() { "present".green() } else { "missing".red() });
     } else {
         println!("  {} TALK — no plan gate yet", "○".dimmed());
-        println!("  → Chat and explore with `anvil talk`");
-        println!("  → When ready, generate + review the plan: `anvil plan`");
+        println!("  → Launch TUI: `anvil` (or `anvil ui`) — chat with the coder; it writes plan.md, then /lock-plan + /accept-plan.");
+        println!("  → Legacy CLI: `anvil plan` (one-shot gen + both R1+R2)");
         println!();
-        println!("{}", "Gate artifacts:".underline());
+        println!("{}", "Gate artifacts (at root):".underline());
         println!("  plan.md:           {}", if plan_path.exists() { "present".green() } else { "missing".dimmed() });
         println!("  REVIEW_plan_R1.md: {}", if r1.exists() { "present".green() } else { "missing".dimmed() });
         println!("  REVIEW_plan_R2.md: {}", if r2.exists() { "present".green() } else { "missing".dimmed() });

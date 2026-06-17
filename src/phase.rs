@@ -1,12 +1,16 @@
 //! Phase commands — the heart of "build by phases".
 //!
-//! Philosophy for v0:
-//! - The user does most of the actual coding in their normal editor (or using `anvil talk` for spikes).
-//! - `anvil phase start <id>` sets the current phase and gives a focused prompt + context from the plan.
-//! - When the user believes the phase is done, they run `anvil phase review <id>`.
-//!   This **always** runs exactly two reviews (reviewer-a then reviewer-b) against the current state of the phase.
-//! - Only after both reviews exist do we allow `anvil phase accept <id>`.
-//! - Hard rule: no R3. If the reviews are bad, the user fixes the work and runs `review` again (fresh pair of reviews).
+//! Preferred flow (TUI chat-driven, matches PHASE_REVIEW_WORKFLOW.md + user spec):
+//! - /phase-start Px (or chat "start phase Px") — coder + human implement per plan excerpt.
+//! - When done: human tells *coder* "phase Px complete, write the R1 review document" (coder outputs full REVIEW_Px_R1.md markdown per template).
+//! - Human uses /save-r1 (TUI) to persist the coder-written briefing to root as REVIEW_Px_R1.md.
+//! - /critical-r1 (or equivalent) — R1 (reviewer_a) *automatically reads the coder's review doc* and runs critical review, presents findings in chat, writes sibling _Findings.
+//! - Human approves findings; coder implements fixes (code + tests).
+//! - Human tells coder "write the R2 review document" (coder outputs REVIEW_Px_R2.md including "Findings from R1" table).
+//! - /save-r2 ; /critical-r2 (reviewer_b critical on the R2 doc coder wrote) ; human approves ; coder implements ; coder summarizes and asks approval to ship phase.
+//! - /phase-accept Px — mark shipped (updates state, clears current_phase).
+//!
+//! Legacy CLI `anvil phase review` still does the old "always two reviews immediately" against implementation state (kept for scripts). New flow keeps human gates between coder-written docs and each critical reviewer pass. All REVIEW_* now at repo root.
 
 use std::fs;
 use std::path::Path;
@@ -40,19 +44,25 @@ pub fn run_phase_list(root: &Path) -> Result<()> {
     }
 
     for (id, name) in &phases {
-        let r1 = rev_dir.join(format!("REVIEW_phase-{}_{}.md", id, "R1"));
-        let r2 = rev_dir.join(format!("REVIEW_phase-{}_{}.md", id, "R2"));
+        // Detect review artifacts for both new TUI flow (REVIEW_Px_R*.md from /save-r*) and legacy.
+        let r1_new = rev_dir.join(format!("REVIEW_{}_R1.md", id));
+        let r2_new = rev_dir.join(format!("REVIEW_{}_R2.md", id));
+        let r1_leg = rev_dir.join(format!("REVIEW_phase-{}_R1.md", id));
+        let r2_leg = rev_dir.join(format!("REVIEW_phase-{}_R2.md", id));
+        let has_both = (r1_new.exists() && r2_new.exists()) || (r1_leg.exists() && r2_leg.exists());
+        let has_r1 = r1_new.exists() || r1_leg.exists();
+
         let is_shipped = state.shipped_phases.iter().any(|p| p == id);
         let is_current = state.current_phase.as_deref() == Some(id.as_str());
 
         let status = if is_shipped {
             format!("{}", "✓ accepted".green())
-        } else if is_current && r1.exists() && r2.exists() {
-            format!("{}", "R1+R2 done — `anvil phase accept`".yellow())
-        } else if is_current && r1.exists() {
-            format!("{}", "R1 done — run `anvil phase review` for R2".yellow())
+        } else if is_current && has_both {
+            format!("{}", "R1+R2 artifacts present — /phase-accept (or legacy review)".yellow())
+        } else if is_current && has_r1 {
+            format!("{}", "R1 review doc present — continue to R2 doc + criticals".yellow())
         } else if is_current {
-            format!("{}", "in progress — `anvil phase review` when done".cyan())
+            format!("{}", "in progress — tell coder 'write R1 review doc' then /save-r1 + /critical-r1".cyan())
         } else {
             format!("{}", "pending".dimmed())
         };
@@ -149,7 +159,7 @@ pub fn run_phase_review(root: &Path, id: &str) -> Result<()> {
     let phase_excerpt = extract_phase(&plan, id).unwrap_or_else(|| plan.clone());
 
     println!(
-        "\n{} Running mandatory phase reviews for {} (R1 then R2, different reviewers)...",
+        "\n{} Running legacy phase reviews for {} (R1 then R2). Preferred: chat-driven where coder writes the R1/R2 review *docs*, then separate /critical-* trigger reviewer critical passes with user approve between each.",
         "anvil".green(),
         id.cyan()
     );
@@ -168,7 +178,7 @@ pub fn run_phase_review(root: &Path, id: &str) -> Result<()> {
     let _r2 = run_phase_review_one(&client, &cfg, reviewer_b, id, "R2", &reviews, &context)?;
     println!("{} R2 (reviewer-b) complete", "✓".green());
 
-    println!("\nReviews written to reviews/ directory.");
+    println!("\nReviews written (legacy path). For the chat-driven flow use coder to write REVIEW_Px_R1.md, /save-r1, then critical reviewer passes with human approve gates between.");
     println!("Address the findings, then run:");
     println!("  {} {}   (only succeeds after both R1 and R2 exist for the phase)", "`anvil phase accept`".cyan(), id);
     Ok(())
@@ -214,14 +224,21 @@ fn run_phase_review_one(
 pub fn run_phase_accept(root: &Path, id: &str, note: Option<&str>) -> Result<()> {
     load_local_env(root);
     let reviews = reviews_dir(root);
-    let r1_path = reviews.join(format!("REVIEW_phase-{}_R1.md", id));
-    let r2_path = reviews.join(format!("REVIEW_phase-{}_R2.md", id));
 
-    if !r1_path.exists() || !r2_path.exists() {
+    // Support both the preferred new TUI flow naming (REVIEW_Px_R1.md written by /save-r1 etc.)
+    // and the legacy CLI naming (REVIEW_phase-Px_R1.md from `anvil phase review`).
+    let r1_new = reviews.join(format!("REVIEW_{}_R1.md", id));
+    let r2_new = reviews.join(format!("REVIEW_{}_R2.md", id));
+    let r1_leg = reviews.join(format!("REVIEW_phase-{}_R1.md", id));
+    let r2_leg = reviews.join(format!("REVIEW_phase-{}_R2.md", id));
+
+    let has_r1r2 = (r1_new.exists() && r2_new.exists()) || (r1_leg.exists() && r2_leg.exists());
+    if !has_r1r2 {
         return Err(anyhow!(
             "Both R1 and R2 review files must exist before you can accept a phase.\n\
-             Run `anvil phase review {}` first (this always does exactly two reviews).",
-            id
+             Preferred (TUI): tell coder to write REVIEW_{}_R1.md, /save-r1, /critical-r1, then R2 doc + /save-r2 + /critical-r2.\n\
+             Legacy: run `anvil phase review {}` (writes the phase- named files).",
+            id, id
         ));
     }
 
@@ -234,7 +251,7 @@ pub fn run_phase_accept(root: &Path, id: &str, note: Option<&str>) -> Result<()>
     save_state(root, &state)?;
 
     println!(
-        "{} Phase {} accepted after R1 + R2.",
+        "{} Phase {} accepted after its full review cycle (R1 doc by coder + critical R1 + R2 doc by coder + critical R2).",
         "✓".green().bold(),
         id
     );
@@ -245,6 +262,75 @@ pub fn run_phase_accept(root: &Path, id: &str, note: Option<&str>) -> Result<()>
     println!("\nMove to the next phase with `anvil phase start <next-id>`.");
     println!("When all phases that deliver value are done, you can ship (simple for v0: just commit and tag).");
     Ok(())
+}
+
+/// Capture the working-tree diff against HEAD (staged + unstaged), plus the
+/// names of any untracked files, so reviewers critique the *actual* change.
+fn capture_git_diff(root: &Path) -> String {
+    use std::process::Command;
+    let mut diff = match Command::new("git").args(["diff", "HEAD"]).current_dir(root).output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(e) => return format!("(could not run `git diff`: {})", e),
+    };
+    if let Ok(o) = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(root)
+        .output()
+    {
+        let untracked = String::from_utf8_lossy(&o.stdout);
+        if !untracked.trim().is_empty() {
+            diff.push_str("\n\n--- Untracked files (names only) ---\n");
+            diff.push_str(&untracked);
+        }
+    }
+    if diff.trim().is_empty() {
+        return "(no changes vs HEAD — nothing to review for this phase yet)".to_string();
+    }
+    if diff.len() > 120_000 {
+        diff.truncate(120_000);
+        diff.push_str("\n... [diff truncated for review]");
+    }
+    diff
+}
+
+/// Compose the reviewer input for a phase: the plan excerpt + the real diff.
+fn build_phase_diff_content(root: &Path, id: &str) -> String {
+    let plan = fs::read_to_string(root.join("plan.md")).unwrap_or_default();
+    let excerpt = extract_phase(&plan, id).unwrap_or_else(|| "(no plan excerpt found for this phase)".to_string());
+    let diff = capture_git_diff(root);
+    format!(
+        "Phase {} — critically review the implementation against the plan.\n\n\
+         --- PLAN EXCERPT ---\n{}\n\n\
+         --- GIT DIFF (working tree vs HEAD) ---\n{}\n",
+        id, excerpt, diff
+    )
+}
+
+/// R1 of a phase: reviewer-a critiques the current diff. Writes REVIEW_<id>_R1.md.
+/// Used by the TUI `/accept-phase` gate.
+pub fn run_phase_r1_diff(root: &Path, id: &str) -> Result<String> {
+    load_local_env(root);
+    let cfg = load_config(root)?;
+    let client = LlmClient::new();
+    let reviews = reviews_dir(root);
+    fs::create_dir_all(&reviews)?;
+    let content = build_phase_diff_content(root, id);
+    let reviewer_a = cfg.roles.reviewer_a.as_deref()
+        .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
+    crate::plan::run_single_review(&client, &cfg, reviewer_a, &content, "R1", &reviews, id)
+}
+
+/// R2 of a phase: reviewer-b critiques the current diff. Writes REVIEW_<id>_R2.md.
+pub fn run_phase_r2_diff(root: &Path, id: &str) -> Result<String> {
+    load_local_env(root);
+    let cfg = load_config(root)?;
+    let client = LlmClient::new();
+    let reviews = reviews_dir(root);
+    fs::create_dir_all(&reviews)?;
+    let content = build_phase_diff_content(root, id);
+    let reviewer_b = cfg.roles.reviewer_b.as_deref()
+        .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
+    crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", &reviews, id)
 }
 
 fn extract_phase(plan: &str, id: &str) -> Option<String> {

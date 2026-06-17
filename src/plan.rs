@@ -1,13 +1,15 @@
-//! `anvil plan`
+//! `anvil plan` (and TUI /plan support)
 //!
-//! Generate (or refresh) a phased plan using the configured planner role.
-//! Then **immediately and automatically** run exactly two reviews:
-//!   R1 using reviewer-a
-//!   R2 using reviewer-b
+//! The interactive flow (preferred): plan is discussed and written by the *coder* role inside the TUI chat.
+//! User saves it (`/save-plan`), then uses the explicit human gates:
+//!   /lock-plan  -> R1 (reviewer-a) automatically reviews plan.md and presents findings (writes REVIEW_plan_R1.md at root)
+//!   (coder helps apply fixes to plan.md; user may /save-plan again)
+//!   /approve-r1 -> R2 (reviewer-b) automatically reviews (updated) plan and presents findings
+//!   (user approves R2 findings)
+//!   /accept-plan -> records hash, plan approved, phases unlocked.
 //!
-//! These two must be different bindings (ideally different providers).
-//! After R2 the user must explicitly accept before phases can be marked complete.
-//! There is no R3 path in the UI.
+//! The legacy one-shot `anvil plan --fresh` still generates via coder + immediately runs both R1+R2 (for scripts/CLI users).
+//! Both paths now write REVIEW_plan_R*.md at repo *root* (see PHASE_REVIEW_WORKFLOW.md).
 
 use std::fs;
 use std::path::Path;
@@ -101,16 +103,13 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
     println!("{} R2 complete — findings saved", "✓".green());
 
     println!("\n{}", "Both review rounds finished.".bold());
-    println!("Review documents:");
+    println!("Review documents (at repo root):");
     println!("  {}", reviews.join("REVIEW_plan_R1.md").display());
     println!("  {}", reviews.join("REVIEW_plan_R2.md").display());
 
     println!("\nAddress the findings in plan.md (or in your implementation approach).");
     println!("When you are satisfied that the plan (after addressing R1+R2) is solid, run:");
-    println!("  {}   — this records that the plan passed its two-review gate.", "`anvil plan --accept` (not yet wired)".cyan());
-
-    println!("\n{} Address findings in plan.md, then lock the gate:", "Next:".green());
-    println!("  {}   — records the accepted hash, unlocks phase gates", "`anvil plan --accept`".cyan());
+    println!("  {}   — this records that the plan passed its two-review gate.", "`anvil plan --accept`".cyan());
     Ok(())
 }
 
@@ -149,9 +148,8 @@ pub fn accept_plan(root: &Path) -> Result<()> {
     println!("{} Plan accepted. Hash {} recorded in .anvil/state.json.", "✓".green().bold(), &hash[..8]);
     println!("  R1: {}", r1.display());
     println!("  R2: {}", r2.display());
-    println!("\n{} Start building phases:", "Next:".green());
-    println!("  {} P0   — set current phase and get plan excerpt", "`anvil phase start`".cyan());
-    println!("  {}       — list all phases and their status", "`anvil phase list`".cyan());
+    println!("\n{} Start building phases (in TUI: chat with coder, /phase-start P0, coder writes review docs on done, sequential critical reviews with human approve between):", "Next:".green());
+    println!("  {} P0   — set current phase", "`anvil phase start`".cyan());
     Ok(())
 }
 
@@ -189,7 +187,7 @@ pub fn run_single_review(
     client: &LlmClient,
     cfg: &crate::config::AnvilConfig,
     reviewer_role: &str,
-    plan_content: &str,
+    content: &str,
     round: &str,
     reviews_dir: &Path,
     artifact: &str,
@@ -199,14 +197,15 @@ pub fn run_single_review(
 
     let api_key = client.get_credential(&binding.provider, provider)?;
 
-    let system = "You are a skeptical, experienced engineer from a *different* model family than the planner. \
-                  Your job is to find real problems, scope issues, hidden risks, and weak acceptance criteria. \
-                  Do not be nice. Be specific. Cite exact sections or phase ids. \
+    // Default system is for direct plan review (used by legacy one-shot and TUI /lock-plan).
+    let system = "You are a skeptical, experienced engineer from a *different* model family than the coder/implementer. \
+                  Your job is to find real problems, scope issues, hidden risks, weak acceptance criteria, and things the implementer missed. \
+                  Do not be nice. Be specific. Cite exact sections, file names or phase ids. \
                   Output a short structured review with sections: ## Summary, ## High, ## Medium, ## Low, ## Questions.";
 
     let user = format!(
-        "Review the following plan ({}).\n\n--- PLAN ---\n{}\n--- END PLAN ---\n\nProduce the structured review now.",
-        round, plan_content
+        "Review the following artifact ({}).\n\n--- CONTENT ---\n{}\n--- END CONTENT ---\n\nProduce the structured review now.",
+        round, content
     );
 
     println!("  Invoking {} ({} via {}) for {}...", name.cyan(), binding.model, provider.r#type, round);
@@ -226,6 +225,103 @@ pub fn run_single_review(
     );
     fs::write(&out_path, format!("{}{}", header, findings))?;
 
+    Ok(findings)
+}
+
+/// Run a *critical* review (R1 or R2) against a *review document that the coder wrote*
+/// (e.g. the structured REVIEW_Px_R1.md briefing the coder produced after declaring a phase done).
+/// Writes REVIEW_<artifact>_<round>.md (caller chooses artifact like "P0-R1-doc" to get REVIEW_P0-R1-doc_R1.md,
+/// or use "P0_R1_Findings" style). Uses a prompt that tells the reviewer it is critiquing the implementer's
+/// own R1/R2 briefing doc, not the raw code/plan.
+#[allow(dead_code)]
+pub fn run_critical_review_on_doc(
+    client: &LlmClient,
+    cfg: &crate::config::AnvilConfig,
+    reviewer_role: &str,
+    doc_content: &str,
+    round: &str,
+    reviews_dir: &Path,
+    artifact: &str,
+    extra_context: &str,
+) -> Result<String> {
+    let (name, binding, provider) = cfg.resolve_role_full(reviewer_role)
+        .map_err(|_| anyhow!("reviewer role '{}' is not fully configured", reviewer_role))?;
+
+    let api_key = client.get_credential(&binding.provider, provider)?;
+
+    let system = "You are a skeptical, experienced engineer from a *different* model family than the coder who wrote the review briefing. \
+                  The coder/implementer just wrote a structured R1 (or R2) review document claiming what was built, decisions, test coverage and risks. \
+                  Your job is to critically audit that document itself: does the evidence actually support the claims? Are success criteria truly met? \
+                  Are risks understated? Is the 'What Was Built' table accurate and complete? Be direct and specific. Cite the briefing's own sections. \
+                  Output: ## Summary, ## High (must-fix), ## Medium, ## Low, ## Risks understated, ## Recommendations.";
+
+    let user = format!(
+        "Critically review the following R{} review document written by the coder/implementer.\n\n{}\n\n--- REVIEW DOC ---\n{}\n--- END REVIEW DOC ---\n\nProduce the structured critical findings now.",
+        round, extra_context, doc_content
+    );
+
+    println!("  Invoking {} ({} via {}) critical review on coder-written {} doc...", name.cyan(), binding.model, provider.r#type, round);
+
+    let findings = LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
+
+    // Write as e.g. REVIEW_P0_R1_Findings.md or REVIEW_P0-R1-doc_R1.md depending on what caller passes as artifact.
+    let out_path = reviews_dir.join(format!("REVIEW_{}_{}.md", artifact, round));
+    let header = format!(
+        "# {} — Critical {} ({} on coder's review doc)\n\n**Reviewer:** {} ({} via {})\n**Date:** {}\n\n",
+        artifact,
+        round,
+        if round == "R1" { "first" } else { "second" },
+        name,
+        binding.model,
+        provider.r#type,
+        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+    );
+    fs::write(&out_path, format!("{}{}", header, findings))?;
+
+    Ok(findings)
+}
+
+/// One-round R1 review of the current plan.md (used by TUI /lock-plan).
+/// Writes REVIEW_plan_R1.md at root and returns the findings text.
+pub fn run_plan_r1(root: &Path) -> Result<String> {
+    load_local_env(root);
+    let cfg = load_config(root)?;
+    let client = LlmClient::new();
+    let reviews = reviews_dir(root);
+    fs::create_dir_all(&reviews)?;
+
+    let plan_path = root.join("plan.md");
+    if !plan_path.exists() {
+        return Err(anyhow!("plan.md not found — coder must write it (via chat) and user must save it to disk before /lock-plan."));
+    }
+    let plan_content = fs::read_to_string(&plan_path)?;
+
+    let reviewer_a = cfg.roles.reviewer_a.as_deref()
+        .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
+
+    let findings = run_single_review(&client, &cfg, reviewer_a, &plan_content, "R1", &reviews, "plan")?;
+    Ok(findings)
+}
+
+/// One-round R2 review of the current plan.md (used by TUI /approve-r1 after coder incorporated R1 findings).
+/// Writes REVIEW_plan_R2.md at root and returns the findings text.
+pub fn run_plan_r2(root: &Path) -> Result<String> {
+    load_local_env(root);
+    let cfg = load_config(root)?;
+    let client = LlmClient::new();
+    let reviews = reviews_dir(root);
+    // no need to mkdir again
+
+    let plan_path = root.join("plan.md");
+    if !plan_path.exists() {
+        return Err(anyhow!("plan.md not found."));
+    }
+    let plan_content = fs::read_to_string(&plan_path)?;
+
+    let reviewer_b = cfg.roles.reviewer_b.as_deref()
+        .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
+
+    let findings = run_single_review(&client, &cfg, reviewer_b, &plan_content, "R2", &reviews, "plan")?;
     Ok(findings)
 }
 

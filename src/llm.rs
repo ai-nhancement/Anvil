@@ -12,16 +12,87 @@
 //!
 //! Exactly two reviews from different providers is a *workflow* concern, not a client concern.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, stdout};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{CredentialRef, ProviderConnection};
+
+// ──────────────────────────────────────────────────────────────────────────
+// Agentic tool-calling types
+//
+// These power the real agent loop (see `agent.rs`): the model can request tool
+// calls, we execute them, append the results, and loop until it answers in text.
+// Both the OpenAI-compatible (`tools` / `tool_calls`) and Anthropic
+// (`tool_use` / `tool_result`) wire formats are supported.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Who authored a turn in the conversation history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    User,
+    Assistant,
+    /// A tool result being fed back to the model.
+    Tool,
+}
+
+/// One turn of conversation history. An assistant turn may carry `tool_calls`;
+/// a `Tool` turn carries the result for a prior call (`tool_call_id`).
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: Role,
+    pub text: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self { role: Role::User, text: text.into(), tool_calls: vec![], tool_call_id: None }
+    }
+    pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self { role: Role::Assistant, text: text.into(), tool_calls, tool_call_id: None }
+    }
+    pub fn tool_result(tool_call_id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            text: text.into(),
+            tool_calls: vec![],
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+}
+
+/// A tool the model is allowed to call. `input_schema` is a JSON Schema object.
+#[derive(Debug, Clone)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// A single tool invocation requested by the model.
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+/// The outcome of one assistant turn: any streamed text plus any tool calls
+/// the model wants executed. Empty `tool_calls` means the model is done.
+#[derive(Debug, Clone, Default)]
+pub struct AssistantTurn {
+    pub text: String,
+    pub tool_calls: Vec<ToolCall>,
+}
 
 /// High-level client. Cheap to clone (Arc under the hood).
 #[derive(Clone)]
@@ -246,12 +317,10 @@ impl LlmClient {
         }
     }
 
-    /// Channel-based streaming chat for the TUI (and other non-stdout consumers).
-    ///
-    /// Sends every content delta as it arrives over `token_tx` (UnboundedSender for simplicity).
-    /// Returns the full concatenated text on successful completion.
-    /// The provided sender is dropped when the stream ends (receiver will see disconnect).
-    /// **Never writes to stdout** — required when the terminal is in raw/alternate mode.
+    /// Channel-based *plain* (no-tools) streaming chat. Superseded in the TUI by the
+    /// agent loop (`chat_turn_stream`); retained as a simple non-agent streaming path
+    /// for potential headless/CLI consumers.
+    #[allow(dead_code)]
     pub async fn chat_stream_to_channel(
         &self,
         conn: &ProviderConnection,
@@ -959,6 +1028,503 @@ impl LlmClient {
             .await;
         Ok(())
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Agentic tool-calling turn (streams text, returns any requested tool calls)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Drive one assistant turn for the agent loop: send the full conversation
+    /// `history` plus the available `tools`, stream text deltas over `token_tx`,
+    /// and return the assistant's text together with any tool calls it requested.
+    ///
+    /// Provider support:
+    /// - openai_compat / openai / azure_openai → OpenAI `tools` + `tool_calls`
+    /// - anthropic → Messages API `tool_use` / `tool_result`
+    /// - google / gemini → text-only fallback (no tool calls); the agent loop
+    ///   then simply treats the reply as a final answer.
+    pub async fn chat_turn_stream(
+        &self,
+        conn: &ProviderConnection,
+        model: &str,
+        api_key: &str,
+        system: &str,
+        history: &[ChatMessage],
+        tools: &[ToolDef],
+        token_tx: UnboundedSender<String>,
+    ) -> Result<AssistantTurn> {
+        match conn.r#type.as_str() {
+            "openai_compat" | "openai" | "azure_openai" => {
+                self.openai_turn_stream(conn, model, api_key, system, history, tools, token_tx).await
+            }
+            "anthropic" => {
+                self.anthropic_turn_stream(conn, model, api_key, system, history, tools, token_tx).await
+            }
+            "google" | "google_ai_studio" | "gemini" => {
+                // No tool calling for Gemini yet — flatten history to a single user
+                // turn and return the text. The agent loop treats this as terminal.
+                let user = flatten_history_to_text(history);
+                match self.chat_google(conn, model, api_key, system, &user).await {
+                    Ok(full) => {
+                        let _ = token_tx.send(full.clone());
+                        Ok(AssistantTurn { text: full, tool_calls: vec![] })
+                    }
+                    Err(e) => {
+                        let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                        Err(e)
+                    }
+                }
+            }
+            other => {
+                let msg = format!("provider type '{}' does not support agent turns yet", other);
+                let _ = token_tx.send(format!("\n[llm-error] {}", msg));
+                anyhow::bail!("{}", msg)
+            }
+        }
+    }
+
+    async fn openai_turn_stream(
+        &self,
+        conn: &ProviderConnection,
+        model: &str,
+        api_key: &str,
+        system: &str,
+        history: &[ChatMessage],
+        tools: &[ToolDef],
+        token_tx: UnboundedSender<String>,
+    ) -> Result<AssistantTurn> {
+        let base = conn
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/');
+        let url = format!("{}/chat/completions", base);
+
+        // Build the messages array (system + history) in OpenAI wire form.
+        let messages = build_openai_messages(system, history);
+
+        let base_for_detect = conn.base_url.as_deref().unwrap_or("");
+        let is_ollama = base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
+        let keep_alive = conn
+            .keep_alive
+            .clone()
+            .or_else(|| if is_ollama { Some("30s".to_string()) } else { None });
+
+        let mut body = json!({
+            "model": model,
+            "messages": messages,
+            "stream": true,
+        });
+        if !tools.is_empty() {
+            let tools_json: Vec<Value> = tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.input_schema,
+                        }
+                    })
+                })
+                .collect();
+            body["tools"] = json!(tools_json);
+        }
+        if let Some(k) = keep_alive {
+            body["keep_alive"] = json!(k);
+        }
+
+        let mut request = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream");
+        if conn.r#type == "azure_openai" || base.contains("azure.com") {
+            request = request.header("api-key", api_key);
+        }
+
+        let resp = match request.json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                return Err(e.into());
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let msg = format!("{} error ({}): {}", conn.r#type, status, text);
+            let _ = token_tx.send(format!("\n[llm-error] {}", msg));
+            anyhow::bail!("{}", msg);
+        }
+
+        self.handle_openai_tool_stream(resp, token_tx).await
+    }
+
+    async fn handle_openai_tool_stream(
+        &self,
+        resp: reqwest::Response,
+        token_tx: UnboundedSender<String>,
+    ) -> Result<AssistantTurn> {
+        let mut stream = resp.bytes_stream();
+        let mut text = String::new();
+        let mut buffer = String::new();
+        // index -> (id, name, accumulated-arguments-json-string)
+        let mut tc_acc: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+
+        let handle_line = |line: &str,
+                           text: &mut String,
+                           tc_acc: &mut BTreeMap<usize, (String, String, String)>|
+         -> bool {
+            // returns true if [DONE] seen
+            if let Some(data) = line.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    return true;
+                }
+                if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
+                    if let Some(choice) = chunk.choices.into_iter().next() {
+                        if let Some(delta) = choice.delta.content {
+                            if !delta.is_empty() {
+                                text.push_str(&delta);
+                                let _ = token_tx.send(delta);
+                            }
+                        }
+                        if let Some(calls) = choice.delta.tool_calls {
+                            for d in calls {
+                                let entry = tc_acc.entry(d.index).or_default();
+                                if let Some(id) = d.id {
+                                    if !id.is_empty() {
+                                        entry.0 = id;
+                                    }
+                                }
+                                if let Some(f) = d.function {
+                                    if let Some(n) = f.name {
+                                        if !n.is_empty() {
+                                            entry.1 = n;
+                                        }
+                                    }
+                                    if let Some(a) = f.arguments {
+                                        entry.2.push_str(&a);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        let mut done = false;
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim_end_matches('\r').to_string();
+                buffer = buffer[pos + 1..].to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                if handle_line(&line, &mut text, &mut tc_acc) {
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        // Flush any trailing partial line (last chunk often lacks a newline).
+        if !done && !buffer.trim().is_empty() {
+            let line = buffer.trim_end_matches('\r').to_string();
+            handle_line(&line, &mut text, &mut tc_acc);
+        }
+
+        Ok(AssistantTurn {
+            text,
+            tool_calls: finalize_tool_calls(tc_acc),
+        })
+    }
+
+    async fn anthropic_turn_stream(
+        &self,
+        conn: &ProviderConnection,
+        model: &str,
+        api_key: &str,
+        system: &str,
+        history: &[ChatMessage],
+        tools: &[ToolDef],
+        token_tx: UnboundedSender<String>,
+    ) -> Result<AssistantTurn> {
+        let base = conn
+            .base_url
+            .as_deref()
+            .unwrap_or("https://api.anthropic.com")
+            .trim_end_matches('/');
+        let url = format!("{}/v1/messages", base);
+
+        // Map history to Anthropic messages. Consecutive tool results must be
+        // collapsed into a single user message of tool_result blocks.
+        let messages = build_anthropic_messages(history);
+
+        let mut body = json!({
+            "model": model,
+            "max_tokens": 8192,
+            "system": system,
+            "messages": messages,
+            "stream": true,
+        });
+        if !tools.is_empty() {
+            let tools_json: Vec<Value> = tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                    })
+                })
+                .collect();
+            body["tools"] = json!(tools_json);
+        }
+
+        let request = self
+            .http
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+
+        let resp = match request.json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                return Err(e.into());
+            }
+        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let msg = format!("anthropic error ({}): {}", status, text);
+            let _ = token_tx.send(format!("\n[llm-error] {}", msg));
+            anyhow::bail!("{}", msg);
+        }
+
+        self.handle_anthropic_tool_stream(resp, token_tx).await
+    }
+
+    async fn handle_anthropic_tool_stream(
+        &self,
+        resp: reqwest::Response,
+        token_tx: UnboundedSender<String>,
+    ) -> Result<AssistantTurn> {
+        let mut stream = resp.bytes_stream();
+        let mut text = String::new();
+        let mut buffer = String::new();
+        // index -> (id, name, accumulated-input-json-string)
+        let mut blocks: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+        let mut is_tool: BTreeMap<usize, bool> = BTreeMap::new();
+
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim_end_matches('\r').to_string();
+                buffer = buffer[pos + 1..].to_string();
+                let data = match line.strip_prefix("data: ") {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let evt: AnthEvt = match serde_json::from_str(data) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                match evt.r#type.as_str() {
+                    "content_block_start" => {
+                        let idx = evt.index.unwrap_or(0);
+                        if let Some(cb) = evt.content_block {
+                            let tool = cb.r#type == "tool_use";
+                            is_tool.insert(idx, tool);
+                            blocks.insert(
+                                idx,
+                                (cb.id.unwrap_or_default(), cb.name.unwrap_or_default(), String::new()),
+                            );
+                        }
+                    }
+                    "content_block_delta" => {
+                        let idx = evt.index.unwrap_or(0);
+                        if let Some(d) = evt.delta {
+                            if let Some(t) = d.text {
+                                if !t.is_empty() {
+                                    text.push_str(&t);
+                                    let _ = token_tx.send(t);
+                                }
+                            }
+                            if let Some(pj) = d.partial_json {
+                                blocks.entry(idx).or_default().2.push_str(&pj);
+                            }
+                        }
+                    }
+                    "message_stop" => {
+                        return Ok(self.build_anthropic_turn(text, blocks, is_tool));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(self.build_anthropic_turn(text, blocks, is_tool))
+    }
+
+    fn build_anthropic_turn(
+        &self,
+        text: String,
+        blocks: BTreeMap<usize, (String, String, String)>,
+        is_tool: BTreeMap<usize, bool>,
+    ) -> AssistantTurn {
+        let mut tool_calls = vec![];
+        for (idx, (id, name, json_str)) in blocks {
+            if *is_tool.get(&idx).unwrap_or(&false) {
+                let arguments = if json_str.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str(&json_str).unwrap_or_else(|_| json!({}))
+                };
+                tool_calls.push(ToolCall { id, name, arguments });
+            }
+        }
+        AssistantTurn { text, tool_calls }
+    }
+}
+
+/// Build the OpenAI Chat Completions `messages` array (system + history),
+/// mapping assistant `tool_calls` and `tool` results to the wire format.
+/// Pure (no I/O) so the mapping can be unit-tested offline.
+fn build_openai_messages(system: &str, history: &[ChatMessage]) -> Vec<Value> {
+    let mut messages: Vec<Value> = vec![json!({"role": "system", "content": system})];
+    for m in history {
+        match m.role {
+            Role::User => messages.push(json!({"role": "user", "content": m.text})),
+            Role::Assistant => {
+                let mut obj = serde_json::Map::new();
+                obj.insert("role".into(), json!("assistant"));
+                // content may be null when the turn is purely tool calls.
+                if m.text.is_empty() {
+                    obj.insert("content".into(), Value::Null);
+                } else {
+                    obj.insert("content".into(), json!(m.text));
+                }
+                if !m.tool_calls.is_empty() {
+                    let tcs: Vec<Value> = m
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments.to_string(),
+                                }
+                            })
+                        })
+                        .collect();
+                    obj.insert("tool_calls".into(), json!(tcs));
+                }
+                messages.push(Value::Object(obj));
+            }
+            Role::Tool => messages.push(json!({
+                "role": "tool",
+                "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": m.text,
+            })),
+        }
+    }
+    messages
+}
+
+/// Build the Anthropic Messages `messages` array, mapping assistant tool calls
+/// to `tool_use` blocks and collapsing consecutive tool results into a single
+/// user message of `tool_result` blocks. Pure (no I/O) for unit-testing.
+fn build_anthropic_messages(history: &[ChatMessage]) -> Vec<Value> {
+    let mut messages: Vec<Value> = vec![];
+    let mut i = 0;
+    while i < history.len() {
+        let m = &history[i];
+        match m.role {
+            Role::User => {
+                messages.push(json!({
+                    "role": "user",
+                    "content": [{"type": "text", "text": m.text}],
+                }));
+                i += 1;
+            }
+            Role::Assistant => {
+                let mut blocks: Vec<Value> = vec![];
+                if !m.text.is_empty() {
+                    blocks.push(json!({"type": "text", "text": m.text}));
+                }
+                for tc in &m.tool_calls {
+                    blocks.push(json!({
+                        "type": "tool_use",
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments,
+                    }));
+                }
+                messages.push(json!({"role": "assistant", "content": blocks}));
+                i += 1;
+            }
+            Role::Tool => {
+                let mut blocks: Vec<Value> = vec![];
+                while i < history.len() && history[i].role == Role::Tool {
+                    let t = &history[i];
+                    blocks.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": t.tool_call_id.clone().unwrap_or_default(),
+                        "content": t.text,
+                    }));
+                    i += 1;
+                }
+                messages.push(json!({"role": "user", "content": blocks}));
+            }
+        }
+    }
+    messages
+}
+
+/// Collapse history into a single text blob (used for providers without a
+/// native multi-turn/tool format, e.g. the Gemini fallback).
+fn flatten_history_to_text(history: &[ChatMessage]) -> String {
+    let mut out = String::new();
+    for m in history {
+        match m.role {
+            Role::User => out.push_str(&format!("\nUser: {}\n", m.text)),
+            Role::Assistant => {
+                if !m.text.is_empty() {
+                    out.push_str(&format!("\nAssistant: {}\n", m.text));
+                }
+            }
+            Role::Tool => out.push_str(&format!("\n[tool result] {}\n", m.text)),
+        }
+    }
+    out
+}
+
+/// Build final `ToolCall`s from accumulated OpenAI streaming deltas, parsing the
+/// argument strings into JSON (falling back to `{}` if a model emits invalid JSON).
+fn finalize_tool_calls(acc: BTreeMap<usize, (String, String, String)>) -> Vec<ToolCall> {
+    acc.into_iter()
+        .filter(|(_, (_, name, _))| !name.is_empty())
+        .map(|(_, (id, name, args))| {
+            let arguments = if args.trim().is_empty() {
+                json!({})
+            } else {
+                serde_json::from_str(&args).unwrap_or_else(|_| json!({}))
+            };
+            ToolCall { id, name, arguments }
+        })
+        .collect()
 }
 
 // ── Stream event shapes (best effort, we only care about the text deltas) ─────
@@ -977,6 +1543,30 @@ struct OpenAiStreamChoice {
 struct OpenAiDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Present on agent turns; absent (None) for plain text streams.
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+}
+
+/// One element of a streaming `delta.tool_calls` array. The `index` correlates
+/// fragments of the same call across chunks; `id`/`name` arrive early and
+/// `arguments` accumulates as a partial JSON string.
+#[derive(Deserialize)]
+struct OpenAiToolCallDelta {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiFnDelta>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiFnDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -989,6 +1579,131 @@ struct AnthStreamEvent {
 #[derive(Deserialize)]
 struct AnthDelta {
     text: Option<String>,
+}
+
+// Richer Anthropic stream event used by the tool-aware agent parser.
+#[derive(Deserialize)]
+struct AnthEvt {
+    #[serde(rename = "type")]
+    r#type: String,
+    #[serde(default)]
+    index: Option<usize>,
+    #[serde(default)]
+    content_block: Option<AnthBlock>,
+    #[serde(default)]
+    delta: Option<AnthEvtDelta>,
+}
+
+#[derive(Deserialize)]
+struct AnthBlock {
+    #[serde(rename = "type")]
+    r#type: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthEvtDelta {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    partial_json: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A realistic history: user → assistant(tool_call) → tool_result → user.
+    fn sample_history() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage::user("read the readme"),
+            ChatMessage::assistant(
+                "",
+                vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "README.md"}),
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "# Anvil\nhello"),
+            ChatMessage::user("now summarize it"),
+        ]
+    }
+
+    #[test]
+    fn openai_messages_map_tool_calls_and_results() {
+        let msgs = build_openai_messages("SYS", &sample_history());
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "SYS");
+        // assistant turn carries a tool_calls array, content null
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert!(msgs[2]["content"].is_null());
+        let tc = &msgs[2]["tool_calls"][0];
+        assert_eq!(tc["id"], "call_1");
+        assert_eq!(tc["type"], "function");
+        assert_eq!(tc["function"]["name"], "read_file");
+        // arguments are serialized as a JSON *string* per OpenAI spec
+        assert_eq!(tc["function"]["arguments"], "{\"path\":\"README.md\"}");
+        // tool result becomes a role:"tool" message keyed by tool_call_id
+        assert_eq!(msgs[3]["role"], "tool");
+        assert_eq!(msgs[3]["tool_call_id"], "call_1");
+        assert_eq!(msgs[3]["content"], "# Anvil\nhello");
+    }
+
+    #[test]
+    fn anthropic_messages_map_tool_use_and_result_blocks() {
+        let msgs = build_anthropic_messages(&sample_history());
+        // user, assistant(tool_use), user(tool_result), user
+        assert_eq!(msgs.len(), 4);
+        let use_block = &msgs[1]["content"][0];
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(use_block["type"], "tool_use");
+        assert_eq!(use_block["id"], "call_1");
+        assert_eq!(use_block["name"], "read_file");
+        assert_eq!(use_block["input"]["path"], "README.md");
+        // tool result is a user message with a tool_result block (not a JSON string)
+        let res_block = &msgs[2]["content"][0];
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(res_block["type"], "tool_result");
+        assert_eq!(res_block["tool_use_id"], "call_1");
+        assert_eq!(res_block["content"], "# Anvil\nhello");
+    }
+
+    #[test]
+    fn anthropic_collapses_consecutive_tool_results() {
+        let history = vec![
+            ChatMessage::assistant(
+                "",
+                vec![
+                    ToolCall { id: "a".into(), name: "read_file".into(), arguments: json!({}) },
+                    ToolCall { id: "b".into(), name: "list_dir".into(), arguments: json!({}) },
+                ],
+            ),
+            ChatMessage::tool_result("a", "file a"),
+            ChatMessage::tool_result("b", "dir b"),
+        ];
+        let msgs = build_anthropic_messages(&history);
+        // The two tool results collapse into ONE user message with two blocks.
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(msgs[1]["content"][0]["tool_use_id"], "a");
+        assert_eq!(msgs[1]["content"][1]["tool_use_id"], "b");
+    }
+
+    #[test]
+    fn finalize_skips_nameless_and_parses_args() {
+        let mut acc: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+        acc.insert(0, ("id0".into(), "write_file".into(), "{\"path\":\"x\"}".into()));
+        acc.insert(1, ("id1".into(), String::new(), "garbage".into())); // no name → dropped
+        let calls = finalize_tool_calls(acc);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].arguments["path"], "x");
+    }
 }
 
 /// Public so the TUI can display loaded models + VRAM usage from `ollama ps`.

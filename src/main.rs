@@ -1,15 +1,23 @@
 //! Anvil — Structure for vibe coding.
 //!
-//! A model-agnostic, interactive CLI that enforces a lightweight disciplined flow:
-//!   Talk → Plan (exactly R1 + R2 by different providers/models) → Build by phases
-//!   (for each phase: implement with tool assistance, then exactly R1 + R2).
+//! A model-agnostic, interactive coding agent that adds just enough structure to stop drift.
+//! The coder is a real agent: it reads, writes, and edits files and runs commands itself
+//! (via tools), the same way Claude Code / Cursor / Aider work — no manual file inclusion.
 //!
-//! Hard rule: only two review rounds per gate. Different model + provider for R1 vs R2.
-//! Designed explicitly to kill the drift that kills vibe coding projects.
+//! Structure is imposed at exactly two human gates:
+//!   - PLAN:  discuss → the coder writes plan.md itself → /lock-plan (R1+R2 reviewers, different
+//!            models, critique plan.md) → coder revises → /accept-plan.
+//!   - PHASE: build the phase directly → /accept-phase (R1+R2 reviewers critique the git diff)
+//!            → fix findings → /ship-phase.
+//!
+//! Hard rule: exactly two review rounds per gate, from different model families. Review files
+//! live at repo root. Designed explicitly to kill the drift that kills vibe coding projects.
 
 mod cli;
 mod config;
 mod llm;
+mod tools;
+mod agent;
 mod state;
 mod talk;
 mod plan;
@@ -21,10 +29,9 @@ use colored::Colorize;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "anvil", version, about = "Structure for vibe coding — Talk, Plan (R1+R2), Build phases (R1+R2)")]
+#[command(name = "anvil", version, about = "Structure for vibe coding — coder writes plan + phase review docs; sequential R1/R2 critical reviews (different models) with explicit human approve gates between")]
 #[command(long_about = "Anvil brings just enough structure to prevent drift in AI-assisted coding.\n\
-Talk with a model to capture intent. Produce a plan, reviewed by exactly two different models from different providers.\n\
-Implement phase by phase with the tool's help. Each phase gets exactly two reviews before you move on.\n\
+The coder is a real agent — it reads, writes, and edits files and runs commands itself (no manual /include). Structure is imposed at two human gates: PLAN (discuss → coder writes plan.md → /lock-plan runs R1+R2 reviewers → coder revises → /accept-plan) and PHASE (build → /accept-phase runs R1+R2 on the git diff → fix → /ship-phase). The two reviewers are different model families for a genuine second opinion. All REVIEW_* live at repo root.\n\
 No R3+. Cross-provider by design. Ollama, local, Azure, Bedrock, every gateway supported.")]
 struct Cli {
     /// Subcommand. When omitted (i.e. bare `anvil` or `cargo run --`), we launch the interactive TUI.
@@ -58,7 +65,8 @@ enum Commands {
         model: Option<String>,
     },
 
-    /// Generate / refine the phased Plan, then run exactly R1 + R2 reviews (different providers)
+    /// Legacy one-shot: generate a plan (coder) + run both R1 + R2 immediately.
+    /// Preferred: launch the TUI (`anvil`), discuss with the coder which writes plan.md itself, then /lock-plan (R1+R2) and /accept-plan.
     Plan {
         /// Force a fresh plan generation even if one exists
         #[arg(long)]
@@ -75,7 +83,7 @@ enum Commands {
         context: Option<std::path::PathBuf>,
     },
 
-    /// Work on a phase: implementation assistance + exactly two reviews when ready
+    /// Phase work (legacy direct). Preferred TUI flow: the coder implements the phase directly, then /accept-phase (R1+R2 reviewers critique the git diff) and /ship-phase.
     #[command(subcommand)]
     Phase(PhaseCmd),
 
@@ -97,19 +105,19 @@ enum ConfigCmd {
 
 #[derive(Subcommand)]
 enum PhaseCmd {
-    /// Start or continue work on a phase (enters assisted implementation chat for the phase)
+    /// Start or continue work on a phase (sets current in state; gives plan excerpt). Preferred full flow lives in TUI chat.
     Start {
-        /// Phase id from the plan, e.g. P3
+        /// Phase id from the plan, e.g. P0
         id: String,
     },
 
-    /// When you believe the phase is complete, run exactly R1 then R2 review (different models/providers)
+    /// Legacy: run R1+R2 immediately on "done" claim. New TUI flow: coder writes REVIEW_Px_R1.md (the briefing doc), user /save-r1 then /critical-r1 runs reviewer critical *on coder's doc* (human gate), coder fixes, coder writes R2 doc, /critical-r2, human gate, coder summarizes, /phase-accept.
     Review {
-        /// Phase id, e.g. P3
+        /// Phase id, e.g. P0
         id: String,
     },
 
-    /// Mark the phase as accepted after successful R1 + R2. Records the gate.
+    /// Mark the phase as accepted after the *full* coder-doc + critical-R1 + coder-R2-doc + critical-R2 + human approvals cycle. Updates shipped_phases + clears current.
     Accept {
         /// Phase id
         id: String,

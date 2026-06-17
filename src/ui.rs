@@ -11,10 +11,12 @@
 use std::fs::OpenOptions;
 use std::io::{stdout, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use crossterm::{
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -34,38 +36,65 @@ use crate::config::{
     ensure_anvil_dir, load_config, load_local_env, save_config, set_local_env_var, AnvilConfig,
     CredentialRef, ModelBinding, ProviderConnection,
 };
+use crate::agent::{Agent, ConfirmHandle};
 use crate::llm::LlmClient;
 use crate::state::{load_state, reviews_dir, save_state};
 
+/// System prompt for the coder agent. Short and agentic: the model has real
+/// tools and works directly on the repo. Structure is imposed at exactly two
+/// human gates (lock the plan, accept a phase); everything else is free-form.
+fn coder_system_prompt() -> String {
+    "You are Anvil's coder: an autonomous, hands-on software engineer working directly in the user's project.\n\
+\n\
+You have tools, scoped to the project root:\n\
+- read_file(path), write_file(path, content), edit_file(path, old_string, new_string)\n\
+- list_dir(path), grep(pattern, [path])\n\
+- run_command(command)  — e.g. cargo build, cargo test, git diff (the user confirms each run)\n\
+\n\
+Work like a real engineer: read what you need before editing (never ask the user to paste files — open them yourself), make the changes with write_file/edit_file, and verify with run_command. Keep prose short; let the tools do the work. Prefer small, precise edits over rewriting whole files.\n\
+\n\
+Anvil adds just enough structure to stop drift, at exactly TWO human gates:\n\
+1. PLAN: discuss the work with the user, then write the plan yourself to plan.md (phases ## P0 — Name, each with a goal, 3–8 actions, a deliverable, and 2–5 acceptance criteria). When the user is happy they run /lock-plan — two independent reviewers (different models) critique plan.md and their findings appear in chat; revise plan.md to address them. The user runs /accept-plan to approve.\n\
+2. PHASES: implement the current phase directly (write code + tests, run them). When it's done the user runs /accept-phase — the two reviewers critique the actual diff; fix what they raise. The user re-runs /accept-phase to ship it, then you move to the next phase.\n\
+\n\
+Outside those two gates, just collaborate normally — answer questions, explore, refactor, debug — using your tools. Don't fake a gate or claim a review happened; only the /lock-plan and /accept-phase commands trigger the reviewers. Be precise, skeptical of scope creep, and surface risks early."
+        .to_string()
+}
+
 /// Workflow stage machine for the TUI (reconciled from disk artifacts + state on every relevant action).
 /// This makes the "source of truth is the files" contract visible and enforces the gates.
+/// Note: the detailed sequential R1-then-approve-then-R2 flow for plan (and per-phase coder-doc + critical reviewer) is
+/// primarily driven by slash commands + chat messages + presence of REVIEW_* at root; the high-level stage is still
+/// Talk / PlanReviewsComplete / PlanAccepted for UI chrome.
 #[derive(Clone, Debug, Default, PartialEq)]
 enum WorkflowStage {
     #[default]
     Talk,
-    PlanReviewsComplete, // R1 + R2 done for the plan, awaiting explicit accept
-    PlanAccepted,        // hash recorded, ready for phases (phase 4 will add InPhase etc.)
+    PlanReviewsComplete, // R1 + R2 review files present for the plan (after the sequential /lock + /approve-r1 gates)
+    PlanAccepted,        // hash recorded after user approved the final post-R1/R2 plan
     Unconfigured,
 }
 
 /// Slash commands shown in the interactive palette (triggered by typing `/`).
 /// Descriptions appear in the popup to help users discover the flow.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/plan", "Generate (or refresh) the plan, then run exactly R1 + R2 reviews"),
-    ("/accept-plan", "Record that R1+R2 findings were addressed; unlocks phases"),
+    ("/plan", "How to plan: discuss with the coder, then it writes plan.md itself"),
+    ("/lock-plan", "Run R1 + R2 reviewers on plan.md and show their findings (the plan gate)"),
+    ("/accept-plan", "Approve the reviewed plan (records the hash, unlocks phases)"),
+    ("/phase-start <id>", "Set the current phase (e.g. P0). Optional — you can also just tell the coder to start"),
+    ("/accept-phase [id]", "Run R1 + R2 reviewers on the current git diff for the phase (the phase gate)"),
+    ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
+    ("/y", "Approve a pending run_command"),
+    ("/n", "Deny a pending run_command"),
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
     ("/setup", "Alias for /config — providers, models, keys"),
-    ("/status", "Show reviewers, config state, and current gate progress"),
-    ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes (cross-check vs live GPU header)"),
-    ("/unload [model]", "Force immediate unload (keep_alive=0) of one or all loaded models; header GPU stats refresh"),
+    ("/status", "Show roles, config state, and current gate progress"),
+    ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
+    ("/unload [model]", "Force immediate unload (keep_alive=0) of one or all loaded models"),
     ("/help", "Show key bindings and available commands"),
     ("/quit", "Exit the TUI"),
-    ("/phase-done", "Phase gates (R1+R2 + accept) — coming in phase 4"),
-    ("/include <path>", "Include a project file's content as context for the model (enables grounded suggestions)"),
-    ("/context", "List files currently included as context"),
-    ("/clear-context", "Remove all included context files"),
-    ("/view-plan", "Open the current plan.md in a focused review popup (Cline-style card)"),
-    ("/view-reviews", "Open REVIEW_plan_R1 + R2 in a focused review popup — inspect the two independent reviews before /accept-plan"),
+    ("/view-plan", "Open the current plan.md in a focused review popup"),
+    ("/view-reviews", "Open the REVIEW_* files (plan + current phase) in a focused popup"),
 ];
 
 const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, not a timer
@@ -77,6 +106,12 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 const ROLE_CODER: Color = Color::LightBlue;
 const ROLE_R1: Color = Color::Magenta;
 const ROLE_R2: Color = Color::Rgb(50, 255, 127);
+
+/// Color for [system] messages (e.g. "Work in this Repo: C:\Anvil", gate instructions,
+/// confirmations after /save-*/critical-*, "✓ ... complete" notices, etc.).
+/// Distinct from normal chat, [you] (green), [coder] (light blue), reviewer findings (cyan), etc.
+/// Yellow provides good visual pop for meta/system notices (as it did before).
+const SYSTEM_COLOR: Color = Color::Yellow;
 
 /// Known providers: (display_name, suggested_connection_name, provider_type, base_url, needs_api_key)
 /// base_url = "" means the client uses the provider's SDK default (anthropic, google).
@@ -269,6 +304,16 @@ pub fn run_ui(root: &Path) -> Result<()> {
         app.start_config_wizard();
     }
 
+    // For an already-configured project, just announce the working directory.
+    // The coder is a real agent now — it reads files on demand via its tools, so
+    // there's no "Work in this Repo" prompt and no manual /include to grant access.
+    if !app.first_run {
+        app.push_system(&format!(
+            "Working in {}. The coder reads, edits, and runs the project directly — just tell it what to build.",
+            app.root.display()
+        ));
+    }
+
     // Setup terminal (raw mode + alternate screen). We must restore on any exit path.
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -330,6 +375,19 @@ struct App {
     cfg: Option<AnvilConfig>,
     llm_rx: Option<mpsc::UnboundedReceiver<String>>,
 
+    // The autonomous coding agent (tool loop). Built lazily on the first chat
+    // turn from the configured `coder` role, then reused so conversation history
+    // and tool context persist across turns. Wrapped in Arc<Mutex> so the
+    // streaming task can own a handle while the App keeps one.
+    agent: Option<Arc<Mutex<Agent>>>,
+    // Sends the user's y/n decision to an agent blocked on a run_command confirm.
+    confirm_tx: Option<mpsc::UnboundedSender<bool>>,
+    // The command awaiting confirmation (Some => render the y/N prompt; /y or /n resolve it).
+    awaiting_confirm: Option<String>,
+    // True while we have an open "[coder] " line accumulating streamed text. A
+    // tool/confirm line closes it so the next text delta starts a fresh line.
+    assistant_open: bool,
+
     // Workflow + plan gate (phase 3)
     stage: WorkflowStage,
     gate_rx: Option<mpsc::UnboundedReceiver<String>>, // signals from spawn_blocking plan gate
@@ -353,11 +411,6 @@ struct App {
     // "Quick local Ollama setup" option is offered on first boot / in the wizard.
     // None = not yet probed. Populated lazily by is_ollama_available().
     ollama_available_cached: Option<bool>,
-
-    // Files whose contents are sent as additional context with chat turns (via /include).
-    // First step toward real agentic/grounded assistance *behind the gates* (post PlanAccepted).
-    // The model sees the real file text; human still decides what to keep or edit.
-    active_context: Vec<(PathBuf, String)>,
 
     // Lightweight document viewer popup (for /view-plan, /view-reviews etc.).
     // Gives a focused "card" experience for inspecting gate artifacts (plan + the two reviews)
@@ -408,6 +461,10 @@ impl App {
             llm: LlmClient::new(),
             cfg: None,
             llm_rx: None,
+            agent: None,
+            confirm_tx: None,
+            awaiting_confirm: None,
+            assistant_open: false,
             stage: WorkflowStage::Talk,
             gate_rx: None,
             showing_command_palette: false,
@@ -417,7 +474,6 @@ impl App {
             anim_tick: 0,
             input_secret: false,
             ollama_available_cached: None,
-            active_context: vec![],
             viewing_doc: None,
             gpu_stats: vec![],
             current_turn_id: None,
@@ -493,6 +549,24 @@ impl App {
         self.push(format!("[system] {}", text));
     }
 
+    /// Finish the current open "[coder] " streaming line (if any). Drops it
+    /// entirely when it never received any text (e.g. the model went straight
+    /// to a tool call). Called before showing tool/confirm lines so segments
+    /// don't run together.
+    fn close_assistant_line(&mut self) {
+        if self.assistant_open {
+            let drop_empty = self
+                .messages
+                .last()
+                .map(|l| l.trim_end() == "[coder]")
+                .unwrap_or(false);
+            if drop_empty {
+                self.messages.pop();
+            }
+            self.assistant_open = false;
+        }
+    }
+
     /// Write one JSON event line into this session's dedicated chat log file.
     /// The file is created on first write for the session (timestamped name chosen in App::new).
     /// All events for one launch of the TUI go into exactly one file so you can inspect or delete per-session.
@@ -525,18 +599,13 @@ impl App {
             "UNCONFIGURED — press s for quick setup (when Ollama present)"
         } else {
             match self.stage {
-                WorkflowStage::Talk => "TALK (chat with coder; /plan for gate)",
-                WorkflowStage::PlanReviewsComplete => "PLAN (R1+R2 done — /accept-plan to proceed)",
-                WorkflowStage::PlanAccepted => "PLAN ACCEPTED — /start <id> for phases (phase gates in next iteration)",
+                WorkflowStage::Talk => "TALK (build with the coder; /lock-plan when plan.md is ready)",
+                WorkflowStage::PlanReviewsComplete => "PLAN REVIEWED (R1/R2 done) — /accept-plan to approve",
+                WorkflowStage::PlanAccepted => "PLAN ACCEPTED — build phases; /accept-phase when done",
                 _ => "TALK",
             }
         };
-        let ctx = if !self.active_context.is_empty() {
-            format!("  |  ctx:{}", self.active_context.len())
-        } else {
-            String::new()
-        };
-        self.status_line = format!("Anvil — {}  |  {}{}", proj, stage, ctx);
+        self.status_line = format!("Anvil — {}  |  {}", proj, stage);
     }
 
     /// Poll nvidia-smi (if present) for current GPU util + VRAM.
@@ -583,67 +652,6 @@ impl App {
         self.gpu_stats = stats;
     }
 
-    /// Include a file (relative to project root) into the active context.
-    /// The full (truncated) contents will be appended to the user message on the *next*
-    /// chat turn so the model can give grounded, code-aware answers.
-    fn include_file(&mut self, path_str: &str) {
-        let candidate = self.root.join(path_str);
-        let p = if candidate.exists() {
-            candidate
-        } else {
-            // Also accept absolute or already-rooted paths
-            PathBuf::from(path_str)
-        };
-        if !p.exists() || !p.is_file() {
-            self.push_system(&format!("File not found or not a regular file: {}", path_str));
-            return;
-        }
-        match std::fs::read_to_string(&p) {
-            Ok(content) => {
-                let rel = p.strip_prefix(&self.root).unwrap_or(&p).to_path_buf();
-                // De-duplicate
-                self.active_context.retain(|(rp, _)| rp != &rel);
-                self.active_context.push((rel.clone(), content.clone()));
-                let note = if self.stage != WorkflowStage::PlanAccepted {
-                    " (most useful after you /accept-plan)"
-                } else {
-                    ""
-                };
-                self.push_system(&format!(
-                    "✓ Context added: {} ({} chars){}",
-                    rel.display(),
-                    content.len(),
-                    note
-                ));
-                self.update_status();
-            }
-            Err(e) => {
-                self.push_system(&format!("Could not read {}: {}", path_str, e));
-            }
-        }
-    }
-
-    fn show_context(&mut self) {
-        if self.active_context.is_empty() {
-            self.push_system("No active context. Use /include <relative-path> to give the model real file contents.");
-            return;
-        }
-        self.push_system("Active context files (contents sent with your next messages):");
-        // Snapshot to avoid holding borrow on active_context while calling push_system (mut self).
-        let snapshots: Vec<(String, usize, String)> = self
-            .active_context
-            .iter()
-            .map(|(p, c)| {
-                let preview = c.lines().next().unwrap_or("").chars().take(60).collect::<String>();
-                (p.display().to_string(), c.len(), preview)
-            })
-            .collect();
-        for (pstr, len, preview) in snapshots {
-            self.push_system(&format!("  • {} ({} chars)  e.g. {}", pstr, len, preview));
-        }
-        self.push_system("Use /clear-context to remove them. The model sees these files until cleared.");
-    }
-
     fn open_doc_viewer(&mut self, title: &str, path: &Path) {
         match std::fs::read_to_string(path) {
             Ok(content) => {
@@ -667,13 +675,15 @@ impl App {
     /// Used by both the main chat Paragraph and the document viewer popups.
     fn render_message_as_lines(m: &str) -> Vec<Line<'static>> {
         let (base_style, body) = if m.starts_with("[system]") {
-            (Style::default().fg(Color::Yellow), m.strip_prefix("[system] ").unwrap_or(m))
+            (Style::default().fg(SYSTEM_COLOR), m.strip_prefix("[system] ").unwrap_or(m))
         } else if m.starts_with("[you]") {
             (Style::default().fg(Color::Green), m.strip_prefix("[you] ").unwrap_or(m))
         } else if m.starts_with("[demo]") {
             (Style::default().fg(Color::Magenta), m.strip_prefix("[demo] ").unwrap_or(m))
-        } else if m.starts_with("[review") {
-            // Prominent treatment for the gate reviews (the heart of the "exactly two" contract).
+        } else if m.starts_with("[review") || m.starts_with("[R1") || m.starts_with("[R2") {
+            // Prominent treatment for the gate reviews and findings (the heart of the "exactly two" contract).
+            // This covers both legacy "[review ...]" and our current "[R1 Plan Findings]", "[R2 Critical...]" etc.
+            // The whole block (header + content) gets tinted so review output stands out from coder chat (light blue).
             (Style::default().fg(Color::Cyan).bold(), m)
         } else if m.starts_with("[coder]") || m.starts_with("[planner]") || m.starts_with("[assistant") {
             // Coder (and planner fallback) responses are always blue.
@@ -735,11 +745,35 @@ impl App {
                 line.to_string()
             };
 
-            out.push(Line::from(Span::styled(displayed, style)));
+            // Force checkmarks (✓) to always be green + bold, no matter what base color the
+            // message type (system yellow, review cyan, coder light blue, default, etc.) uses.
+            // This makes success/acceptance markers pop consistently everywhere in the chat.
+            let line_spans: Vec<Span<'static>> = if displayed.contains('✓') {
+                let mut spans: Vec<Span<'static>> = vec![];
+                let green_check = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+                let mut rest = displayed.as_str();
+                while let Some(idx) = rest.find('✓') {
+                    if idx > 0 {
+                        spans.push(Span::styled(rest[..idx].to_string(), style));
+                    }
+                    spans.push(Span::styled("✓".to_string(), green_check));
+                    rest = &rest[idx + '✓'.len_utf8()..];
+                }
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), style));
+                }
+                if spans.is_empty() {
+                    spans.push(Span::styled(displayed.clone(), style));
+                }
+                spans
+            } else {
+                vec![Span::styled(displayed, style)]
+            };
+            out.push(Line::from(line_spans));
         }
 
         // If the original had a review prefix, make the very first line a strong banner for production feel.
-        if m.starts_with("[review") && !out.is_empty() {
+        if (m.starts_with("[review") || m.starts_with("[R1") || m.starts_with("[R2")) && !out.is_empty() {
             // Prepend a clear separator banner (the first real content line will follow).
             let banner = Line::from(Span::styled(
                 "════════════════════════════════════════════════════════════",
@@ -749,7 +783,28 @@ impl App {
         }
 
         if out.is_empty() {
-            out.push(Line::from(Span::styled(m.to_string(), base_style)));
+            // Fallback: color any checkmarks even here.
+            let fb_style = base_style;
+            let line_spans: Vec<Span<'static>> = if m.contains('✓') {
+                let mut spans: Vec<Span<'static>> = vec![];
+                let green_check = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+                let mut rest = m;
+                while let Some(idx) = rest.find('✓') {
+                    if idx > 0 {
+                        spans.push(Span::styled(rest[..idx].to_string(), fb_style));
+                    }
+                    spans.push(Span::styled("✓".to_string(), green_check));
+                    rest = &rest[idx + '✓'.len_utf8()..];
+                }
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_string(), fb_style));
+                }
+                if spans.is_empty() { spans.push(Span::styled(m.to_string(), fb_style)); }
+                spans
+            } else {
+                vec![Span::styled(m.to_string(), fb_style)]
+            };
+            out.push(Line::from(line_spans));
         }
         out
     }
@@ -794,6 +849,23 @@ impl App {
         self.follow_bottom = true;
         let cmd = trimmed.to_lowercase();
 
+        // A run_command confirmation is pending — the agent task is blocked
+        // waiting for the user's y/n. Resolve it (or nudge for an answer) and
+        // do not start a new chat turn until it's settled.
+        if self.awaiting_confirm.is_some() {
+            if cmd == "/y" || cmd == "/yes" || cmd == "/n" || cmd == "/no" {
+                let allow = cmd == "/y" || cmd == "/yes";
+                self.awaiting_confirm = None;
+                if let Some(tx) = &self.confirm_tx {
+                    let _ = tx.send(allow);
+                }
+                self.push_system(if allow { "Approved — running the command." } else { "Declined." });
+            } else {
+                self.push_system("A command is awaiting your decision. Type /y to allow or /n to deny.");
+            }
+            return;
+        }
+
         // Built-in slash commands for the skeleton (real gates added in later phases)
         if cmd == "/quit" || cmd == "/q" || cmd == ":q" {
             self.should_quit = true;
@@ -803,11 +875,13 @@ impl App {
         if cmd == "/status" {
             let configured = !self.first_run;
             self.push_system(&format!(
-                "root={}  configured={}  messages={}",
+                "Working in project root: {}\n  configured={}  agent_ready={}  messages_in_this_session={}",
                 self.root.display(),
                 configured,
+                self.agent.is_some(),
                 self.messages.len()
             ));
+            self.push_system("  (the coder reads/edits files and runs commands directly via its tools — no manual context needed)");
 
             // Snapshot to avoid long-lived & borrow of self while calling push_system (mut).
             let gpu_snap: Vec<(usize, f32, f32, u8)> = self
@@ -846,35 +920,45 @@ impl App {
 
         if cmd == "/plan" {
             if !self.is_configured() {
-                self.push_system("Cannot run plan gate: no reviewers configured. The first-run wizard should have started (or press 's' / use /config).");
+                self.push_system("Cannot start planning: no models configured. Use the wizard (s or /config) first.");
                 return;
             }
-            self.push_system("=== PLAN GATE (R1 + R2) ===");
-            self.push_system("Spawning exact `anvil plan --fresh` equivalent (reuses plan.rs generation + run_single_review + header + state hash).");
-            self.push_system("Progress will appear when complete; identical REVIEW_plan_R*.md + plan.md will be written.");
+            self.push_system("=== PLANNING ===");
+            self.push_system("Just talk with the coder about what you want to build. When the shape is clear, ask it to write the plan to plan.md (it writes the file itself — phases with id/name/goal/actions/criteria).");
+            self.push_system("When you're happy with plan.md, run /lock-plan — two independent reviewers critique it and their findings appear here. Have the coder revise plan.md, then /accept-plan to approve and start building.");
+            return;
+        }
 
+        if cmd == "/lock-plan" {
+            if !self.is_configured() {
+                self.push_system("Reviewers not configured. Use /config.");
+                return;
+            }
+            let plan_path = self.root.join("plan.md");
+            if !plan_path.exists() {
+                self.push_system("plan.md not found. Ask the coder to write the plan to plan.md first (it can create the file itself), then /lock-plan.");
+                return;
+            }
+            self.push_system("Locking plan. Running R1 (reviewer-a) then R2 (reviewer-b) on plan.md — findings appear below as each completes.");
             let (tx, rx) = mpsc::unbounded_channel::<String>();
             self.gate_rx = Some(rx);
-
             if let Some(rt) = &self.runtime {
                 let root = self.root.clone();
                 rt.spawn(async move {
-                    // spawn_blocking so the sync run_plan (with its block_on calls) runs off the UI thread.
-                    // All side effects (plan.md write, REVIEW_*.md writes with canonical headers, state.json hash) are identical to CLI.
-                    let res = tokio::task::spawn_blocking(move || {
-                        crate::plan::run_plan(&root, /*fresh=*/ true, /*context=*/ None)
-                    })
-                    .await;
-
-                    let signal = match res {
-                        Ok(Ok(())) => "GATE_DONE".to_string(),
-                        Ok(Err(e)) => format!("GATE_ERROR: {}", e),
-                        Err(e) => format!("GATE_ERROR: {}", e),
-                    };
-                    let _ = tx.send(signal);
+                    let root_r1 = root.clone();
+                    match tokio::task::spawn_blocking(move || crate::plan::run_plan_r1(&root_r1)).await {
+                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R1 (reviewer-a) on plan.md — REVIEW_plan_R1.md written:\n{}", f)); }
+                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
+                        Err(e) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
+                    }
+                    let root_r2 = root.clone();
+                    match tokio::task::spawn_blocking(move || crate::plan::run_plan_r2(&root_r2)).await {
+                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R2 (reviewer-b) on plan.md — REVIEW_plan_R2.md written:\n{}", f)); }
+                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
+                        Err(e) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
+                    }
+                    let _ = tx.send("Both reviews complete. Address the findings with the coder (it can edit plan.md directly), then /accept-plan to approve.".to_string());
                 });
-            } else {
-                self.push_system("No runtime available for gate task.");
             }
             return;
         }
@@ -886,11 +970,10 @@ impl App {
             let r2 = rev_dir.join("REVIEW_plan_R2.md");
 
             if !plan_path.exists() || !r1.exists() || !r2.exists() {
-                self.push_system("Both R1 and R2 review files (and plan.md) must exist before accept. Run /plan first.");
+                self.push_system("plan.md + both REVIEW_plan_R1.md and R2.md (at root) must exist. Run /lock-plan first.");
                 return;
             }
 
-            // Reuse the exact same hash computation as the CLI path.
             if let Ok(plan_txt) = std::fs::read_to_string(&plan_path) {
                 let hash = crate::plan::simple_hash(&plan_txt);
                 let mut st = load_state(&self.root);
@@ -901,42 +984,88 @@ impl App {
             }
 
             self.stage = WorkflowStage::PlanAccepted;
-            self.reconcile_stage_from_disk(); // will pick up the hash we just wrote
+            self.reconcile_stage_from_disk();
             self.update_status();
 
-            self.push_system("✓ Plan accepted. accepted_plan_hash recorded in .anvil/state.json (same as future `anvil plan --accept`).");
-            self.push_system("Next steps: implement phases in your editor. Use /start <id> (e.g. P0) when ready (phase gates wired in phase 4).");
+            self.push_system("✓ Plan accepted (R1 + R2 reviewed, hash recorded). Now just build: tell the coder to start the first phase, or /phase-start P0. When a phase is done, run /accept-phase.");
+            return;
+        }
+
+        if cmd.starts_with("/phase-start ") || cmd.starts_with("/start ") {
+            let id = cmd.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
+            if id.is_empty() {
+                self.push_system("Usage: /phase-start P0   (or /start P0)");
+                return;
+            }
+            match crate::phase::run_phase_start(&self.root, id) {
+                Ok(()) => self.push_system(&format!("Current phase set to {}. Build it with the coder (it reads/edits files and runs tests directly). When done, run /accept-phase.", id)),
+                Err(e) => self.push_system(&format!("phase start failed: {}", e)),
+            }
+            self.reconcile_stage_from_disk();
+            self.update_status();
+            return;
+        }
+
+        if cmd.starts_with("/accept-phase") {
+            if !self.is_configured() {
+                self.push_system("Reviewers not configured. Use /config.");
+                return;
+            }
+            let id = if cmd.contains(' ') {
+                cmd.split_once(' ').map(|(_, r)| r.trim().to_string()).unwrap_or_default()
+            } else {
+                load_state(&self.root).current_phase.unwrap_or_default()
+            };
+            if id.is_empty() {
+                self.push_system("Usage: /accept-phase P0   (or just /accept-phase while a phase is current)");
+                return;
+            }
+            self.push_system(&format!("Reviewing phase {} — R1 + R2 on the current git diff. Findings appear below.", id));
+            let (tx, rx) = mpsc::unbounded_channel::<String>();
+            self.gate_rx = Some(rx);
+            if let Some(rt) = &self.runtime {
+                let root = self.root.clone();
+                let id_clone = id.clone();
+                rt.spawn(async move {
+                    let (root1, id1) = (root.clone(), id_clone.clone());
+                    match tokio::task::spawn_blocking(move || crate::phase::run_phase_r1_diff(&root1, &id1)).await {
+                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R1 (reviewer-a) on the {} diff — REVIEW_{}_R1.md written:\n{}", id_clone, id_clone, f)); }
+                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
+                        Err(e) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
+                    }
+                    let (root2, id2) = (root.clone(), id_clone.clone());
+                    match tokio::task::spawn_blocking(move || crate::phase::run_phase_r2_diff(&root2, &id2)).await {
+                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R2 (reviewer-b) on the {} diff — REVIEW_{}_R2.md written:\n{}", id_clone, id_clone, f)); }
+                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
+                        Err(e) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
+                    }
+                    let _ = tx.send(format!("Both reviews complete. Fix what they raised with the coder, then /ship-phase {} to mark it done (or /accept-phase {} again to re-review).", id_clone, id_clone));
+                });
+            }
+            return;
+        }
+
+        if cmd.starts_with("/ship-phase") {
+            let id = if cmd.contains(' ') {
+                cmd.split_once(' ').map(|(_, r)| r.trim().to_string()).unwrap_or_default()
+            } else {
+                load_state(&self.root).current_phase.unwrap_or_default()
+            };
+            if id.is_empty() {
+                self.push_system("Usage: /ship-phase P0   (or just /ship-phase while a phase is current)");
+                return;
+            }
+            match crate::phase::run_phase_accept(&self.root, &id, None) {
+                Ok(()) => self.push_system(&format!("✓ Phase {} shipped (R1 + R2 reviewed and accepted). Start the next phase with /phase-start, or just tell the coder to continue.", id)),
+                Err(e) => self.push_system(&format!("ship phase: {} (run /accept-phase {} first to produce the reviews)", e, id)),
+            }
+            self.reconcile_stage_from_disk();
+            self.update_status();
             return;
         }
 
         if cmd == "/config" || cmd == "/setup" {
             self.start_config_wizard();
-            return;
-        }
-
-        if cmd == "/phase-done" || cmd == "/done" {
-            self.push_system("Phase review (exactly R1 + R2) + hard accept guard coming in phase 4. For now use /plan + /accept-plan for the plan gate.");
-            return;
-        }
-
-        if cmd.starts_with("/include ") {
-            // Use original trimmed (not lowercased cmd) so paths keep correct case on all OSes.
-            let path_str = trimmed.split_once(' ').map(|(_, rest)| rest.trim()).unwrap_or("");
-            if !path_str.is_empty() {
-                self.include_file(path_str);
-            } else {
-                self.push_system("Usage: /include <path>   (path relative to project root)");
-            }
-            return;
-        }
-        if cmd == "/context" || cmd == "/ctx" {
-            self.show_context();
-            return;
-        }
-        if cmd == "/clear-context" || cmd == "/clearcontext" || cmd == "/nocontext" {
-            self.active_context.clear();
-            self.update_status();
-            self.push_system("Context cleared. Future messages will no longer include file contents.");
             return;
         }
 
@@ -949,29 +1078,44 @@ impl App {
             let rev_dir = reviews_dir(&self.root);
             let r1 = rev_dir.join("REVIEW_plan_R1.md");
             let r2 = rev_dir.join("REVIEW_plan_R2.md");
-            // Build a combined document for the popup card (keeps the "exactly two different reviewers" visible).
+            // Build a combined document for the popup card.
             let mut combined = String::new();
-            combined.push_str("=== REVIEW R1 (from plan gate — first independent reviewer) ===\n\n");
+            combined.push_str("=== PLAN REVIEW R1 (reviewer-a critical on the plan written by coder) ===\n\n");
             if let Ok(c) = std::fs::read_to_string(&r1) {
                 combined.push_str(&c);
             } else {
-                combined.push_str("(R1 file not found — run /plan first)\n");
+                combined.push_str("(REVIEW_plan_R1.md not found — follow /plan → /save-plan → /lock-plan)\n");
             }
-            combined.push_str("\n\n=== REVIEW R2 (from plan gate — second independent reviewer, different binding) ===\n\n");
+            combined.push_str("\n\n=== PLAN REVIEW R2 (reviewer-b) ===\n\n");
             if let Ok(c) = std::fs::read_to_string(&r2) {
                 combined.push_str(&c);
             } else {
-                combined.push_str("(R2 file not found)\n");
+                combined.push_str("(R2 not found)\n");
             }
-            combined.push_str("\n\n--- End of reviews. Address findings, then use /accept-plan to record the gate. ---\n");
-            self.viewing_doc = Some(("Plan Reviews — R1 + R2 (Esc to close, scroll chat if needed)".to_string(), combined));
-            self.push_system("Opened focused review card for the two mandatory independent reviews. Close with Esc. Then /accept-plan when ready.");
+            // Also show the current phase's review docs if a phase is active.
+            let st = load_state(&self.root);
+            if let Some(pid) = &st.current_phase {
+                combined.push_str(&format!("\n\n--- Current phase {} reviews (from /accept-phase) ---\n", pid));
+                for nm in [format!("REVIEW_{}_R1.md", pid), format!("REVIEW_{}_R2.md", pid)] {
+                    let p = rev_dir.join(&nm);
+                    if p.exists() {
+                        if let Ok(c) = std::fs::read_to_string(&p) {
+                            combined.push_str(&format!("\n=== {} ===\n{}\n", nm, c));
+                        }
+                    }
+                }
+            }
+            combined.push_str("\n\n--- Source of truth: these REVIEW_* files at repo root + plan.md + state.json. ---\n");
+            self.viewing_doc = Some(("Reviews (plan + current phase) — Esc to close".to_string(), combined));
+            self.push_system("Opened focused review card. Close with Esc.");
             return;
         }
 
         if cmd == "/help" || cmd == "?" {
             self.push_system("Keys: Enter=chat (streams), Esc/Ctrl-C/q=quit, s=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
-            self.push_system("Context: /include <path>  •  /context  •  /clear-context   (gives the model real file contents for better suggestions after gates)");
+            self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
+            self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2 auto) → coder revises → /accept-plan.");
+            self.push_system("Phase gate: build the phase with the coder → /accept-phase (R1+R2 on the diff) → fix findings → /ship-phase.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");
             return;
         }
@@ -1488,107 +1632,70 @@ impl App {
             }
         };
 
-        // Clone what we need for the async task + the UI prefix *before* any mutable calls on self.
-        // This releases the immutable borrow on self.cfg / binding / provider.
+        // Clone what we need *before* any mutable calls on self (releases the
+        // immutable borrow on self.cfg / binding / provider).
         let binding_name = binding_name.to_string();
         let model = binding.model.clone();
         let conn_for_task = provider.clone();
         let key_for_task = api_key.clone();
 
-        // Per-turn correlation id for the jsonl log. All user / deltas / wire-full / ui-final for this exchange share it.
+        // Per-turn correlation id for the jsonl log.
         let turn_id = Uuid::new_v4().to_string();
         self.current_turn_id = Some(turn_id.clone());
         self.current_role = Some(role.to_string());
         self.current_binding = Some(binding_name.clone());
         self.current_model = Some(model.clone());
-
-        // Log the human input that started the turn (raw, as typed). Context augmentation is logged separately below as user_sent.
         self.log_chat_event("user", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), text);
 
-        // Create the (unbounded) channel. The receiver lives in the App; the sender is moved into the spawned task.
+        // Take an owned runtime handle so we can freely mutate self below before
+        // spawning (a borrow of self.runtime would conflict with self.push etc.).
+        let handle = match self.runtime.as_ref() {
+            Some(rt) => rt.handle().clone(),
+            None => {
+                self.push_system("(internal) no runtime available for the agent");
+                return;
+            }
+        };
+
+        // Build the agent lazily on first use, then reuse it so conversation
+        // history + tool context persist across turns. The agent reads/writes
+        // the repo itself via tools — no manual /include, no /save-* needed.
+        if self.agent.is_none() {
+            let (confirm_tx, confirm_rx) = mpsc::unbounded_channel::<bool>();
+            let agent = Agent::new(
+                self.llm.clone(),
+                conn_for_task,
+                model.clone(),
+                key_for_task,
+                coder_system_prompt(),
+                self.root.clone(),
+                ConfirmHandle::Channel(confirm_rx),
+            );
+            self.agent = Some(Arc::new(Mutex::new(agent)));
+            self.confirm_tx = Some(confirm_tx);
+        }
+
+        // Streaming channel: receiver in the App, sender moved into the task.
         let (tx, rx) = mpsc::unbounded_channel::<String>();
-        let tx_for_full = tx.clone();
         self.llm_rx = Some(rx);
 
-        // Start the visible streaming line with the role prefix (tokens appended live to this entry).
-        // Model name is not shown here (kept only in the top header bar for CODER/R1/R2).
-        let prefix = format!("[{}] ", role);
-        self.push(prefix.clone());
+        // Open the visible "[coder] " streaming line; tool/confirm lines will
+        // close it (see drain_llm_stream) so interleaved text starts fresh lines.
+        self.push(format!("[{}] ", role));
+        self.assistant_open = true;
         self.follow_bottom = true;
-        self.log_chat_event("assistant_begin", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), &prefix);
+        self.log_chat_event("assistant_begin", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), "[agent turn]");
 
-        // Spawn the actual streaming work on our runtime so the TUI loop is not blocked.
-        if let Some(rt) = &self.runtime {
-            let llm = self.llm.clone();
-            // Practical chat system prompt (lighter than the strict reviewer prompts used in gates).
-            // Explicitly teaches the coder its full environment, the slash-command "tools" the user can invoke,
-            // exactly how /include context is delivered, the hard R1+R2 gates, and how to drive the workflow
-            // without drift. This ensures the model has everything it needs to guide perfectly.
-            let system = "You are a thoughtful technical thought partner helping with vibe-driven coding inside Anvil.\n\
-Keep answers practical, concrete and short. When suggesting code changes, be precise: always name the exact file and show only the minimal relevant snippet or diff.\n\n\
-The user follows a strict Talk → Plan (R1+R2) → phased build (each phase also R1+R2) discipline. Source of truth is always disk files (plan.md, REVIEW_*.md, .anvil/state.json). You have no direct FS or execution access — you guide the human.\n\n\
-Available commands the user can type (suggest these by name when the moment is right):\n\
-- /plan — generate/refresh plan.md then automatically run exactly two reviews (R1 then R2 from different configured models/bindings). After reviews, user addresses findings then /accept-plan.\n\
-- /include <relative/path> — include a real project file's full content for your next turn (you will see it in a tagged block below). Tell the user the exact files to include when you need ground truth.\n\
-- /context — list currently included files; /clear-context — drop them all.\n\
-- /status — show reviewers, GPU/VRAM live, Ollama /ps summary, gate progress.\n\
-- /loaded or /ps — detailed list of models currently in Ollama VRAM + sizes (cross-check the header GPU stats).\n\
-- /unload [model] — immediately free VRAM (keep_alive=0); omit model to unload all.\n\
-- /view-plan and /view-reviews — open focused cards for plan.md + the two REVIEW_plan_R*.md before accepting.\n\
-- /accept-plan — record that R1+R2 findings were addressed (writes accepted hash); unlocks phases.\n\
-- /config or /setup — reconfigure providers, bindings or roles.\n\
-- /help — show keybindings and command list.\n\n\
-When you need project information, say exactly: \"Please run /include src/foo.rs (or the paths you want) then ask me again.\"  Context from /include appears in the next user message after a '--- BEGIN PROJECT CONTEXT (files you asked to include) ---' header, with per-file --- path --- ```content``` blocks, ended by '--- END PROJECT CONTEXT ---'. Use those contents for accurate answers.\n\n\
-You may suggest the user emit structured artifacts inside <artifact name=\"charter\"> or <artifact name=\"plan-draft\"> tags during exploration (the headless `anvil talk` CLI can save them).\n\n\
-Be direct, surface assumptions and risks, ask clarifying questions. Always keep the two independent diverse reviews and explicit accept steps in mind — never pretend a change is done until the gates are passed on disk.".to_string();
-
-            // Inject active file context (from /include) so the model has real code to work with.
-            // This is the entry point for "agentic awareness" while the hard gates (exactly two diverse reviews,
-            // disk truth, explicit accept) remain fully enforced by the rest of the system.
-            let mut user = text.to_string();
-            if !self.active_context.is_empty() {
-                user.push_str("\n\n--- BEGIN PROJECT CONTEXT (files you asked to include) ---\n");
-                let mut budget: usize = 12_000; // soft total budget to keep prompts reasonable on first cut
-                for (rel, content) in &self.active_context {
-                    if budget == 0 {
-                        break;
-                    }
-                    let mut to_send = content.clone();
-                    if to_send.len() > budget {
-                        to_send.truncate(budget);
-                        to_send.push_str("\n... [truncated for prompt size]");
-                    }
-                    user.push_str(&format!(
-                        "\n--- {} ---\n```\n{}\n```\n",
-                        rel.display(),
-                        to_send
-                    ));
-                    budget = budget.saturating_sub(to_send.len());
-                }
-                user.push_str("--- END PROJECT CONTEXT ---\n");
-                user.push_str("Use the above file contents to give accurate, grounded answers and concrete code suggestions.");
-            }
-
-            // Log the exact system + (augmented) user that will be sent over the wire. Useful for retrieval and to diagnose prompt issues.
-            self.log_chat_event("system", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), &system);
-            self.log_chat_event("user_sent", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), &user);
-
-            rt.spawn(async move {
-                // The tx is consumed by the call; when the future ends the sender is dropped and
-                // the receiver in the UI loop will observe disconnect (stream finished).
-                let res = llm
-                    .chat_stream_to_channel(&conn_for_task, &model, &key_for_task, &system, &user, tx)
-                    .await;
-                if let Ok(full) = res {
-                    // Send the *exact* full string returned by the SSE handler (authoritative wire response).
-                    // Drain will log it under "assistant_full_wire" for chopping diagnosis (compare to concat of deltas and to final_ui)
-                    // but will NOT append this to the visible message (the incremental deltas already built it).
-                    let _ = tx_for_full.send(format!("[llm-full-wire]{}", full));
-                }
-            });
-        } else {
-            self.push_system("(internal) no runtime available for LLM task");
-        }
+        let agent = self.agent.as_ref().unwrap().clone();
+        let input = text.to_string();
+        handle.spawn(async move {
+            // Hold the agent lock for the whole turn. The UI never locks the
+            // agent during a turn (it only drains llm_rx and may send a confirm
+            // decision over the separate confirm channel), so this can't deadlock.
+            let mut guard = agent.lock().await;
+            let _ = guard.run_turn(&input, tx).await;
+            // When the task ends, `tx` drops → the UI sees stream disconnect.
+        });
     }
 
     /// Drain any pending token deltas from the current LLM stream and append them
@@ -1627,12 +1734,13 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
             // bad endpoint, auth, etc.). We remove the placeholder assistant line we
             // started with the role prefix and surface a clean system message instead.
             if delta.contains("[llm-error]") {
-                // Drop the "[coder] " (or equivalent) starter that has no useful content.
+                // Drop the "[coder] " starter if it's still empty.
                 if let Some(last) = self.messages.last() {
-                    if last.starts_with('[') {
+                    if last.trim_end() == "[coder]" || last.trim_end().is_empty() {
                         let _ = self.messages.pop();
                     }
                 }
+                self.assistant_open = false;
                 let clean = delta
                     .trim_start_matches('\n')
                     .trim_start_matches("[llm-error]")
@@ -1645,17 +1753,40 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
                 continue;
             }
 
-            if let Some(wire) = delta.strip_prefix("[llm-full-wire]") {
-                // Authoritative full text returned by the llm layer (concat of everything it parsed + sent over the channel).
-                // Logged for comparison against the individual deltas (to detect SSE buffer remnant loss etc) and against final_ui.
-                // Never appended to the visible chat line (deltas already produced the same content).
-                self.log_chat_event("assistant_full_wire", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), wire);
+            // A tool is about to run: close the current assistant line and show it.
+            if let Some(label) = delta.strip_prefix("[tool-start]") {
+                self.close_assistant_line();
+                self.log_chat_event("tool_start", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
+                self.push(format!("  ⚙ {}", label.trim()));
+                changed = true;
+                continue;
+            }
+            // A tool finished: show its short result summary.
+            if let Some(label) = delta.strip_prefix("[tool-end]") {
+                self.log_chat_event("tool_end", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
+                self.push(format!("    ↳ {}", label.trim()));
+                changed = true;
+                continue;
+            }
+            // A run_command needs the user's y/n decision.
+            if let Some(cmd) = delta.strip_prefix("[confirm]") {
+                self.close_assistant_line();
+                let cmd = cmd.trim().to_string();
+                self.awaiting_confirm = Some(cmd.clone());
+                self.log_chat_event("confirm_request", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), &cmd);
+                self.push_system(&format!("Run command?  $ {}", cmd));
+                self.push_system("Type /y to allow or /n to deny.");
+                changed = true;
                 continue;
             }
 
-            // Raw chunk as it arrived from the provider (via SSE parse in llm.rs). Timestamped in the jsonl.
+            // Plain streamed text. If no assistant line is open (e.g. a tool line
+            // was just shown), start a fresh "[coder] " line for the new segment.
+            if !self.assistant_open {
+                self.push("[coder] ".to_string());
+                self.assistant_open = true;
+            }
             self.log_chat_event("assistant_delta", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), &delta);
-
             if let Some(last) = self.messages.last_mut() {
                 last.push_str(&delta);
             }
@@ -1663,11 +1794,11 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
         }
 
         if stream_finished {
-            // Stream finished for this response. Leave the accumulated text as-is.
-            // Clear the receiver so we don't keep checking a dead channel.
+            // The agent turn ended. Clear the receiver so we don't poll a dead channel.
             self.llm_rx = None;
-            // Ensure the line ends neatly if the model didn't send a trailing newline.
-            // Ensure trailing newline on the stored message (original behavior).
+            // Drop a dangling empty "[coder] " line (turn ended on a tool call),
+            // otherwise make sure the final line ends with a newline.
+            self.close_assistant_line();
             {
                 if let Some(last) = self.messages.last_mut() {
                     if !last.ends_with('\n') {
@@ -1691,9 +1822,10 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
         changed
     }
 
-    /// Inspect on-disk artifacts (plan.md + REVIEW_plan_R*.md + .anvil/state.json) and derive
-    /// the authoritative WorkflowStage. Called on startup, after quick setup, and after gates.
-    /// This is what makes the TUI "source of truth = files" and prevents bypassing the two-review rule.
+    /// Inspect on-disk artifacts (plan.md + REVIEW_plan_R*.md at root + accepted hash in state) and derive
+    /// the high-level WorkflowStage. The fine-grained sequential gates (/lock-plan, /approve-r1, /critical-r1 etc)
+    /// and per-phase coder-doc + critical passes are enforced by command handlers + chat + file presence.
+    /// Source of truth remains the REVIEW_* and plan.md files at repo root.
     fn reconcile_stage_from_disk(&mut self) {
         if !self.is_configured() {
             self.stage = WorkflowStage::Unconfigured;
@@ -1720,37 +1852,49 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
         }
     }
 
-    /// Drain one-shot gate signals (from the spawn_blocking plan run).
-    /// On completion we surface the *exact* on-disk review files into the chat so the user sees R1/R2
-    /// with their canonical headers, exactly as written by the shared plan.rs logic.
+    /// Drain reviewer-gate output (from /lock-plan and /accept-phase). The gate
+    /// task sends display-ready strings (one per round, plus a final marker) and
+    /// then drops its sender. We surface each line in the transcript and, on
+    /// disconnect, reconcile the stage from disk. A gate run can emit several
+    /// messages (R1 then R2), so we drain them all rather than stopping at one.
     fn drain_gate_events(&mut self) -> bool {
         let mut changed = false;
+        let mut msgs: Vec<String> = Vec::new();
+        let mut finished = false;
         if let Some(rx) = &mut self.gate_rx {
-            while let Ok(msg) = rx.try_recv() {
-                if msg == "GATE_DONE" {
-                    self.push_system("✓ Plan gate complete. plan.md + REVIEW_plan_R1.md + R2.md written (bit-identical to `anvil plan`).");
-                    // Surface the real artifacts (headers + findings) for the user to read in context.
-                    // With the new rich renderer these will display with code cards, bold headers, etc. (Cline-quality reading).
-                    let rev_dir = reviews_dir(&self.root);
-                    for round in ["R1", "R2"] {
-                        let p = rev_dir.join(format!("REVIEW_plan_{}.md", round));
-                        if let Ok(content) = std::fs::read_to_string(&p) {
-                            self.push(format!("[review {}]\n{}", round, content));
-                        }
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => msgs.push(msg),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        finished = true;
+                        break;
                     }
-                    self.reconcile_stage_from_disk();
-                    self.update_status();
-                    self.push_system("Use /view-reviews (or /view-plan) for a focused card view of the two independent reviews. Address findings, then /accept-plan.");
-                    changed = true;
-                } else if msg.starts_with("GATE_ERROR") {
-                    self.push_system(&format!("Plan gate failed: {}", msg));
-                    self.reconcile_stage_from_disk();
-                    self.update_status();
-                    changed = true;
                 }
-                self.gate_rx = None;
-                break;
             }
+        }
+
+        for msg in msgs {
+            if let Some(findings) = msg.strip_prefix("[findings]") {
+                // "[findings]<header>\n<body>" — header on its own system line, body verbatim.
+                let (header, body) = findings.split_once('\n').unwrap_or((findings, ""));
+                self.push_system(header);
+                if !body.trim().is_empty() {
+                    self.push(body.to_string());
+                }
+            } else if let Some(err) = msg.strip_prefix("[gate-error]") {
+                self.push_system(&format!("Reviewer run failed: {}", err.trim()));
+            } else {
+                self.push_system(&msg);
+            }
+            changed = true;
+        }
+
+        if finished {
+            self.gate_rx = None;
+            self.reconcile_stage_from_disk();
+            self.update_status();
+            changed = true;
         }
         changed
     }
@@ -1816,7 +1960,7 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
         self.push_system("All changes are saved to anvil.toml + keyring (when you choose keyring).");
 
         if self.first_run {
-            self.push_system("Welcome! A 60-second setup gets you chatting with a real model and using the full Talk → /plan (R1 + R2) workflow.");
+            self.push_system("Welcome! A 60-second setup gets you chatting with a real model and using the full Talk → /plan (coder writes) → /lock-plan (R1 auto) → coder fixes → /approve-r1 (R2 auto) → /accept-plan flow, plus per-phase coder-written review docs + critical reviewer passes with human approve gates.");
             self.push_system("Tip: the top menu choice is the fastest on-ramp (local Ollama, zero secrets). Arrow to it and hit Enter.");
         }
 
@@ -2230,9 +2374,9 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
                         self.first_run = false;
                         if was_first {
                             self.push_system("First-time setup complete!");
-                            self.push_system("You can now type to chat with the planner (or coder).");
-                            self.push_system("Run /plan to generate a plan, then automatically get exactly R1 + R2 reviews from two different model bindings.");
-                            self.push_system("This is the simple structured workflow that keeps vibe coding from drifting — valuable for beginners and hardcore users alike.");
+                            self.push_system("Just type to chat with the coder — it reads, edits, and runs the project directly.");
+                            self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2) → /accept-plan. Phase gate: build → /accept-phase (R1+R2 on the diff) → /ship-phase.");
+                            self.push_system("This is the lightweight structure that keeps vibe coding from drifting — valuable for beginners and hardcore users alike.");
                         }
                     }
                     self.populate_main_menu();
@@ -2966,8 +3110,8 @@ Be direct, surface assumptions and risks, ask clarifying questions. Always keep 
             let was_first = self.first_run;
             self.first_run = false;
             if was_first {
-                self.push_system("Setup complete! You can now type to chat with the coder.");
-                self.push_system("Use /plan to run the Talk → plan + R1 review + R2 review gate (exactly two diverse reviewers).");
+                self.push_system("Setup complete! Just type to chat with the coder — it reads, edits, and runs the project directly.");
+                self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2) → /accept-plan. Phase gate: build → /accept-phase → /ship-phase.");
                 self.push_system("The workflow is deliberately simple to start yet powerful enough for serious use: structure that prevents drift without killing velocity.");
             } else {
                 self.push_system("Configuration wizard finished. Changes saved to anvil.toml (and keyring where used).");
@@ -3451,9 +3595,9 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         "UNCONFIGURED — /config or press s".to_string()
     } else {
         match app.stage {
-            WorkflowStage::Talk                => "TALK — chat freely, then /plan".to_string(),
-            WorkflowStage::PlanReviewsComplete => "REVIEWS DONE — address findings, then /accept-plan".to_string(),
-            WorkflowStage::PlanAccepted        => "PLAN ACCEPTED — build phases".to_string(),
+            WorkflowStage::Talk                => "TALK — chat with coder; /plan to write plan, /lock-plan to start R1".to_string(),
+            WorkflowStage::PlanReviewsComplete => "PLAN R1+R2 COMPLETE — /accept-plan (after /lock + /approve-r1 + coder fixes + /approve-r2)".to_string(),
+            WorkflowStage::PlanAccepted        => "PLAN ACCEPTED — phases (coder writes R1/R2 review docs; use /critical-r1 etc + human gates)".to_string(),
             WorkflowStage::Unconfigured        => "UNCONFIGURED".to_string(),
         }
     };
@@ -3491,12 +3635,6 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Style::default().fg(stage_color).add_modifier(Modifier::BOLD),
     )];
     row0.extend(stream_spans);
-    if !app.active_context.is_empty() {
-        row0.push(Span::styled(
-            format!("  [ctx:{}]", app.active_context.len()),
-            Style::default().fg(Color::Rgb(100, 200, 255)),
-        ));
-    }
 
     // ── Row 1: coder / R1 / R2 model labels ──
     let row1: Vec<Span<'static>> = if let Some(cfg) = &app.cfg {
@@ -3519,19 +3657,41 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
 
     // ── Row 2: project name + phase progress ──
-    let proj = app.root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(".")
-        .to_string();
+    // Show the actual repo root path (e.g. C:\Anvil or \Anvil) instead of falling back to ".".
+    // This is the visible "project <path>" line in the top header.
+    let proj = app.root.display().to_string();
+    let proj = if proj.is_empty() { ".".to_string() } else { proj };
     let phases = build_phase_progress(app);
+
+    // Color any checkmarks inside the phases progress string green (e.g. P0✓).
+    let phase_spans: Vec<Span<'static>> = if phases.contains('✓') {
+        let mut spans: Vec<Span<'static>> = vec![];
+        let base = Style::default().fg(Color::Gray);
+        let green_check = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+        let mut rest = phases.as_str();
+        while let Some(idx) = rest.find('✓') {
+            if idx > 0 {
+                spans.push(Span::styled(rest[..idx].to_string(), base));
+            }
+            spans.push(Span::styled("✓".to_string(), green_check));
+            rest = &rest[idx + '✓'.len_utf8()..];
+        }
+        if !rest.is_empty() {
+            spans.push(Span::styled(rest.to_string(), base));
+        }
+        spans
+    } else {
+        vec![Span::styled(phases, Style::default().fg(Color::Gray))]
+    };
 
     let row2: Vec<Span<'static>> = vec![
         Span::styled(" project ".to_string(), Style::default().fg(Color::DarkGray)),
-        Span::styled(proj, Style::default().fg(Color::Gray)),
+        Span::styled(proj, Style::default().fg(Color::Rgb(170, 200, 255))),
         Span::styled("  │  ".to_string(), Style::default().fg(Color::DarkGray)),
-        Span::styled(phases, Style::default().fg(Color::Gray)),
     ];
+    // Append the (possibly multi-span) phase progress
+    let mut row2 = row2;
+    row2.extend(phase_spans);
 
     // Draw bordered block then overlay rows inside it
     let block = Block::default()
@@ -3749,9 +3909,9 @@ fn short_gpu_name(name: &str) -> String {
 fn render_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let chat_title = match app.stage {
         WorkflowStage::PlanReviewsComplete =>
-            " Reviews ready — /view-reviews then /accept-plan (↑↓ scroll) ",
+            " Plan R1+R2 done (sequential via /lock-plan) — /accept-plan (↑↓ scroll) ",
         WorkflowStage::PlanAccepted =>
-            " Plan accepted — build phases (↑↓ / for commands) ",
+            " Plan accepted — /phase-start Px ; coder writes review docs on phase done (↑↓ / cmds) ",
         _ =>
             " Chat log (↑↓ scroll, Enter=send, Shift+Enter=newline, / for commands) ",
     };
@@ -4067,3 +4227,4 @@ fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) 
         .wrap(Wrap { trim: false });
     f.render_widget(viewer, popup);
 }
+

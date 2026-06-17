@@ -137,7 +137,7 @@ impl Agent {
                     tools::execute(call, &self.root)
                 };
 
-                let _ = tx.send(format!("[tool-end]{} {}", call.name, tools::result_summary(&result)));
+                let _ = tx.send(format!("[tool-end]{} {}", call.name, tools::result_summary(&call.name, &result)));
                 self.history
                     .push(ChatMessage::tool_result(call.id.clone(), result));
             }

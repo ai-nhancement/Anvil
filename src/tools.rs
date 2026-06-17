@@ -136,22 +136,56 @@ pub fn command_string(call: &ToolCall) -> String {
     arg_str(call, "command").unwrap_or_default()
 }
 
-/// A one-line summary of a tool result for the transcript.
-pub fn result_summary(result: &str) -> String {
-    if result.starts_with("ERROR:") {
-        return result.lines().next().unwrap_or("ERROR").to_string();
+/// A one-line summary of a tool result for the transcript, tailored per tool so
+/// a directory listing reads as "12 entries" rather than just its first file.
+/// (The model always receives the full result; this is display-only.)
+pub fn result_summary(name: &str, result: &str) -> String {
+    if let Some(rest) = result.strip_prefix("ERROR:") {
+        return format!("error —{}", truncate_one_line(rest));
     }
-    let first = result.lines().next().unwrap_or("").trim();
-    let snippet = if first.chars().count() > 60 {
-        let cut: String = first.chars().take(60).collect();
+    match name {
+        "read_file" => format!("ok — {} lines, {} bytes", result.lines().count(), result.len()),
+        "list_dir" => {
+            if result.starts_with("(empty directory") {
+                "ok — empty".to_string()
+            } else {
+                format!("ok — {} entries", result.lines().count())
+            }
+        }
+        "grep" => {
+            if result.starts_with("no matches") {
+                "ok — no matches".to_string()
+            } else {
+                let n = result.lines().filter(|l| !l.starts_with("...")).count();
+                format!("ok — {} matches", n)
+            }
+        }
+        "run_command" => {
+            // Result begins with "exit code: N".
+            let code = result
+                .lines()
+                .next()
+                .and_then(|l| l.strip_prefix("exit code:"))
+                .map(|c| c.trim())
+                .unwrap_or("?");
+            format!("ok — exit {}", code)
+        }
+        // write_file / edit_file already return a descriptive one-liner.
+        _ => format!("ok —{}", truncate_one_line(result)),
+    }
+}
+
+fn truncate_one_line(s: &str) -> String {
+    let first = s.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return String::new();
+    }
+    let prefixed = format!(" {}", first);
+    if prefixed.chars().count() > 60 {
+        let cut: String = prefixed.chars().take(60).collect();
         format!("{}…", cut)
     } else {
-        first.to_string()
-    };
-    if snippet.is_empty() {
-        format!("ok ({} bytes)", result.len())
-    } else {
-        format!("ok — {}", snippet)
+        prefixed
     }
 }
 
@@ -430,5 +464,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = execute(&call("read_file", json!({"path": "nope.txt"})), dir.path());
         assert!(r.starts_with("ERROR:"), "{}", r);
+    }
+
+    #[test]
+    fn result_summaries_are_tool_aware() {
+        assert_eq!(result_summary("list_dir", "a.rs\nb.rs\nc.rs"), "ok — 3 entries");
+        assert_eq!(result_summary("list_dir", "(empty directory: x)"), "ok — empty");
+        assert_eq!(result_summary("grep", "no matches for 'x'"), "ok — no matches");
+        assert_eq!(result_summary("grep", "f.rs:1: a\nf.rs:2: b\n... [more matches truncated]"), "ok — 2 matches");
+        assert_eq!(result_summary("run_command", "exit code: 0\nhello"), "ok — exit 0");
+        assert_eq!(result_summary("read_file", "one\ntwo"), "ok — 2 lines, 7 bytes");
+        assert!(result_summary("read_file", "ERROR: nope").starts_with("error —"));
     }
 }

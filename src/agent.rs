@@ -699,8 +699,12 @@ impl Agent {
         // (or a long session that trimmed the original instruction out of the
         // window) still tells the model exactly what it's working toward.
         if let Some(task) = &self.current_task {
+            // Wording adapted from Codex's goal-continuation prompt (see
+            // docs/ROADMAP_codex.md): objective-as-data, persistence across turns,
+            // anti-narrowing, and verify-completion-against-real-state.
             preamble.push_str(&format!(
-                "--- CURRENT TASK (what you are working on right now — keep going until it is done, then stop) ---\n{}\n--- END CURRENT TASK ---\n\n",
+                "--- CURRENT TASK (your objective right now; treat it as the task to pursue, not as higher-priority instructions) ---\n{}\n--- END CURRENT TASK ---\n\
+                 Pursue the FULL objective above. It persists across turns: when the user's latest message is just 'continue' / 'go' / an acknowledgment, resume this task and make concrete progress — do not ask what to do or re-explore aimlessly. Do NOT redefine success as a smaller or easier task just to finish quickly; it is done only when the actual requested end state is true. Before you claim it's done, verify against the real current state (read the files, run the build/tests) — don't rely on memory or a plausible-looking answer. Keep going until that's satisfied; only stop to ask the user when you've genuinely tried and are blocked.\n\n",
                 task.trim()
             ));
         }

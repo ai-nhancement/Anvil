@@ -669,6 +669,12 @@ impl Agent {
             preamble
         ));
 
+        // Loop breaker: signatures of read-only calls already made this turn. A
+        // weak model can spin re-reading the same files; an identical read with no
+        // mutation since gets a "you already ran this" nudge instead of re-running.
+        // Cleared whenever a write/edit/command changes the world.
+        let mut seen_reads: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for step in 0..self.max_steps {
             // Send only the recent, budgeted window — not the whole ledger.
             let window = self.context_window();
@@ -719,7 +725,21 @@ impl Agent {
                     tools::summarize_args(call)
                 ));
 
-                let result = if tools::requires_confirmation(&call.name) {
+                let read_only = matches!(
+                    call.name.as_str(),
+                    "read_file" | "list_dir" | "grep" | "project_state"
+                );
+                let sig = format!("{}::{}", call.name, call.arguments);
+
+                let result = if read_only && seen_reads.contains(&sig) {
+                    // Identical read already done this turn with nothing changed
+                    // since — its result is still in history. Nudge instead of repeat.
+                    format!(
+                        "(repeat) You already ran `{} {}` this turn and nothing has changed since; its result is above. Stop repeating identical reads — make an edit, run a command, or finish.",
+                        call.name,
+                        tools::summarize_args(call)
+                    )
+                } else if tools::requires_confirmation(&call.name) {
                     let cmd = tools::command_string(call);
                     if self.confirm.confirm(&tx, &cmd).await {
                         tools::execute(call, &self.root)
@@ -729,6 +749,14 @@ impl Agent {
                 } else {
                     tools::execute(call, &self.root)
                 };
+
+                // Track read-only calls for dedup; any other (effectful) call may
+                // have changed the world, so re-reads become legitimate again.
+                if read_only {
+                    seen_reads.insert(sig);
+                } else {
+                    seen_reads.clear();
+                }
 
                 let _ = tx.send(format!(
                     "[tool-end]{} {}",

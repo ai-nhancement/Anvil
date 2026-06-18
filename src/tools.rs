@@ -44,11 +44,13 @@ pub fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "read_file".into(),
-            description: "Read a UTF-8 text file from the project. Returns the full contents (truncated if very large).".into(),
+            description: "Read a UTF-8 text file. By default returns the whole file (truncated if very large). For large files (hundreds of lines), prefer reading a section: pass offset (1-based start line) and limit (number of lines) — e.g. after grep finds a symbol's line.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path relative to the project root, e.g. src/llm.rs"}
+                    "path": {"type": "string", "description": "Path relative to the project root, e.g. src/llm.rs"},
+                    "offset": {"type": "integer", "description": "Optional: 1-based line number to start reading from"},
+                    "limit": {"type": "integer", "description": "Optional: maximum number of lines to return"}
                 },
                 "required": ["path"]
             }),
@@ -206,7 +208,7 @@ pub fn execute(call: &ToolCall, root: &Path) -> String {
 
 fn run(call: &ToolCall, root: &Path) -> Result<String> {
     match call.name.as_str() {
-        "read_file" => read_file(root, &arg_str(call, "path")?),
+        "read_file" => read_file(root, &arg_str(call, "path")?, arg_usize(call, "offset"), arg_usize(call, "limit")),
         "write_file" => write_file(root, &arg_str(call, "path")?, &arg_str(call, "content")?),
         "edit_file" => edit_file(
             root,
@@ -224,13 +226,26 @@ fn run(call: &ToolCall, root: &Path) -> Result<String> {
 
 // ── individual tools ─────────────────────────────────────────────────────────
 
-fn read_file(root: &Path, rel: &str) -> Result<String> {
+fn read_file(root: &Path, rel: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
     let path = resolve(root, rel)?;
     let bytes = std::fs::read(&path).map_err(|e| anyhow!("could not read {}: {}", rel, e))?;
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
+
+    // Line-range read: return just the requested slice (good for large files).
+    if offset.is_some() || limit.is_some() {
+        let lines: Vec<&str> = text.lines().collect();
+        let total = lines.len();
+        let start = offset.unwrap_or(1).max(1) - 1; // 1-based → 0-based
+        let start = start.min(total);
+        let count = limit.unwrap_or(total.saturating_sub(start));
+        let end = (start + count).min(total);
+        let slice = lines[start..end].join("\n");
+        return Ok(format!("[lines {}-{} of {} in {}]\n{}", start + 1, end, total, rel, slice));
+    }
+
     if text.len() > MAX_READ_BYTES {
         text.truncate(MAX_READ_BYTES);
-        text.push_str("\n... [truncated]");
+        text.push_str("\n... [truncated — read a section with offset/limit for the rest]");
     }
     Ok(text)
 }
@@ -413,6 +428,14 @@ fn arg_str(call: &ToolCall, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("missing required string argument '{}'", key))
 }
 
+/// Optional unsigned-integer argument (accepts a JSON number or numeric string).
+fn arg_usize(call: &ToolCall, key: &str) -> Option<usize> {
+    let v = call.arguments.get(key)?;
+    v.as_u64()
+        .map(|n| n as usize)
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
 fn arg_opt(call: &ToolCall, key: &str) -> Option<String> {
     call.arguments.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
@@ -484,3 +507,5 @@ mod tests {
         assert!(result_summary("read_file", "ERROR: nope").starts_with("error —"));
     }
 }
+
+

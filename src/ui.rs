@@ -84,13 +84,25 @@ You have tools, scoped to the project root:\n\
 - list_dir(path), grep(pattern, [path])\n\
 - run_command(command)  — e.g. cargo build, cargo test, git diff (the user confirms each run)\n\
 \n\
-Work like a real engineer: read what you need before editing (never ask the user to paste files — open them yourself), make the changes with write_file/edit_file, and verify with run_command. Keep prose short; let the tools do the work. Prefer small, precise edits over rewriting whole files.\n\
+Always use your built-in read_file / grep / list_dir tools to read and search the code — they work everywhere and need no confirmation. Reserve run_command for build/test/lint/git; do NOT shell out to grep/findstr/Select-String/python to search files (the platform varies; your grep tool is reliable). If a search returns nothing, try a shorter or different pattern rather than switching to the shell.\n\
+For LARGE files (hundreds of lines, e.g. src/ui.rs), do NOT read the whole file repeatedly — grep for the symbol or text you need to find its line, then read_file with offset+limit to read just that section. Reading whole large files wastes context and makes you lose track. Don't re-run the same read/list/project_state call you already ran this turn.\n\
+\n\
+Work like a real engineer: read what you need before editing (never ask the user to paste files — open them yourself), make the changes with write_file/edit_file, and verify with run_command. Keep prose short; let the tools do the work. Prefer small, precise edits over rewriting whole files. Stay on the user's current request; don't switch to a different task from background context.\n\
 \n\
 Anvil adds just enough structure to stop drift, at exactly TWO human gates:\n\
 1. PLAN: discuss the work with the user, then write the plan yourself to plan.md (phases ## P0 — Name, each with a goal, 3–8 actions, a deliverable, and 2–5 acceptance criteria). When the user is happy they run /lock-plan — two independent reviewers (different models) critique plan.md and their findings appear in chat; revise plan.md to address them. The user runs /accept-plan to approve.\n\
 2. PHASES: implement the current phase directly (write code + tests, run them). When it's done the user runs /accept-phase — the two reviewers critique the actual diff; fix what they raise. The user re-runs /accept-phase to ship it, then you move to the next phase.\n\
 \n\
-Outside those two gates, just collaborate normally — answer questions, explore, refactor, debug — using your tools. Don't fake a gate or claim a review happened; only the /lock-plan and /accept-phase commands trigger the reviewers. Be precise, skeptical of scope creep, and surface risks early."
+Outside those two gates, just collaborate normally — answer questions, explore, refactor, debug — using your tools. Don't fake a gate or claim a review happened; only the /lock-plan and /accept-phase commands trigger the reviewers. Be precise, skeptical of scope creep, and surface risks early.\n\
+\n\
+PROJECT CONTEXT FILES you maintain with your write_file/edit_file tools (all plain, user-visible files — no hidden state):\n\
+- .anvil/decisions.md — durable preferences/conventions and verification commands that actually worked (e.g. how to test/lint/build). Append here when the user states a standing preference or you confirm a project convention.\n\
+- .anvil/assumptions.md — things you are ASSUMING but have NOT verified. Add one when you proceed on an unconfirmed belief. When you verify it, move it to decisions.md (or just delete it); delete it if it proves wrong. Keep facts and guesses separate.\n\
+- .anvil/scratch.md — a disposable scratchpad for investigation notes, alternative designs, command output. Never injected; not memory, not truth.\n\
+- ARCHITECTURE.md (repo root) — a small, maintained map of the codebase; update it when structure changes.\n\
+decisions.md, assumptions.md and working memory are injected into your context every turn; scratch.md and ARCHITECTURE.md are NOT — read them on demand. Keep all of them short and high-signal.\n\
+\n\
+When implementing a phase, follow this checklist: read the relevant files first → make the minimal diff → add/update tests → run the project's verification commands (from decisions.md) → inspect the diff before declaring it done."
         .to_string()
 }
 
@@ -119,8 +131,12 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Summarize the conversation into .anvil/working-memory.md and trim the live history"),
-    ("/memory", "Inspect the coder's memory layers (ledger, history window, working memory, token estimate)"),
+    ("/memory", "Inspect the coder's memory + context files (ledger, history window, working memory, decisions, assumptions, token estimate)"),
     ("/clear-memory", "Reset the in-session history + working memory (the append-only ledger is kept)"),
+    ("/decisions", "View .anvil/decisions.md — durable preferences + verification commands (injected each turn)"),
+    ("/assumptions", "View .anvil/assumptions.md — the coder's unverified working hypotheses (injected each turn)"),
+    ("/scratch", "View .anvil/scratch.md — disposable notes (never injected)"),
+    ("/architecture", "View ARCHITECTURE.md — the maintained code map (read on demand)"),
     ("/y", "Approve a pending run_command"),
     ("/n", "Deny a pending run_command"),
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
@@ -391,6 +407,10 @@ pub fn run_ui(root: &Path) -> Result<()> {
     // The coder is a real agent now — it reads files on demand via its tools, so
     // there's no "Work in this Repo" prompt and no manual /include to grant access.
     if !app.first_run {
+        // Seed the project context files (decisions / assumptions / scratch /
+        // ARCHITECTURE.md) with explanatory templates if missing, so they're
+        // discoverable. Templates aren't injected until they have real content.
+        crate::agent::ensure_context_files(&app.root);
         app.push_system(&format!(
             "Working in {}. The coder reads, edits, and runs the project directly — just tell it what to build.",
             app.root.display()
@@ -692,6 +712,19 @@ impl App {
         } else {
             self.follow_bottom = false;
             self.view_offset = next;
+        }
+    }
+
+    /// Display a project context file (decisions / assumptions / scratch / arch)
+    /// in the transcript, or note it's empty.
+    fn show_context_file(&mut self, path: PathBuf, label: &str) {
+        match std::fs::read_to_string(&path) {
+            Ok(content) if !content.trim().is_empty() => {
+                self.push_system(label);
+                self.push(content);
+                self.follow_bottom = true;
+            }
+            _ => self.push_system(&format!("{} — empty.", label)),
         }
     }
 
@@ -1280,6 +1313,23 @@ impl App {
             return;
         }
 
+        if cmd == "/decisions" {
+            self.show_context_file(crate::agent::decisions_path(&self.root), "Decisions (.anvil/decisions.md — injected each turn)");
+            return;
+        }
+        if cmd == "/assumptions" {
+            self.show_context_file(crate::agent::assumptions_path(&self.root), "Assumptions (.anvil/assumptions.md — unverified hypotheses, injected each turn)");
+            return;
+        }
+        if cmd == "/scratch" {
+            self.show_context_file(crate::agent::scratch_path(&self.root), "Scratchpad (.anvil/scratch.md — disposable, never injected)");
+            return;
+        }
+        if cmd == "/architecture" || cmd == "/arch" {
+            self.show_context_file(crate::agent::architecture_path(&self.root), "Architecture map (ARCHITECTURE.md — read on demand)");
+            return;
+        }
+
         if cmd == "/compact" || cmd == "/summarize" {
             let agent = match &self.agent {
                 Some(a) => a.clone(),
@@ -1318,12 +1368,37 @@ impl App {
                 .as_ref()
                 .and_then(|a| a.try_lock().ok().map(|g| (g.history_len(), g.context_chars())))
                 .unwrap_or((0, 0));
-            let est_tokens = (ctx_chars + wm_bytes + snap_chars) / 4;
+            let dec_bytes = std::fs::read_to_string(crate::agent::decisions_path(&self.root)).map(|s| s.len().min(2000)).unwrap_or(0);
+            let asm_bytes = std::fs::read_to_string(crate::agent::assumptions_path(&self.root)).map(|s| s.len().min(2000)).unwrap_or(0);
+            let est_tokens = (ctx_chars + wm_bytes + snap_chars + dec_bytes + asm_bytes) / 4;
+            // Project context files: size + whether they're injected this turn.
+            let file_line = |path: std::path::PathBuf, label: &str, injected: bool| -> String {
+                let content = std::fs::read_to_string(&path).unwrap_or_default();
+                let body = content.lines().any(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && !t.starts_with('#') && !t.starts_with("<!--") && !t.starts_with('>')
+                });
+                let status = if !body {
+                    "empty".to_string()
+                } else if injected {
+                    format!("{} bytes, injected", content.trim().len())
+                } else {
+                    format!("{} bytes, on demand", content.trim().len())
+                };
+                format!("  {}: {}", label, status)
+            };
+            let ctx_files = format!(
+                "{}\n{}\n{}\n{}",
+                file_line(crate::agent::decisions_path(&self.root), "decisions.md", true),
+                file_line(crate::agent::assumptions_path(&self.root), "assumptions.md", true),
+                file_line(crate::agent::scratch_path(&self.root), "scratch.md (never injected)", false),
+                file_line(crate::agent::architecture_path(&self.root), "ARCHITECTURE.md", false),
+            );
             self.push_system(&format!(
-                "Memory layers:\n  ledger (.anvil/session.json): {} entries (append-only, full record)\n  in-session history: {} messages (recent window sent to the coder)\n  working memory (.anvil/working-memory.md): {} bytes\n  reality snapshot: {} bytes (rebuilt every turn)\n  ≈ {}k tokens sent next turn (window + working memory + snapshot)",
-                ledger_lines, hist_len, wm_bytes, snap_chars, est_tokens / 1000
+                "Memory layers:\n  ledger (.anvil/session.json): {} entries (append-only, full record)\n  in-session history: {} messages (recent window sent to the coder)\n  working memory (.anvil/working-memory.md): {} bytes\n  reality snapshot: {} bytes (rebuilt every turn)\nProject context files:\n{}\n  ≈ {}k tokens sent next turn (window + working memory + decisions + assumptions + snapshot)",
+                ledger_lines, hist_len, wm_bytes, snap_chars, ctx_files, est_tokens / 1000
             ));
-            self.push_system("  /compact folds the conversation into working memory · /clear-memory resets the session (ledger kept)");
+            self.push_system("  /decisions /assumptions /scratch /architecture to view · /compact folds chat into working memory · /clear-memory resets the session (ledger kept)");
             return;
         }
 
@@ -1395,6 +1470,7 @@ impl App {
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
             self.push_system("Memory: chat persists across restarts (append-only ledger). /compact summarizes into .anvil/working-memory.md (injected each turn). /memory inspects the layers; /clear-memory resets the session (ledger kept).");
+            self.push_system("Context files (coder-maintained, visible): /decisions (prefs + verify commands), /assumptions (unverified hypotheses) — both injected each turn · /scratch (disposable, never injected) · /architecture (code map, on demand).");
             self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2 auto) → coder revises → /accept-plan.");
             self.push_system("Phase gate: build the phase with the coder → /accept-phase (R1+R2 on the diff) → fix findings → /ship-phase.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");

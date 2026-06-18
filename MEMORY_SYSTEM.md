@@ -51,6 +51,30 @@ verbatim — their signal lives in working memory.
 
 ---
 
+## Project context files
+
+A small set of legible, user-editable Markdown files the coder maintains with its own
+`write_file`/`edit_file` tools. Each has an **explicit injection policy** — no retrieval,
+no ranking, no hidden mutation. They're seeded with explanatory templates on launch and
+are *not* injected until they contain real content (a template's headers/comments don't
+count).
+
+| File | Holds | Injected each turn? |
+|---|---|---|
+| `.anvil/decisions.md` | durable preferences/conventions **+ verification commands** that worked | yes (bounded ~2k) |
+| `.anvil/assumptions.md` | working hypotheses the coder has **not verified** (kept separate from facts) | yes (bounded ~2k) |
+| `.anvil/scratch.md` | disposable investigation notes — not memory, not truth | **never** |
+| `ARCHITECTURE.md` (repo root) | a small maintained map of the codebase (committable) | on demand |
+
+The coder records standing preferences and confirmed verification commands in
+`decisions.md`; tracks unverified beliefs in `assumptions.md` and promotes/deletes them as
+it verifies; keeps `ARCHITECTURE.md` current; and uses `scratch.md` for throwaway notes.
+A phase checklist (read files → minimal diff → tests → run verification → inspect diff) is
+part of the coder's system prompt.
+
+View them with `/decisions`, `/assumptions`, `/scratch`, `/architecture`; `/memory` lists
+them all with sizes and injection status.
+
 ## Commands
 
 - **`/compact`** — summarize the conversation (via the coder model) into

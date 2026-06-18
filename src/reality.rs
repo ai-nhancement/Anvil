@@ -26,6 +26,7 @@ const MAX_GIT: usize = 1600;
 pub fn snapshot(root: &Path) -> String {
     let mut s = String::from("--- REALITY SNAPSHOT (live; disk + git are the source of truth) ---\n");
 
+    s.push_str(&format!("Platform: {}\n", std::env::consts::OS));
     s.push_str(&format!("Stage: {}\n", stage_label(root)));
 
     let state = load_state(root);

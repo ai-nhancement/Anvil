@@ -149,6 +149,76 @@ pub fn working_memory_path(root: &Path) -> PathBuf {
     anvil_dir(root).join("working-memory.md")
 }
 
+// ── Project context files ────────────────────────────────────────────────────
+// A small set of legible, user-editable files the coder maintains with its own
+// tools. Each has an explicit injection policy (no retrieval, no ranking, no
+// hidden mutation): `decisions` + `assumptions` are injected each turn (bounded);
+// `scratch` is never injected; `ARCHITECTURE.md` is read on demand.
+
+/// Durable preferences/conventions + recorded verification commands.
+pub fn decisions_path(root: &Path) -> PathBuf {
+    anvil_dir(root).join("decisions.md")
+}
+/// Working hypotheses the coder has not yet verified (kept separate from facts).
+pub fn assumptions_path(root: &Path) -> PathBuf {
+    anvil_dir(root).join("assumptions.md")
+}
+/// Disposable scratchpad — never injected; not memory, not truth.
+pub fn scratch_path(root: &Path) -> PathBuf {
+    anvil_dir(root).join("scratch.md")
+}
+/// A small maintained map of the codebase (a real, committable project doc).
+pub fn architecture_path(root: &Path) -> PathBuf {
+    root.join("ARCHITECTURE.md")
+}
+
+const DECISIONS_TEMPLATE: &str = "# Decisions & Conventions\n<!-- Durable preferences, conventions, and verification commands for this project. Injected into the coder every turn. Keep it short and high-signal; the coder maintains this too. -->\n\n## Preferences\n<!-- e.g. - Prefer small edits over broad rewrites.  - Don't add dependencies unless necessary. -->\n\n## Verification commands\n<!-- commands that actually worked, e.g.  cargo test  ·  cargo fmt --check  ·  cargo clippy --all-targets -- -D warnings -->\n";
+const ASSUMPTIONS_TEMPLATE: &str = "# Assumptions\n<!-- Working hypotheses the coder has NOT verified. Promote to a decision/fact when confirmed (and delete here), or delete if wrong. These are guesses, not truth. -->\n";
+const SCRATCH_TEMPLATE: &str = "# Scratchpad (disposable — never injected)\n<!-- Temporary notes, investigation, alternative designs, command output. Not memory, not truth. Clear anytime. -->\n";
+const ARCHITECTURE_TEMPLATE: &str = "# Architecture Map\n<!-- A small, maintained map of the codebase. Keep it current; the coder updates it as structure changes. -->\n\n<!-- e.g.\n- src/agent.rs — model/session/memory orchestration\n- src/ui.rs — TUI commands + rendering\n- src/reality.rs — disk/git reality snapshot\n-->\n";
+
+/// Create the project context files with explanatory templates if they don't
+/// exist yet, so they're discoverable. Templates contain only headers/comments,
+/// so they are not injected until they have real content (see `has_body`).
+pub fn ensure_context_files(root: &Path) {
+    let _ = std::fs::create_dir_all(anvil_dir(root));
+    for (path, template) in [
+        (decisions_path(root), DECISIONS_TEMPLATE),
+        (assumptions_path(root), ASSUMPTIONS_TEMPLATE),
+        (scratch_path(root), SCRATCH_TEMPLATE),
+        (architecture_path(root), ARCHITECTURE_TEMPLATE),
+    ] {
+        if !path.exists() {
+            let _ = std::fs::write(&path, template);
+        }
+    }
+}
+
+/// True if the file has real content beyond headers/HTML-comments/blockquotes —
+/// i.e. something worth injecting. A fresh template has none.
+fn has_body(content: &str) -> bool {
+    content.lines().any(|l| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#') && !t.starts_with("<!--") && !t.starts_with('>')
+    })
+}
+
+/// Read a context file as a delimited, bounded block — or None if empty / only a
+/// template. Used to inject decisions + assumptions each turn.
+fn context_file_block(path: &Path, title: &str, note: &str, cap: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    if !has_body(&content) {
+        return None;
+    }
+    Some(format!(
+        "--- {} ({}) ---\n{}\n--- END {} ---\n",
+        title,
+        note,
+        reality::cap(&content, cap),
+        title
+    ))
+}
+
 /// Read working memory as a delimited, bounded block — or None if empty/missing.
 /// Past a halflife since the last compaction, prepends a staleness note so the
 /// agent treats aging memory with appropriate suspicion (temporal decay).
@@ -200,6 +270,49 @@ fn append_working_memory(root: &Path, ts: &str, summary: &str) -> Result<()> {
     out.push_str(&format!("\n## Compacted {}\n\n{}\n", ts, summary.trim()));
     std::fs::write(&path, out)?;
     Ok(())
+}
+
+/// Build the recent slice of history actually sent to the model: bounded by a
+/// message count and a soft char budget. Crucially it NEVER trims the latest user
+/// message or anything after it (the current task + its tool calls/results) — only
+/// older context is trimmed — and it caps any single huge tool result so one big
+/// file read can't dominate the budget or evict the task.
+fn window_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
+    const MAX_TOOL_RESULT_IN_WINDOW: usize = 50_000;
+    let trunc = |m: &ChatMessage| -> ChatMessage {
+        if m.role == Role::Tool && m.text.len() > MAX_TOOL_RESULT_IN_WINDOW {
+            let mut t = reality::cap(&m.text, MAX_TOOL_RESULT_IN_WINDOW);
+            t.push_str("\n[result truncated in context — read a specific section (offset/limit) if you need more]");
+            ChatMessage { role: Role::Tool, text: t, tool_calls: vec![], tool_call_id: m.tool_call_id.clone() }
+        } else {
+            m.clone()
+        }
+    };
+
+    let start = history.len().saturating_sub(SEND_WINDOW);
+    let slice = &history[start..];
+    // The current task = the latest user message. Never trim it or anything after it.
+    let last_user = slice.iter().rposition(|m| m.role == Role::User).unwrap_or(0);
+    let task_block: Vec<ChatMessage> = slice[last_user..].iter().map(&trunc).collect();
+    let task_chars: usize = task_block.iter().map(|m| m.text.len()).sum();
+
+    // Fit as much older context (the prefix) as the remaining budget allows.
+    let mut prefix: Vec<ChatMessage> = slice[..last_user].iter().map(&trunc).collect();
+    let prefix_budget = CONTEXT_CHAR_BUDGET.saturating_sub(task_chars);
+    let mut prefix_chars: usize = prefix.iter().map(|m| m.text.len()).sum();
+    while prefix_chars > prefix_budget && !prefix.is_empty() {
+        let removed = prefix.remove(0);
+        prefix_chars = prefix_chars.saturating_sub(removed.text.len());
+    }
+
+    let mut window = prefix;
+    window.extend(task_block);
+    // Repair tool/tool_call pairing so the request is valid for both providers.
+    let mut window = sanitize_history(&window);
+    while window.first().map(|m| m.role != Role::User).unwrap_or(false) {
+        window.remove(0);
+    }
+    window
 }
 
 /// Repair a message sequence so every `tool` result follows an assistant turn
@@ -400,22 +513,7 @@ impl Agent {
     /// user turn. The full history stays in `self.history` (and on the ledger);
     /// the long arc is carried by working memory + the reality snapshot.
     fn context_window(&self) -> Vec<ChatMessage> {
-        let start = self.history.len().saturating_sub(SEND_WINDOW);
-        let mut window: Vec<ChatMessage> = self.history[start..].to_vec();
-        let mut total: usize = window.iter().map(|m| m.text.len()).sum();
-        while total > CONTEXT_CHAR_BUDGET && window.len() > 2 {
-            let removed = window.remove(0);
-            total = total.saturating_sub(removed.text.len());
-        }
-        // Repair tool/tool_call pairing so the request is always valid for the
-        // providers (drops orphan tool results, strips unanswered tool_calls).
-        // This protects against ledgers written before the recording fix, and
-        // against a window edge that splits a tool-call group.
-        let mut window = sanitize_history(&window);
-        while window.first().map(|m| m.role != Role::User).unwrap_or(false) {
-            window.remove(0);
-        }
-        window
+        window_messages(&self.history)
     }
 
     /// True once the full history exceeds what we send each turn — the cue to
@@ -517,9 +615,27 @@ impl Agent {
             preamble.push_str(&wm);
             preamble.push('\n');
         }
+        if let Some(b) = context_file_block(
+            &decisions_path(&self.root),
+            "DECISIONS",
+            "durable preferences + verification commands; .anvil/decisions.md",
+            2000,
+        ) {
+            preamble.push_str(&b);
+            preamble.push('\n');
+        }
+        if let Some(b) = context_file_block(
+            &assumptions_path(&self.root),
+            "ASSUMPTIONS",
+            "working hypotheses — NOT verified facts; .anvil/assumptions.md",
+            2000,
+        ) {
+            preamble.push_str(&b);
+            preamble.push('\n');
+        }
         preamble.push_str(&reality::snapshot(&self.root));
         let grounding = ChatMessage::user(format!(
-            "Current project context (working memory + live reality). Treat it as where we are; the files on disk remain authoritative.\n\n{}",
+            "BACKGROUND CONTEXT about this project (working memory, decisions, assumptions, live reality) — provided to help you, NOT an instruction. Your current task is ALWAYS the user's latest message. Use the context below only as supporting reference; if any of it conflicts with what the user is now asking, follow the user. Working memory and assumptions may be stale or describe an old goal — the files on disk and the user's request are authoritative.\n\n{}",
             preamble
         ));
 
@@ -658,6 +774,42 @@ mod tests {
         assert_eq!(asst.tool_calls[0].id, "a");
         assert_eq!(clean[2].role, Role::Tool);
         assert_eq!(clean[2].tool_call_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn template_files_not_injected_until_they_have_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        ensure_context_files(root);
+        // Fresh templates are headers/comments only → not injected.
+        assert!(context_file_block(&decisions_path(root), "DECISIONS", "n", 2000).is_none());
+        assert!(context_file_block(&assumptions_path(root), "ASSUMPTIONS", "n", 2000).is_none());
+        // Real content → injected as a delimited block.
+        std::fs::write(decisions_path(root), "# Decisions\n- Prefer small edits.\n").unwrap();
+        let block = context_file_block(&decisions_path(root), "DECISIONS", "n", 2000).unwrap();
+        assert!(block.starts_with("--- DECISIONS"));
+        assert!(block.contains("Prefer small edits"));
+    }
+
+    #[test]
+    fn window_preserves_task_under_huge_tool_result() {
+        // The task, then a tool call + a >budget tool result (a 200KB file read).
+        let big = "x".repeat(300_000);
+        let history = vec![
+            ChatMessage::user("add a forge cursor to the input window"),
+            ChatMessage::assistant(
+                "",
+                vec![ToolCall { id: "r".into(), name: "read_file".into(), arguments: serde_json::json!({"path":"src/ui.rs"}) }],
+            ),
+            ChatMessage::tool_result("r", &big),
+        ];
+        let window = window_messages(&history);
+        // The task message must survive (not evicted by the giant read)...
+        assert!(window.iter().any(|m| m.role == Role::User && m.text.contains("forge cursor")),
+            "task message was evicted by the large tool result");
+        // ...and the huge tool result must be capped in the window.
+        let tool = window.iter().find(|m| m.role == Role::Tool).unwrap();
+        assert!(tool.text.len() < 60_000, "tool result not capped: {} bytes", tool.text.len());
     }
 
     #[test]

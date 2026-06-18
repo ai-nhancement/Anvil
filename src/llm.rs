@@ -148,12 +148,15 @@ impl LlmClient {
                     .map_err(|e| anyhow!("keyring entry error for {}: {}", conn_name, e))?;
                 entry
                     .get_password()
+                    // Trim: pasted keys often carry a trailing newline/space, which
+                    // sends a bad Authorization header and reads as "incorrect API key".
+                    .map(|k| k.trim().to_string())
                     .map_err(|e| anyhow!("failed to read keyring for {}: {}", conn_name, e))
             }
             CredentialRef::Env { var_name } => {
                 if let Ok(val) = std::env::var(var_name) {
                     if !val.trim().is_empty() {
-                        return Ok(val);
+                        return Ok(val.trim().to_string());
                     }
                 }
                 // Graceful fallback for local Ollama (and similar): the quick setup and docs

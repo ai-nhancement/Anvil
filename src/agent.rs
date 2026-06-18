@@ -88,6 +88,18 @@ fn append_to_ledger(root: &Path, new_msgs: &[ChatMessage]) {
     }
 }
 
+/// Append a reset marker to the ledger so the next reload starts fresh while the
+/// full record (everything before the marker) is preserved for audit.
+pub fn append_reset_marker(root: &Path) {
+    let path = session_path(root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{{\"reset\":true}}");
+    }
+}
+
 /// Load the full immutable ledger. Returns every message that was ever
 /// appended (in order). Drops a leading partial exchange (non-User start)
 /// so the in-memory history always begins on a clean user turn.
@@ -111,8 +123,14 @@ pub fn load_session(root: &Path) -> Vec<ChatMessage> {
                     if let Ok(batch) = serde_json::from_str::<Vec<ChatMessage>>(trimmed) {
                         msgs.extend(batch);
                     }
-                } else if let Ok(m) = serde_json::from_str::<ChatMessage>(trimmed) {
-                    msgs.push(m);
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    // A reset marker (from /clear-memory) starts the reload fresh,
+                    // without destroying the ledger's permanent record.
+                    if val.get("reset").and_then(|r| r.as_bool()) == Some(true) {
+                        msgs.clear();
+                    } else if let Ok(m) = serde_json::from_value::<ChatMessage>(val) {
+                        msgs.push(m);
+                    }
                 }
             }
         }
@@ -132,15 +150,40 @@ pub fn working_memory_path(root: &Path) -> PathBuf {
 }
 
 /// Read working memory as a delimited, bounded block — or None if empty/missing.
+/// Past a halflife since the last compaction, prepends a staleness note so the
+/// agent treats aging memory with appropriate suspicion (temporal decay).
 fn working_memory_block(root: &Path) -> Option<String> {
     let content = std::fs::read_to_string(working_memory_path(root)).ok()?;
     if content.trim().is_empty() {
         return None;
     }
     Some(format!(
-        "--- WORKING MEMORY (curated; .anvil/working-memory.md — context, not authority) ---\n{}\n--- END WORKING MEMORY ---\n",
+        "--- WORKING MEMORY (curated; .anvil/working-memory.md — context, not authority) ---\n{}{}\n--- END WORKING MEMORY ---\n",
+        staleness_note(&content),
         reality::cap(&content, 4000)
     ))
+}
+
+/// If the newest `## Compacted <ts>` heading is older than a halflife, return a
+/// note flagging the working memory as possibly outdated (empty string otherwise).
+fn staleness_note(content: &str) -> String {
+    const HALFLIFE_DAYS: i64 = 10;
+    let last_ts = content
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix("## Compacted ").map(|s| s.trim().to_string()));
+    if let Some(ts) = last_ts {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M UTC") {
+            let age_days = (chrono::Utc::now().naive_utc() - dt).num_days();
+            if age_days >= HALFLIFE_DAYS {
+                return format!(
+                    "(NOTE: working memory last updated {} — about {} days ago. Verify against the current plan/git before relying on it; some items may be outdated.)\n\n",
+                    ts, age_days
+                );
+            }
+        }
+    }
+    String::new()
 }
 
 /// Append a compaction summary to working memory under a timestamped heading.
@@ -234,7 +277,15 @@ pub struct Agent {
     confirm: ConfirmHandle,
     /// Safety cap on tool-call iterations within a single user turn.
     max_steps: usize,
+    /// Whether we've already nudged the user to /compact this session.
+    nudged_compact: bool,
 }
+
+/// Recent messages sent to the model each turn (the long arc lives in working
+/// memory + the reality snapshot, not the raw transcript).
+const SEND_WINDOW: usize = 40;
+/// Soft char budget for the sent window (~4 chars/token, so ~60k tokens).
+const CONTEXT_CHAR_BUDGET: usize = 240_000;
 
 impl Agent {
     pub fn new(
@@ -260,7 +311,51 @@ impl Agent {
             history,
             confirm,
             max_steps: 25,
+            nudged_compact: false,
         }
+    }
+
+    /// The recent slice of history actually sent to the model: bounded by a
+    /// message count and a soft char budget, and trimmed to start on a clean
+    /// user turn. The full history stays in `self.history` (and on the ledger);
+    /// the long arc is carried by working memory + the reality snapshot.
+    fn context_window(&self) -> Vec<ChatMessage> {
+        let start = self.history.len().saturating_sub(SEND_WINDOW);
+        let mut window: Vec<ChatMessage> = self.history[start..].to_vec();
+        let mut total: usize = window.iter().map(|m| m.text.len()).sum();
+        while total > CONTEXT_CHAR_BUDGET && window.len() > 2 {
+            let removed = window.remove(0);
+            total = total.saturating_sub(removed.text.len());
+        }
+        while window.first().map(|m| m.role != Role::User).unwrap_or(false) {
+            window.remove(0);
+        }
+        window
+    }
+
+    /// True once the full history exceeds what we send each turn — the cue to
+    /// suggest `/compact`.
+    fn over_send_window(&self) -> bool {
+        self.history.len() > SEND_WINDOW
+            || self.history.iter().map(|m| m.text.len()).sum::<usize>() > CONTEXT_CHAR_BUDGET
+    }
+
+    /// Number of messages currently held in memory (for the /memory inspector).
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Approximate char count of what's sent to the model next turn (window only;
+    /// callers add working memory + snapshot). For the /memory inspector.
+    pub fn context_chars(&self) -> usize {
+        self.context_window().iter().map(|m| m.text.len()).sum()
+    }
+
+    /// Reset the in-memory working history (used by /clear-memory). The ledger is
+    /// untouched; a reset marker is written separately so reloads start fresh.
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+        self.nudged_compact = false;
     }
 
     /// Append the given messages to the immutable ledger (append-only JSONL).
@@ -320,6 +415,13 @@ impl Agent {
         self.append_ledger(&[self.history.last().cloned().unwrap()]);
         let tools = tools::tool_defs();
 
+        // One-time, non-intrusive nudge once the conversation outgrows the send
+        // window — older turns are no longer sent verbatim, so suggest /compact.
+        if !self.nudged_compact && self.over_send_window() {
+            let _ = tx.send("[note]This session is getting long — older turns are now summarized out of each request rather than sent verbatim. Run /compact to fold them into working memory.".to_string());
+            self.nudged_compact = true;
+        }
+
         // Re-ground at the start of every turn: working memory (curated) + a fresh
         // bounded reality snapshot (stage / phase / plan slice / git), prepended to
         // the messages we send — kept OUT of persistent history so it's always
@@ -337,9 +439,11 @@ impl Agent {
         ));
 
         for _ in 0..self.max_steps {
-            let mut sent: Vec<ChatMessage> = Vec::with_capacity(self.history.len() + 1);
+            // Send only the recent, budgeted window — not the whole ledger.
+            let window = self.context_window();
+            let mut sent: Vec<ChatMessage> = Vec::with_capacity(window.len() + 1);
             sent.push(grounding.clone());
-            sent.extend(self.history.iter().cloned());
+            sent.extend(window);
 
             let turn = self
                 .client
@@ -426,5 +530,24 @@ mod tests {
     fn load_session_empty_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_session(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn reset_marker_starts_reload_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        append_to_ledger(root, &[
+            ChatMessage::user("old"),
+            ChatMessage::assistant("a1", vec![]),
+        ]);
+        append_reset_marker(root);
+        append_to_ledger(root, &[
+            ChatMessage::user("fresh"),
+            ChatMessage::assistant("a2", vec![]),
+        ]);
+        let loaded = load_session(root);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].text, "fresh");
+        assert_eq!(loaded[1].text, "a2");
     }
 }

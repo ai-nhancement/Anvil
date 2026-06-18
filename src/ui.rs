@@ -119,6 +119,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Summarize the conversation into .anvil/working-memory.md and trim the live history"),
+    ("/memory", "Inspect the coder's memory layers (ledger, history window, working memory, token estimate)"),
+    ("/clear-memory", "Reset the in-session history + working memory (the append-only ledger is kept)"),
     ("/y", "Approve a pending run_command"),
     ("/n", "Deny a pending run_command"),
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
@@ -1302,6 +1304,45 @@ impl App {
             return;
         }
 
+        if cmd == "/memory" || cmd == "/mem" {
+            // What the coder carries: in-RAM history, working memory, the ledger,
+            // and a rough estimate of tokens sent next turn.
+            let ledger_lines = std::fs::read_to_string(crate::agent::session_path(&self.root))
+                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(0);
+            let wm = std::fs::read_to_string(crate::agent::working_memory_path(&self.root)).unwrap_or_default();
+            let wm_bytes = wm.trim().len();
+            let snap_chars = crate::reality::snapshot(&self.root).len();
+            let (hist_len, ctx_chars) = self
+                .agent
+                .as_ref()
+                .and_then(|a| a.try_lock().ok().map(|g| (g.history_len(), g.context_chars())))
+                .unwrap_or((0, 0));
+            let est_tokens = (ctx_chars + wm_bytes + snap_chars) / 4;
+            self.push_system(&format!(
+                "Memory layers:\n  ledger (.anvil/session.json): {} entries (append-only, full record)\n  in-session history: {} messages (recent window sent to the coder)\n  working memory (.anvil/working-memory.md): {} bytes\n  reality snapshot: {} bytes (rebuilt every turn)\n  ≈ {}k tokens sent next turn (window + working memory + snapshot)",
+                ledger_lines, hist_len, wm_bytes, snap_chars, est_tokens / 1000
+            ));
+            self.push_system("  /compact folds the conversation into working memory · /clear-memory resets the session (ledger kept)");
+            return;
+        }
+
+        if cmd == "/clear-memory" || cmd == "/clear-mem" {
+            crate::agent::append_reset_marker(&self.root);
+            let _ = std::fs::write(crate::agent::working_memory_path(&self.root), "");
+            let cleared = self
+                .agent
+                .as_ref()
+                .and_then(|a| a.try_lock().ok().map(|mut g| { g.clear_history(); true }))
+                .unwrap_or(false);
+            if cleared || self.agent.is_none() {
+                self.push_system("Memory cleared: in-session history reset and working memory emptied. The ledger keeps the full record (a reset marker was written); plan.md / REVIEW_* are untouched.");
+            } else {
+                self.push_system("Working memory emptied + ledger reset marker written, but the coder is mid-turn — its in-session history clears on the next idle moment.");
+            }
+            return;
+        }
+
         if cmd == "/config" || cmd == "/setup" {
             self.start_config_wizard();
             return;
@@ -1353,7 +1394,7 @@ impl App {
             self.push_system("Keys: Enter=chat (streams), Esc/Ctrl-C/q=quit, s=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
-            self.push_system("Memory: chat persists across restarts. /compact summarizes the conversation into .anvil/working-memory.md (curated, editable) which is injected each turn.");
+            self.push_system("Memory: chat persists across restarts (append-only ledger). /compact summarizes into .anvil/working-memory.md (injected each turn). /memory inspects the layers; /clear-memory resets the session (ledger kept).");
             self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2 auto) → coder revises → /accept-plan.");
             self.push_system("Phase gate: build the phase with the coder → /accept-phase (R1+R2 on the diff) → fix findings → /ship-phase.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");
@@ -2005,6 +2046,13 @@ impl App {
             if let Some(label) = delta.strip_prefix("[tool-end]") {
                 self.log_chat_event("tool_end", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
                 self.push(format!("    ↳ {}", label.trim()));
+                changed = true;
+                continue;
+            }
+            // A non-intrusive advisory from the agent (e.g. the /compact nudge).
+            if let Some(note) = delta.strip_prefix("[note]") {
+                self.close_assistant_line();
+                self.push_system(note.trim());
                 changed = true;
                 continue;
             }

@@ -20,8 +20,21 @@ permissions:
   contents: write
 
 jobs:
+  # upload-rust-binary-action uploads into an existing release; it does not
+  # create one. So we create the GitHub Release for this tag first, then the
+  # per-target jobs attach their archives to it.
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   release:
     name: ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

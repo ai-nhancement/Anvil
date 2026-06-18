@@ -20,6 +20,7 @@ mod llm;
 mod phase;
 mod plan;
 mod reality;
+mod repomap;
 mod state;
 mod talk;
 mod tools;

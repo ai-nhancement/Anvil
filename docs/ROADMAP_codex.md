@@ -186,7 +186,7 @@ must know rather than something Anvil detects.
 | 1 | **Auto-compact** (the headline context fix) (§2) | ★★★★★ | Med | ✅ **Landed (v0.1.9)** — `maybe_auto_compact` folds older turns into working memory at turn-end. Tool-output truncation was already present. Token-based budgeting still TODO (we use msg-count + char budget). |
 | 2 | **Continuation/goal prompt wording** (§1) | ★★★★ | Low | ✅ **Landed (v0.1.9)** — task-anchor wording: objective-as-data, persistence, anti-narrowing, verify-completion. |
 | 3 | **`apply_patch` edit format** (§3) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — context-located multi-file diffs, validated before write; preferred over `edit_file`. |
-| 4 | **Lightweight repo map** (Aider §7) | ★★★★ | Med | TODO — adapt, don't port: regex signatures + simple ranking + token budget. Context *selection* (complements auto-compact's *bounding*). |
+| 4 | **Lightweight repo map** (Aider §7) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — `src/repomap.rs`: regex signatures + task/recency ranking + char budget, injected each turn. (Future: caching, JS arrow-const support.) |
 | 5 | **Model metadata from models.dev** (OpenCode §8) | ★★★★ | Med | TODO — per-model context window / pricing / tool-call flags. Unlocks #6 + better /config + auto tool-call detection. |
 | 6 | Token-based context budget (§2) | ★★★ | Low-Med | TODO — use models.dev `limit.context` (#5) instead of the 40-msg / 240k-char heuristic. |
 | 7 | Configurable retry + reviewer-path retry (§4) | ★★ | Low | TODO — polish on what we shipped. |

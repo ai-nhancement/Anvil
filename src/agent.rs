@@ -744,9 +744,15 @@ impl Agent {
             preamble.push_str(&b);
             preamble.push('\n');
         }
+        // Lightweight repo map: a ranked, budgeted guide to the project's symbols
+        // so the coder reads fewer whole files and stops guessing where things are.
+        if let Some(map) = crate::repomap::build(&self.root, self.current_task.as_deref(), 3500) {
+            preamble.push_str(&map);
+            preamble.push_str("\n\n");
+        }
         preamble.push_str(&reality::snapshot(&self.root));
         let grounding = ChatMessage::user(format!(
-            "BACKGROUND CONTEXT about this project (the current task, plus working memory, decisions, assumptions, and live reality) — provided to help you, NOT a new instruction. Your objective is the CURRENT TASK below; when the user's latest message is just 'continue' / 'go' / an acknowledgment, resume that task and keep working — do NOT ask what to do or re-explore aimlessly. A fresh, substantive user message replaces the task. If the context conflicts with what the user now asks, follow the user; working memory/assumptions may be stale, so the files on disk and the user's request are authoritative.\n\n{}",
+            "BACKGROUND CONTEXT about this project (the current task, plus working memory, decisions, assumptions, a repo map of the project's symbols, and live reality) — provided to help you, NOT a new instruction. Use the repo map to find where things live before searching blindly; read_file the relevant file for the actual code. Your objective is the CURRENT TASK below; when the user's latest message is just 'continue' / 'go' / an acknowledgment, resume that task and keep working — do NOT ask what to do or re-explore aimlessly. A fresh, substantive user message replaces the task. If the context conflicts with what the user now asks, follow the user; working memory/assumptions may be stale, so the files on disk and the user's request are authoritative.\n\n{}",
             preamble
         ));
 

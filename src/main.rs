@@ -17,6 +17,7 @@ mod agent;
 mod cli;
 mod config;
 mod llm;
+mod modelsdev;
 mod phase;
 mod plan;
 mod reality;

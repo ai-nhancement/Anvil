@@ -190,6 +190,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
     ("/setup", "Alias for /config — providers, models, keys"),
     ("/status", "Show roles, config state, and current gate progress"),
+    ("/models", "Show each role's model facts (context window, tool-call, price) via models.dev"),
     ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
     ("/unload [model]", "Force immediate unload (keep_alive=0) of one or all loaded models"),
     ("/help", "Show key bindings and available commands"),
@@ -650,6 +651,11 @@ pub fn run_ui(root: &Path) -> Result<()> {
     // a pulsing "UPDATE vX.Y.Z — /update to apply" indicator. Non-blocking; silent
     // on failure; honors ANVIL_NO_UPDATE_CHECK.
     app.spawn_update_check();
+
+    // Refresh models.dev metadata in the background (cached 7 days), then warn if
+    // the coder's model is known to lack tool-calling (it can't drive the loop).
+    app.spawn_modelsdev_refresh();
+    app.warn_coder_tool_calling();
 
     // Setup terminal (raw mode + alternate screen). We must restore on any exit path.
     enable_raw_mode()?;
@@ -1849,6 +1855,12 @@ impl App {
                     crate::update::current_version()
                 ));
             }
+            self.follow_bottom = true;
+            return;
+        }
+
+        if cmd == "/models" {
+            self.show_models();
             self.follow_bottom = true;
             return;
         }
@@ -3296,6 +3308,109 @@ impl App {
             GateStep::Done => return None,
         };
         Some(s)
+    }
+
+    /// Refresh models.dev metadata in the background (cached 7 days; no-op when
+    /// fresh). Populates the cache the rest of the session reads from.
+    fn spawn_modelsdev_refresh(&self) {
+        if let Some(rt) = &self.runtime {
+            rt.spawn(async move {
+                crate::modelsdev::refresh_if_stale().await;
+            });
+        }
+    }
+
+    /// Warn at startup if the coder's model is known (via models.dev) to lack
+    /// tool-calling — the coder needs it to read/edit/run. Best-effort: silent
+    /// when there's no config or no cached metadata yet (first run before the
+    /// background refresh finishes).
+    fn warn_coder_tool_calling(&mut self) {
+        let model = match &self.cfg {
+            Some(cfg) => match cfg.resolve_role_or_binding("coder") {
+                Ok((_, binding, _)) => binding.model.clone(),
+                Err(_) => return,
+            },
+            None => return,
+        };
+        let Some(db) = crate::modelsdev::load() else {
+            return;
+        };
+        if db.lookup(&model).and_then(|i| i.tool_call) == Some(false) {
+            self.push_system(&format!(
+                "⚠ The coder model '{}' is listed (models.dev) as NOT supporting tool calls — the coder needs them to read, edit, and run. It will likely just reply in text. Consider a tool-calling model for the coder role (Ctrl+S / /config).",
+                model
+            ));
+        }
+    }
+
+    /// `/models` — show each role's model with its models.dev facts (context
+    /// window, tool-call support, price).
+    fn show_models(&mut self) {
+        if self.cfg.is_none() {
+            self.push_system("No config loaded yet — use Ctrl+S or /config to set up models.");
+            return;
+        }
+        // Collect (label, model) per role, then drop the &self.cfg borrow.
+        let entries: Vec<(&'static str, String)> = {
+            let cfg = self.cfg.as_ref().unwrap();
+            [
+                ("CODER", "coder"),
+                ("R1 reviewer", "reviewer_a"),
+                ("R2 reviewer", "reviewer_b"),
+            ]
+            .iter()
+            .filter_map(|(label, role)| {
+                cfg.resolve_role_or_binding(role)
+                    .ok()
+                    .map(|(_, b, _)| (*label, b.model.clone()))
+            })
+            .collect()
+        };
+
+        let db = crate::modelsdev::load();
+        self.push_system("Configured models (facts via models.dev):");
+        for (label, model) in entries {
+            let line = match db.as_ref().and_then(|d| d.lookup(&model)) {
+                Some(i) => {
+                    let ctx = i
+                        .context
+                        .map(|c| format!("{}k ctx", c / 1000))
+                        .unwrap_or_else(|| "ctx ?".into());
+                    let max_out = i
+                        .output
+                        .map(|o| format!(", {}k out", o / 1000))
+                        .unwrap_or_default();
+                    let tools = match i.tool_call {
+                        Some(true) => "tools ✓",
+                        Some(false) => "tools ✗",
+                        None => "tools ?",
+                    };
+                    let price = match (i.cost_input, i.cost_output) {
+                        (Some(ci), Some(co)) => format!("${:.2}/${:.2} per 1M", ci, co),
+                        _ => "price ?".to_string(),
+                    };
+                    let named = if i.name != model {
+                        format!(" [{}]", i.name)
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "  {} — {}{} · {}{} · {} · {}",
+                        label, model, named, ctx, max_out, tools, price
+                    )
+                }
+                None => format!(
+                    "  {} — {} · (not in models.dev / metadata unavailable)",
+                    label, model
+                ),
+            };
+            self.push_system(&line);
+        }
+        if db.is_none() {
+            self.push_system(
+                "(models.dev metadata isn't cached yet — it refreshes in the background; try /models again shortly.)",
+            );
+        }
     }
 
     /// Kick off a one-shot, non-blocking check for a newer release. Runs the

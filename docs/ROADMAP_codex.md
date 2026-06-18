@@ -187,8 +187,8 @@ must know rather than something Anvil detects.
 | 2 | **Continuation/goal prompt wording** (§1) | ★★★★ | Low | ✅ **Landed (v0.1.9)** — task-anchor wording: objective-as-data, persistence, anti-narrowing, verify-completion. |
 | 3 | **`apply_patch` edit format** (§3) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — context-located multi-file diffs, validated before write; preferred over `edit_file`. |
 | 4 | **Lightweight repo map** (Aider §7) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — `src/repomap.rs`: regex signatures + task/recency ranking + char budget, injected each turn. (Future: caching, JS arrow-const support.) |
-| 5 | **Model metadata from models.dev** (OpenCode §8) | ★★★★ | Med | TODO — per-model context window / pricing / tool-call flags. Unlocks #6 + better /config + auto tool-call detection. |
-| 6 | Token-based context budget (§2) | ★★★ | Low-Med | TODO — use models.dev `limit.context` (#5) instead of the 40-msg / 240k-char heuristic. |
+| 5 | **Model metadata from models.dev** (OpenCode §8) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — `src/modelsdev.rs`: fetch+cache (7d), `lookup`. Startup warns when the coder model lacks tool-calling; `/models` shows ctx/price/tool-call per role. (context window now available for #6.) |
+| 6 | Token-based context budget (§2) | ★★★ | Low-Med | **Next up** — use models.dev `limit.context` (#5) to size the send-window / auto-compact threshold per model, instead of the fixed 40-msg / 240k-char heuristic. |
 | 7 | Configurable retry + reviewer-path retry (§4) | ★★ | Low | TODO — polish on what we shipped. |
 | 8 | Soft per-turn token budget surfaced to the model (§5) | ★★ | Low | Optional. |
 

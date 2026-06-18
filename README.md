@@ -17,17 +17,42 @@ No R3+. Cross-provider by design. Ollama, local, Groq, OpenAI, xAI, Anthropic, A
 
 The default experience is a full interactive ratatui TUI (persistent chat + live status + workflow gates). A CLI is also available for headless/legacy use.
 
+## Install
+
+One line, no Rust toolchain required — it downloads a prebuilt binary for your OS:
+
+```sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.ps1 | iex
+```
+
+<details>
+<summary>Other ways to install</summary>
+
+```sh
+# Pin a specific version
+ANVIL_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.sh | sh
+
+# From source (requires the Rust toolchain)
+cargo install --path .
+# or: cargo build --release   (binary at target/release/anvil)
+```
+
+Prebuilt binaries for every release live on the [Releases page](https://github.com/ai-nhancement/Anvil/releases).
+</details>
+
 ## Quick Start
 
 ```sh
-# Build or install
-cargo build --release
-# or: cargo install --path .
-
-# Create project files
+# In your project repo: create Anvil's project files
 anvil init
 
-# Recommended: launch the full TUI (auto-starts setup wizard on first use)
+# Launch the full TUI (auto-starts the setup wizard on first use)
 anvil
 # or explicitly: anvil ui
 ```

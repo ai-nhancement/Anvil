@@ -1,0 +1,9 @@
+# Normalize line endings. Without this, a Windows checkout can store CRLF in
+# shell scripts, which breaks the `#!/bin/sh` shebang on Linux/macOS.
+* text=auto
+
+# Shell scripts must always be LF, even when checked out on Windows.
+*.sh text eol=lf
+
+# PowerShell scripts are Windows-first; keep them CRLF.
+*.ps1 text eol=crlf

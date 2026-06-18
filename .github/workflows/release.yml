@@ -1,0 +1,54 @@
+name: Release
+
+# Build prebuilt `anvil` binaries for all major platforms and attach them to a
+# GitHub Release whenever a version tag (e.g. v0.1.0) is pushed. The install.sh
+# and install.ps1 scripts download these assets, so users never need a Rust
+# toolchain.
+#
+# Cut a release:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Asset names are stable and version-less (anvil-<target>.tar.gz / .zip) so the
+# install scripts can fetch them from /releases/latest/download/ without an API
+# call. The release tag itself carries the version.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds the binary for the target (using `cross` automatically for the
+      # musl / cross targets), archives it as anvil-<target>.tar.gz (.zip on
+      # Windows), and uploads it to the release for this tag.
+      - name: Build and upload
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: anvil
+          target: ${{ matrix.target }}
+          archive: anvil-$target
+          tar: unix
+          zip: windows
+          token: ${{ secrets.GITHUB_TOKEN }}

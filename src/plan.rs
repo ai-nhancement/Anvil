@@ -83,23 +83,48 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
     };
 
     // 2. Run exactly two reviews using the two different reviewer roles.
-    let reviewer_a = cfg.roles.reviewer_a.as_deref()
+    let reviewer_a = cfg
+        .roles
+        .reviewer_a
+        .as_deref()
         .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
-    let reviewer_b = cfg.roles.reviewer_b.as_deref()
+    let reviewer_b = cfg
+        .roles
+        .reviewer_b
+        .as_deref()
         .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
 
     if reviewer_a == reviewer_b {
         println!("{}", "WARNING: reviewer-a and reviewer-b are the same binding. This is bad for drift protection.".red().bold());
     }
 
-    println!("\n{}", "Running mandatory plan reviews (exactly two rounds, different reviewers)...".bold());
+    println!(
+        "\n{}",
+        "Running mandatory plan reviews (exactly two rounds, different reviewers)...".bold()
+    );
 
     // R1
-    let _r1 = run_single_review(&client, &cfg, reviewer_a, &plan_content, "R1", &reviews, "plan")?;
+    let _r1 = run_single_review(
+        &client,
+        &cfg,
+        reviewer_a,
+        &plan_content,
+        "R1",
+        &reviews,
+        "plan",
+    )?;
     println!("{} R1 complete — findings saved", "✓".green());
 
     // R2 — always happens, even if R1 was brutal.
-    let _r2 = run_single_review(&client, &cfg, reviewer_b, &plan_content, "R2", &reviews, "plan")?;
+    let _r2 = run_single_review(
+        &client,
+        &cfg,
+        reviewer_b,
+        &plan_content,
+        "R2",
+        &reviews,
+        "plan",
+    )?;
     println!("{} R2 complete — findings saved", "✓".green());
 
     println!("\n{}", "Both review rounds finished.".bold());
@@ -109,7 +134,10 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
 
     println!("\nAddress the findings in plan.md (or in your implementation approach).");
     println!("When you are satisfied that the plan (after addressing R1+R2) is solid, run:");
-    println!("  {}   — this records that the plan passed its two-review gate.", "`anvil plan --accept`".cyan());
+    println!(
+        "  {}   — this records that the plan passed its two-review gate.",
+        "`anvil plan --accept`".cyan()
+    );
     Ok(())
 }
 
@@ -123,7 +151,9 @@ pub fn accept_plan(root: &Path) -> Result<()> {
     let r2 = rev_dir.join("REVIEW_plan_R2.md");
 
     if !plan_path.exists() {
-        return Err(anyhow!("plan.md not found. Run `anvil plan` first to generate and review it."));
+        return Err(anyhow!(
+            "plan.md not found. Run `anvil plan` first to generate and review it."
+        ));
     }
     if !r1.exists() || !r2.exists() {
         return Err(anyhow!(
@@ -139,17 +169,27 @@ pub fn accept_plan(root: &Path) -> Result<()> {
 
     // Warn if re-accepting (plan may have changed since reviews were written).
     if state.accepted_plan_hash.is_some() {
-        println!("{} Re-accepting plan. Make sure the two review files still cover the current plan.md.", "Warning:".yellow());
+        println!(
+            "{} Re-accepting plan. Make sure the two review files still cover the current plan.md.",
+            "Warning:".yellow()
+        );
     }
 
     state.accepted_plan_hash = Some(hash.clone());
     save_state(root, &state)?;
 
-    println!("{} Plan accepted. Hash {} recorded in .anvil/state.json.", "✓".green().bold(), &hash[..8]);
+    println!(
+        "{} Plan accepted. Hash {} recorded in .anvil/state.json.",
+        "✓".green().bold(),
+        &hash[..8]
+    );
     println!("  R1: {}", r1.display());
     println!("  R2: {}", r2.display());
     println!("\n{} Start building phases (in TUI: chat with coder, /phase-start P0, coder writes review docs on done, sequential critical reviews with human approve between):", "Next:".green());
-    println!("  {} P0   — set current phase", "`anvil phase start`".cyan());
+    println!(
+        "  {} P0   — set current phase",
+        "`anvil phase start`".cyan()
+    );
     Ok(())
 }
 
@@ -192,7 +232,8 @@ pub fn run_single_review(
     reviews_dir: &Path,
     artifact: &str,
 ) -> Result<String> {
-    let (name, binding, provider) = cfg.resolve_role_full(reviewer_role)
+    let (name, binding, provider) = cfg
+        .resolve_role_full(reviewer_role)
         .map_err(|_| anyhow!("reviewer role '{}' is not fully configured", reviewer_role))?;
 
     let api_key = client.get_credential(&binding.provider, provider)?;
@@ -208,9 +249,16 @@ pub fn run_single_review(
         round, content
     );
 
-    println!("  Invoking {} ({} via {}) for {}...", name.cyan(), binding.model, provider.r#type, round);
+    println!(
+        "  Invoking {} ({} via {}) for {}...",
+        name.cyan(),
+        binding.model,
+        provider.r#type,
+        round
+    );
 
-    let findings = LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
+    let findings =
+        LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
 
     let out_path = reviews_dir.join(format!("REVIEW_{}_{}.md", artifact, round));
     let header = format!(
@@ -244,7 +292,8 @@ pub fn run_critical_review_on_doc(
     artifact: &str,
     extra_context: &str,
 ) -> Result<String> {
-    let (name, binding, provider) = cfg.resolve_role_full(reviewer_role)
+    let (name, binding, provider) = cfg
+        .resolve_role_full(reviewer_role)
         .map_err(|_| anyhow!("reviewer role '{}' is not fully configured", reviewer_role))?;
 
     let api_key = client.get_credential(&binding.provider, provider)?;
@@ -260,9 +309,16 @@ pub fn run_critical_review_on_doc(
         round, extra_context, doc_content
     );
 
-    println!("  Invoking {} ({} via {}) critical review on coder-written {} doc...", name.cyan(), binding.model, provider.r#type, round);
+    println!(
+        "  Invoking {} ({} via {}) critical review on coder-written {} doc...",
+        name.cyan(),
+        binding.model,
+        provider.r#type,
+        round
+    );
 
-    let findings = LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
+    let findings =
+        LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
 
     // Write as e.g. REVIEW_P0_R1_Findings.md or REVIEW_P0-R1-doc_R1.md depending on what caller passes as artifact.
     let out_path = reviews_dir.join(format!("REVIEW_{}_{}.md", artifact, round));
@@ -296,10 +352,21 @@ pub fn run_plan_r1(root: &Path) -> Result<String> {
     }
     let plan_content = fs::read_to_string(&plan_path)?;
 
-    let reviewer_a = cfg.roles.reviewer_a.as_deref()
+    let reviewer_a = cfg
+        .roles
+        .reviewer_a
+        .as_deref()
         .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
 
-    let findings = run_single_review(&client, &cfg, reviewer_a, &plan_content, "R1", &reviews, "plan")?;
+    let findings = run_single_review(
+        &client,
+        &cfg,
+        reviewer_a,
+        &plan_content,
+        "R1",
+        &reviews,
+        "plan",
+    )?;
     Ok(findings)
 }
 
@@ -318,10 +385,21 @@ pub fn run_plan_r2(root: &Path) -> Result<String> {
     }
     let plan_content = fs::read_to_string(&plan_path)?;
 
-    let reviewer_b = cfg.roles.reviewer_b.as_deref()
+    let reviewer_b = cfg
+        .roles
+        .reviewer_b
+        .as_deref()
         .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
 
-    let findings = run_single_review(&client, &cfg, reviewer_b, &plan_content, "R2", &reviews, "plan")?;
+    let findings = run_single_review(
+        &client,
+        &cfg,
+        reviewer_b,
+        &plan_content,
+        "R2",
+        &reviews,
+        "plan",
+    )?;
     Ok(findings)
 }
 

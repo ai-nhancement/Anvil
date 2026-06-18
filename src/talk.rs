@@ -58,7 +58,12 @@ pub fn run_talk(root: &Path, role_or_binding: Option<&str>) -> Result<()> {
         binding.model,
         provider.r#type
     );
-    println!("Type your message. Commands: {} to finish, {} to save last response, {} to quit.", ":done".yellow(), ":save".yellow(), ":q".yellow());
+    println!(
+        "Type your message. Commands: {} to finish, {} to save last response, {} to quit.",
+        ":done".yellow(),
+        ":save".yellow(),
+        ":q".yellow()
+    );
     println!("───────────────────────────────────────────────────────────────────────────────\n");
 
     let mut history: Vec<(String, String)> = vec![]; // (role, content)
@@ -103,7 +108,13 @@ pub fn run_talk(root: &Path, role_or_binding: Option<&str>) -> Result<()> {
                 // Let the model give a final summary turn
                 let prompt = "Summarize the key decisions, goals, out-of-scope items, risks, and a very rough phase breakdown. Emit a clean charter-style artifact if it would be useful.";
                 history.push(("user".to_string(), prompt.to_string()));
-                let _ = LlmClient::block_on(run_turn(&client, provider, &binding.model, &api_key, &history));
+                let _ = LlmClient::block_on(run_turn(
+                    &client,
+                    provider,
+                    &binding.model,
+                    &api_key,
+                    &history,
+                ));
                 break;
             }
             ":save" => {
@@ -127,7 +138,13 @@ pub fn run_talk(root: &Path, role_or_binding: Option<&str>) -> Result<()> {
 
         history.push(("user".to_string(), input.to_string()));
 
-        let response = LlmClient::block_on(run_turn(&client, provider, &binding.model, &api_key, &history))?;
+        let response = LlmClient::block_on(run_turn(
+            &client,
+            provider,
+            &binding.model,
+            &api_key,
+            &history,
+        ))?;
         history.push(("assistant".to_string(), response));
     }
 
@@ -200,7 +217,13 @@ fn extract_artifact_name(s: &str) -> Option<String> {
 
 fn sanitize_filename(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string()

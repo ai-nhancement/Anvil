@@ -7,14 +7,19 @@ use colored::Colorize;
 use inquire::{Confirm, Select, Text};
 
 use crate::config::{
-    ensure_anvil_dir, load_config, save_config, AnvilConfig, CredentialRef, ModelBinding, ProviderConnection, Roles,
+    ensure_anvil_dir, load_config, save_config, AnvilConfig, CredentialRef, ModelBinding,
+    ProviderConnection, Roles,
 };
 
 /// `anvil init`
 pub fn cmd_init(root: &Path) -> Result<()> {
     let cfg_path = root.join("anvil.toml");
     if cfg_path.exists() {
-        println!("{} already initialized at {}", "anvil".green(), root.display());
+        println!(
+            "{} already initialized at {}",
+            "anvil".green(),
+            root.display()
+        );
         return cmd_config_show(root);
     }
 
@@ -65,7 +70,10 @@ pub fn cmd_init(root: &Path) -> Result<()> {
         root.display()
     );
     println!("  Created anvil.toml + .anvil/");
-    println!("  Run {} to configure providers + roles (coder + reviewer-a + reviewer-b).", "`anvil setup`".cyan());
+    println!(
+        "  Run {} to configure providers + roles (coder + reviewer-a + reviewer-b).",
+        "`anvil setup`".cyan()
+    );
     println!("  Then launch {} (TUI) — the coder reads/edits/runs the repo directly; structure at two gates (/lock-plan + /accept-plan, /accept-phase + /ship-phase).", "`anvil`".cyan());
     Ok(())
 }
@@ -76,7 +84,9 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
     ensure_anvil_dir(root)?;
 
     println!("\n{}", "=== Anvil Setup ===".bold());
-    println!("We'll configure providers (how you reach models) and then bind specific models to roles.");
+    println!(
+        "We'll configure providers (how you reach models) and then bind specific models to roles."
+    );
     println!("The key rule: reviewer-a and reviewer-b should be *different models from different providers*.\n");
 
     // 1. Provider connections loop
@@ -89,8 +99,8 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
             break;
         }
 
-        let name: String = Text::new("Connection name (e.g. local-ollama, my-anthropic, azure-east):")
-            .prompt()?;
+        let name: String =
+            Text::new("Connection name (e.g. local-ollama, my-anthropic, azure-east):").prompt()?;
 
         let ptype = Select::new(
             "Provider type",
@@ -126,7 +136,10 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
         } else if ptype == "anthropic" {
             None // default is fine
         } else {
-            Text::new("Base URL (optional):").prompt().ok().filter(|s| !s.trim().is_empty())
+            Text::new("Base URL (optional):")
+                .prompt()
+                .ok()
+                .filter(|s| !s.trim().is_empty())
         };
 
         let cred_choice = Select::new(
@@ -182,18 +195,25 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
     }
 
     // 2. Model bindings
-    println!("\n{}", "Step 2: Register the models you want to use.".bold());
+    println!(
+        "\n{}",
+        "Step 2: Register the models you want to use.".bold()
+    );
     println!("For each model, you'll pick which provider connection reaches it, enter its exact model ID,");
     println!("and give it a short nickname (e.g. 'my-claude', 'fast-gpt', 'local-llama').");
     println!("You'll assign these nicknames to roles in the next step.\n");
 
     loop {
-        let add = Confirm::new("Register another model?").with_default(!cfg.model_bindings.is_empty()).prompt()?;
+        let add = Confirm::new("Register another model?")
+            .with_default(!cfg.model_bindings.is_empty())
+            .prompt()?;
         if !add {
             break;
         }
 
-        let name: String = Text::new("Nickname for this model (e.g. my-claude, fast-gpt, local-llama):").prompt()?;
+        let name: String =
+            Text::new("Nickname for this model (e.g. my-claude, fast-gpt, local-llama):")
+                .prompt()?;
 
         if cfg.providers.is_empty() {
             return Err(anyhow!("Add at least one provider connection first."));
@@ -202,12 +222,14 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
         let provider_names: Vec<String> = cfg.providers.keys().cloned().collect();
         let provider = Select::new("Use which provider connection?", provider_names).prompt()?;
 
-        let model: String = Text::new("Model identifier (exact string the provider expects):").prompt()?;
+        let model: String =
+            Text::new("Model identifier (exact string the provider expects):").prompt()?;
 
-        let note: Option<String> = Text::new("Short note (optional, e.g. 'strong at architecture reviews'):")
-            .prompt()
-            .ok()
-            .filter(|s| !s.trim().is_empty());
+        let note: Option<String> =
+            Text::new("Short note (optional, e.g. 'strong at architecture reviews'):")
+                .prompt()
+                .ok()
+                .filter(|s| !s.trim().is_empty());
 
         cfg.model_bindings.insert(
             name.clone(),
@@ -229,10 +251,22 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
     if binding_names.is_empty() {
         println!("No bindings yet — skipping role assignment. Run `anvil setup` again later.");
     } else {
-        let coder = Select::new("Coder  (primary model — used for chat, planning, and code):", binding_names.clone()).prompt()?;
+        let coder = Select::new(
+            "Coder  (primary model — used for chat, planning, and code):",
+            binding_names.clone(),
+        )
+        .prompt()?;
 
-        let reviewer_a = Select::new("Reviewer A  (first independent review — use a different model than coder):", binding_names.clone()).prompt()?;
-        let reviewer_b = Select::new("Reviewer B  (second independent review — should be a DIFFERENT model than A):", binding_names.clone()).prompt()?;
+        let reviewer_a = Select::new(
+            "Reviewer A  (first independent review — use a different model than coder):",
+            binding_names.clone(),
+        )
+        .prompt()?;
+        let reviewer_b = Select::new(
+            "Reviewer B  (second independent review — should be a DIFFERENT model than A):",
+            binding_names.clone(),
+        )
+        .prompt()?;
 
         if reviewer_a == reviewer_b {
             println!("{}", "Warning: reviewer-a and reviewer-b are the same model. The whole point of two reviewers is diversity — consider using a different model for one of them.".yellow());
@@ -247,11 +281,23 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
     }
 
     save_config(root, &cfg)?;
-    println!("\n{} Setup complete. Configuration saved to anvil.toml", "✓".green());
+    println!(
+        "\n{} Setup complete. Configuration saved to anvil.toml",
+        "✓".green()
+    );
     println!("Next steps (TUI preferred — the coder works directly in the repo):");
-    println!("  {}              — interactive TUI chat with the coder (reads/edits/runs the project)", "`anvil` or `anvil ui`".cyan());
-    println!("  {}     — discuss, the coder writes plan.md, then /lock-plan + /accept-plan", "`anvil` (plan gate)".cyan());
-    println!("  {} — build the phase, then /accept-phase + /ship-phase", "`anvil` (phase gate)".cyan());
+    println!(
+        "  {}              — interactive TUI chat with the coder (reads/edits/runs the project)",
+        "`anvil` or `anvil ui`".cyan()
+    );
+    println!(
+        "  {}     — discuss, the coder writes plan.md, then /lock-plan + /accept-plan",
+        "`anvil` (plan gate)".cyan()
+    );
+    println!(
+        "  {} — build the phase, then /accept-phase + /ship-phase",
+        "`anvil` (phase gate)".cyan()
+    );
     Ok(())
 }
 
@@ -262,10 +308,22 @@ pub fn cmd_config_show(root: &Path) -> Result<()> {
     println!();
 
     println!("{}", "Roles:".underline());
-    println!("  coder:      {}", cfg.roles.coder.as_deref().unwrap_or("(not set)"));
-    println!("  planner:    {}", cfg.roles.planner.as_deref().unwrap_or("(not set)"));
-    println!("  reviewer-a: {}", cfg.roles.reviewer_a.as_deref().unwrap_or("(not set)"));
-    println!("  reviewer-b: {}", cfg.roles.reviewer_b.as_deref().unwrap_or("(not set)"));
+    println!(
+        "  coder:      {}",
+        cfg.roles.coder.as_deref().unwrap_or("(not set)")
+    );
+    println!(
+        "  planner:    {}",
+        cfg.roles.planner.as_deref().unwrap_or("(not set)")
+    );
+    println!(
+        "  reviewer-a: {}",
+        cfg.roles.reviewer_a.as_deref().unwrap_or("(not set)")
+    );
+    println!(
+        "  reviewer-b: {}",
+        cfg.roles.reviewer_b.as_deref().unwrap_or("(not set)")
+    );
     println!();
 
     println!("{}", "Providers:".underline());
@@ -289,7 +347,11 @@ pub fn cmd_config_show(root: &Path) -> Result<()> {
         println!("  (none — run `anvil setup`)");
     } else {
         for (name, b) in &cfg.model_bindings {
-            let note = b.note.as_deref().map(|n| format!(" ({})", n)).unwrap_or_default();
+            let note = b
+                .note
+                .as_deref()
+                .map(|n| format!(" ({})", n))
+                .unwrap_or_default();
             println!("  {} → {} via {}{}", name, b.model, b.provider, note);
         }
     }
@@ -314,7 +376,10 @@ pub fn cmd_status(root: &Path) -> Result<()> {
     let cfg = match load_config(root) {
         Ok(c) => c,
         Err(_) => {
-            println!("{}", "Not initialized — run `anvil init` then `anvil setup`.".yellow());
+            println!(
+                "{}",
+                "Not initialized — run `anvil init` then `anvil setup`.".yellow()
+            );
             return Ok(());
         }
     };
@@ -335,8 +400,14 @@ pub fn cmd_status(root: &Path) -> Result<()> {
             "SAME BINDING — weakens drift protection".red()
         };
         println!("{}", "Roles:".underline());
-        println!("  coder:      {}", cfg.roles.coder.as_deref().unwrap_or("(not set)"));
-        println!("  planner:    {}", cfg.roles.planner.as_deref().unwrap_or("(not set)"));
+        println!(
+            "  coder:      {}",
+            cfg.roles.coder.as_deref().unwrap_or("(not set)")
+        );
+        println!(
+            "  planner:    {}",
+            cfg.roles.planner.as_deref().unwrap_or("(not set)")
+        );
         println!("  reviewer-a: {}", reviewer_a);
         println!("  reviewer-b: {} — {}", reviewer_b, diversity);
         println!();
@@ -363,7 +434,10 @@ pub fn cmd_status(root: &Path) -> Result<()> {
         let is_accepted = state.accepted_plan_hash.as_deref() == Some(current_hash.as_str());
 
         if is_accepted {
-            println!("  {} PLAN ACCEPTED (hash matches) — reviewed by R1 + R2 and approved", "✓".green().bold());
+            println!(
+                "  {} PLAN ACCEPTED (hash matches) — reviewed by R1 + R2 and approved",
+                "✓".green().bold()
+            );
 
             if state.shipped_phases.is_empty() && state.current_phase.is_none() {
                 println!("  → Build the first phase with the coder (TUI). When done: /accept-phase then /ship-phase.");
@@ -381,19 +455,64 @@ pub fn cmd_status(root: &Path) -> Result<()> {
         }
 
         println!();
-        println!("{}", "Gate artifacts (now at repo root per PHASE_REVIEW_WORKFLOW.md):".underline());
-        println!("  plan.md:           {}", if plan_path.exists() { "present".green() } else { "missing".red() });
-        println!("  REVIEW_plan_R1.md: {}", if r1.exists() { "present".green() } else { "missing".red() });
-        println!("  REVIEW_plan_R2.md: {}", if r2.exists() { "present".green() } else { "missing".red() });
+        println!(
+            "{}",
+            "Gate artifacts (now at repo root per PHASE_REVIEW_WORKFLOW.md):".underline()
+        );
+        println!(
+            "  plan.md:           {}",
+            if plan_path.exists() {
+                "present".green()
+            } else {
+                "missing".red()
+            }
+        );
+        println!(
+            "  REVIEW_plan_R1.md: {}",
+            if r1.exists() {
+                "present".green()
+            } else {
+                "missing".red()
+            }
+        );
+        println!(
+            "  REVIEW_plan_R2.md: {}",
+            if r2.exists() {
+                "present".green()
+            } else {
+                "missing".red()
+            }
+        );
     } else {
         println!("  {} TALK — no plan gate yet", "○".dimmed());
         println!("  → Launch TUI: `anvil` (or `anvil ui`) — chat with the coder; it writes plan.md, then /lock-plan + /accept-plan.");
         println!("  → Legacy CLI: `anvil plan` (one-shot gen + both R1+R2)");
         println!();
         println!("{}", "Gate artifacts (at root):".underline());
-        println!("  plan.md:           {}", if plan_path.exists() { "present".green() } else { "missing".dimmed() });
-        println!("  REVIEW_plan_R1.md: {}", if r1.exists() { "present".green() } else { "missing".dimmed() });
-        println!("  REVIEW_plan_R2.md: {}", if r2.exists() { "present".green() } else { "missing".dimmed() });
+        println!(
+            "  plan.md:           {}",
+            if plan_path.exists() {
+                "present".green()
+            } else {
+                "missing".dimmed()
+            }
+        );
+        println!(
+            "  REVIEW_plan_R1.md: {}",
+            if r1.exists() {
+                "present".green()
+            } else {
+                "missing".dimmed()
+            }
+        );
+        println!(
+            "  REVIEW_plan_R2.md: {}",
+            if r2.exists() {
+                "present".green()
+            } else {
+                "missing".dimmed()
+            }
+        );
     }
 
     Ok(())

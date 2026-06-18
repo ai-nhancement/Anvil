@@ -95,7 +95,11 @@ pub fn append_reset_marker(root: &Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{{\"reset\":true}}");
     }
 }
@@ -238,10 +242,10 @@ fn working_memory_block(root: &Path) -> Option<String> {
 /// note flagging the working memory as possibly outdated (empty string otherwise).
 fn staleness_note(content: &str) -> String {
     const HALFLIFE_DAYS: i64 = 10;
-    let last_ts = content
-        .lines()
-        .rev()
-        .find_map(|l| l.strip_prefix("## Compacted ").map(|s| s.trim().to_string()));
+    let last_ts = content.lines().rev().find_map(|l| {
+        l.strip_prefix("## Compacted ")
+            .map(|s| s.trim().to_string())
+    });
     if let Some(ts) = last_ts {
         if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&ts, "%Y-%m-%d %H:%M UTC") {
             let age_days = (chrono::Utc::now().naive_utc() - dt).num_days();
@@ -283,7 +287,12 @@ fn window_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
         if m.role == Role::Tool && m.text.len() > MAX_TOOL_RESULT_IN_WINDOW {
             let mut t = reality::cap(&m.text, MAX_TOOL_RESULT_IN_WINDOW);
             t.push_str("\n[result truncated in context — read a specific section (offset/limit) if you need more]");
-            ChatMessage { role: Role::Tool, text: t, tool_calls: vec![], tool_call_id: m.tool_call_id.clone() }
+            ChatMessage {
+                role: Role::Tool,
+                text: t,
+                tool_calls: vec![],
+                tool_call_id: m.tool_call_id.clone(),
+            }
         } else {
             m.clone()
         }
@@ -292,7 +301,10 @@ fn window_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
     let start = history.len().saturating_sub(SEND_WINDOW);
     let slice = &history[start..];
     // The current task = the latest user message. Never trim it or anything after it.
-    let last_user = slice.iter().rposition(|m| m.role == Role::User).unwrap_or(0);
+    let last_user = slice
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .unwrap_or(0);
     let task_block: Vec<ChatMessage> = slice[last_user..].iter().map(&trunc).collect();
     let task_chars: usize = task_block.iter().map(|m| m.text.len()).sum();
 
@@ -309,7 +321,11 @@ fn window_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
     window.extend(task_block);
     // Repair tool/tool_call pairing so the request is valid for both providers.
     let mut window = sanitize_history(&window);
-    while window.first().map(|m| m.role != Role::User).unwrap_or(false) {
+    while window
+        .first()
+        .map(|m| m.role != Role::User)
+        .unwrap_or(false)
+    {
         window.remove(0);
     }
     window
@@ -350,7 +366,10 @@ fn sanitize_history(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
                 } else {
                     out.push(ChatMessage::assistant(m.text.clone(), kept.clone()));
                     for t in &msgs[i + 1..j] {
-                        if t.tool_call_id.as_ref().map_or(false, |id| kept.iter().any(|tc| &tc.id == id)) {
+                        if t.tool_call_id
+                            .as_ref()
+                            .map_or(false, |id| kept.iter().any(|tc| &tc.id == id))
+                        {
                             out.push(t.clone());
                         }
                     }
@@ -375,7 +394,10 @@ fn sanitize_history(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
 fn render_prompt_for_log(system: &str, sent: &[ChatMessage]) -> String {
     let mut out = String::from("=== SYSTEM PROMPT ===\n");
     out.push_str(system);
-    out.push_str(&format!("\n\n=== MESSAGES SENT TO MODEL ({}) ===\n", sent.len()));
+    out.push_str(&format!(
+        "\n\n=== MESSAGES SENT TO MODEL ({}) ===\n",
+        sent.len()
+    ));
     for m in sent {
         match m.role {
             Role::User => out.push_str(&format!("\n[USER]\n{}\n", m.text)),
@@ -426,7 +448,10 @@ fn render_history_for_summary(history: &[ChatMessage]) -> String {
         }
         out = format!("…[earlier turns omitted]…\n{}", &out[s..]);
     }
-    format!("Summarize this coding session into working memory:\n{}", out)
+    format!(
+        "Summarize this coding session into working memory:\n{}",
+        out
+    )
 }
 
 /// System prompt for compaction — produce tight, durable working memory.
@@ -564,7 +589,13 @@ impl Agent {
         let transcript = render_history_for_summary(&self.history);
         let summary = self
             .client
-            .chat(&self.conn, &self.model, &self.api_key, COMPACT_SYSTEM, &transcript)
+            .chat(
+                &self.conn,
+                &self.model,
+                &self.api_key,
+                COMPACT_SYSTEM,
+                &transcript,
+            )
             .await?;
 
         append_working_memory(&self.root, ts, &summary)?;
@@ -574,7 +605,12 @@ impl Agent {
         if self.history.len() > KEEP {
             let start = self.history.len() - KEEP;
             self.history = self.history.split_off(start);
-            while self.history.first().map(|m| m.role != Role::User).unwrap_or(false) {
+            while self
+                .history
+                .first()
+                .map(|m| m.role != Role::User)
+                .unwrap_or(false)
+            {
                 self.history.remove(0);
             }
         }
@@ -589,11 +625,7 @@ impl Agent {
 
     /// Run one user turn to completion: stream the model's reply, execute any
     /// tools it requests, and keep going until it produces a final text answer.
-    pub async fn run_turn(
-        &mut self,
-        user_input: &str,
-        tx: UnboundedSender<String>,
-    ) -> Result<()> {
+    pub async fn run_turn(&mut self, user_input: &str, tx: UnboundedSender<String>) -> Result<()> {
         self.history.push(ChatMessage::user(user_input));
         self.append_ledger(&[self.history.last().cloned().unwrap()]);
         let tools = tools::tool_defs();
@@ -650,7 +682,10 @@ impl Agent {
             // window) once per user turn, so the session log can reproduce what the
             // model actually saw. Logged, not displayed (see drain_llm_stream).
             if step == 0 {
-                let _ = tx.send(format!("[prompt-log]{}", render_prompt_for_log(&self.system, &sent)));
+                let _ = tx.send(format!(
+                    "[prompt-log]{}",
+                    render_prompt_for_log(&self.system, &sent)
+                ));
             }
 
             let turn = self
@@ -680,7 +715,11 @@ impl Agent {
 
             // Execute each requested tool and append the result for the next step.
             for call in &turn.tool_calls {
-                let _ = tx.send(format!("[tool-start]{} {}", call.name, tools::summarize_args(call)));
+                let _ = tx.send(format!(
+                    "[tool-start]{} {}",
+                    call.name,
+                    tools::summarize_args(call)
+                ));
 
                 let result = if tools::requires_confirmation(&call.name) {
                     let cmd = tools::command_string(call);
@@ -693,7 +732,11 @@ impl Agent {
                     tools::execute(call, &self.root)
                 };
 
-                let _ = tx.send(format!("[tool-end]{} {}", call.name, tools::result_summary(&call.name, &result)));
+                let _ = tx.send(format!(
+                    "[tool-end]{} {}",
+                    call.name,
+                    tools::result_summary(&call.name, &result)
+                ));
                 let tr = ChatMessage::tool_result(call.id.clone(), result);
                 self.history.push(tr.clone());
                 self.append_ledger(&[tr]);
@@ -759,8 +802,16 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_valid_tool_pair_and_strips_unanswered() {
-        let call_ok = ToolCall { id: "a".into(), name: "read_file".into(), arguments: serde_json::json!({}) };
-        let call_missing = ToolCall { id: "b".into(), name: "grep".into(), arguments: serde_json::json!({}) };
+        let call_ok = ToolCall {
+            id: "a".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+        };
+        let call_missing = ToolCall {
+            id: "b".into(),
+            name: "grep".into(),
+            arguments: serde_json::json!({}),
+        };
         let msgs = vec![
             ChatMessage::user("go"),
             ChatMessage::assistant("", vec![call_ok, call_missing]),
@@ -799,32 +850,50 @@ mod tests {
             ChatMessage::user("add a forge cursor to the input window"),
             ChatMessage::assistant(
                 "",
-                vec![ToolCall { id: "r".into(), name: "read_file".into(), arguments: serde_json::json!({"path":"src/ui.rs"}) }],
+                vec![ToolCall {
+                    id: "r".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path":"src/ui.rs"}),
+                }],
             ),
             ChatMessage::tool_result("r", &big),
         ];
         let window = window_messages(&history);
         // The task message must survive (not evicted by the giant read)...
-        assert!(window.iter().any(|m| m.role == Role::User && m.text.contains("forge cursor")),
-            "task message was evicted by the large tool result");
+        assert!(
+            window
+                .iter()
+                .any(|m| m.role == Role::User && m.text.contains("forge cursor")),
+            "task message was evicted by the large tool result"
+        );
         // ...and the huge tool result must be capped in the window.
         let tool = window.iter().find(|m| m.role == Role::Tool).unwrap();
-        assert!(tool.text.len() < 60_000, "tool result not capped: {} bytes", tool.text.len());
+        assert!(
+            tool.text.len() < 60_000,
+            "tool result not capped: {} bytes",
+            tool.text.len()
+        );
     }
 
     #[test]
     fn reset_marker_starts_reload_fresh() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        append_to_ledger(root, &[
-            ChatMessage::user("old"),
-            ChatMessage::assistant("a1", vec![]),
-        ]);
+        append_to_ledger(
+            root,
+            &[
+                ChatMessage::user("old"),
+                ChatMessage::assistant("a1", vec![]),
+            ],
+        );
         append_reset_marker(root);
-        append_to_ledger(root, &[
-            ChatMessage::user("fresh"),
-            ChatMessage::assistant("a2", vec![]),
-        ]);
+        append_to_ledger(
+            root,
+            &[
+                ChatMessage::user("fresh"),
+                ChatMessage::assistant("a2", vec![]),
+            ],
+        );
         let loaded = load_session(root);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].text, "fresh");

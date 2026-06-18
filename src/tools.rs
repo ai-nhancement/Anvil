@@ -22,16 +22,28 @@ use crate::llm::{ToolCall, ToolDef};
 
 /// Directories we never descend into for `list_dir` / `grep` (build output, VCS, vendored deps).
 pub const SKIP_DIRS: &[&str] = &[
-    "target", ".git", "node_modules", ".anvil", "dist", "build", "out", "bin", "obj",
-    "__pycache__", ".next", ".cache", "debug", "release", "archive",
+    "target",
+    ".git",
+    "node_modules",
+    ".anvil",
+    "dist",
+    "build",
+    "out",
+    "bin",
+    "obj",
+    "__pycache__",
+    ".next",
+    ".cache",
+    "debug",
+    "release",
+    "archive",
 ];
 
 /// File extensions treated as binary/uninteresting for search + listing.
 pub const SKIP_EXTS: &[&str] = &[
-    "exe", "dll", "so", "dylib", "o", "a", "lib", "pdb", "rlib", "rmeta", "d",
-    "png", "jpg", "jpeg", "gif", "ico", "svg", "webp", "bmp",
-    "pdf", "zip", "tar", "gz", "bz2", "7z", "rar", "xz",
-    "bin", "dat", "db", "sqlite", "lock", "log",
+    "exe", "dll", "so", "dylib", "o", "a", "lib", "pdb", "rlib", "rmeta", "d", "png", "jpg",
+    "jpeg", "gif", "ico", "svg", "webp", "bmp", "pdf", "zip", "tar", "gz", "bz2", "7z", "rar",
+    "xz", "bin", "dat", "db", "sqlite", "lock", "log",
 ];
 
 /// Cap on bytes returned from a single read / command so one tool call can't
@@ -151,7 +163,11 @@ pub fn result_summary(name: &str, result: &str) -> String {
         return format!("error —{}", truncate_one_line(rest));
     }
     match name {
-        "read_file" => format!("ok — {} lines, {} bytes", result.lines().count(), result.len()),
+        "read_file" => format!(
+            "ok — {} lines, {} bytes",
+            result.lines().count(),
+            result.len()
+        ),
         "list_dir" => {
             if result.starts_with("(empty directory") {
                 "ok — empty".to_string()
@@ -208,7 +224,12 @@ pub fn execute(call: &ToolCall, root: &Path) -> String {
 
 fn run(call: &ToolCall, root: &Path) -> Result<String> {
     match call.name.as_str() {
-        "read_file" => read_file(root, &arg_str(call, "path")?, arg_usize(call, "offset"), arg_usize(call, "limit")),
+        "read_file" => read_file(
+            root,
+            &arg_str(call, "path")?,
+            arg_usize(call, "offset"),
+            arg_usize(call, "limit"),
+        ),
         "write_file" => write_file(root, &arg_str(call, "path")?, &arg_str(call, "content")?),
         "edit_file" => edit_file(
             root,
@@ -226,7 +247,12 @@ fn run(call: &ToolCall, root: &Path) -> Result<String> {
 
 // ── individual tools ─────────────────────────────────────────────────────────
 
-fn read_file(root: &Path, rel: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
+fn read_file(
+    root: &Path,
+    rel: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String> {
     let path = resolve(root, rel)?;
     let bytes = std::fs::read(&path).map_err(|e| anyhow!("could not read {}: {}", rel, e))?;
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
@@ -240,7 +266,14 @@ fn read_file(root: &Path, rel: &str, offset: Option<usize>, limit: Option<usize>
         let count = limit.unwrap_or(total.saturating_sub(start));
         let end = (start + count).min(total);
         let slice = lines[start..end].join("\n");
-        return Ok(format!("[lines {}-{} of {} in {}]\n{}", start + 1, end, total, rel, slice));
+        return Ok(format!(
+            "[lines {}-{} of {} in {}]\n{}",
+            start + 1,
+            end,
+            total,
+            rel,
+            slice
+        ));
     }
 
     if text.len() > MAX_READ_BYTES {
@@ -261,13 +294,21 @@ fn write_file(root: &Path, rel: &str, content: &str) -> Result<String> {
 
 fn edit_file(root: &Path, rel: &str, old: &str, new: &str) -> Result<String> {
     let path = resolve(root, rel)?;
-    let content = std::fs::read_to_string(&path).map_err(|e| anyhow!("could not read {}: {}", rel, e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| anyhow!("could not read {}: {}", rel, e))?;
     let count = content.matches(old).count();
     if count == 0 {
-        bail!("old_string not found in {} — it must match exactly (including whitespace)", rel);
+        bail!(
+            "old_string not found in {} — it must match exactly (including whitespace)",
+            rel
+        );
     }
     if count > 1 {
-        bail!("old_string occurs {} times in {} — make it unique (add surrounding context)", count, rel);
+        bail!(
+            "old_string occurs {} times in {} — make it unique (add surrounding context)",
+            count,
+            rel
+        );
     }
     let updated = content.replacen(old, new, 1);
     std::fs::write(&path, updated).map_err(|e| anyhow!("could not write {}: {}", rel, e))?;
@@ -313,7 +354,13 @@ fn grep(root: &Path, pattern: &str, sub: Option<String>) -> Result<String> {
     }
 }
 
-fn collect_matches(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<String>, hits: &mut usize) {
+fn collect_matches(
+    root: &Path,
+    dir: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+    hits: &mut usize,
+) {
     const MAX_HITS: usize = 200;
     if *hits >= MAX_HITS {
         return;
@@ -328,7 +375,10 @@ fn collect_matches(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<String>
         if *hits >= MAX_HITS {
             return;
         }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if path.is_dir() {
             if SKIP_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name)) {
                 continue;
@@ -341,7 +391,12 @@ fn collect_matches(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<String>
                 }
             }
             if let Ok(content) = std::fs::read_to_string(&path) {
-                let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string().replace('\\', "/");
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string()
+                    .replace('\\', "/");
                 for (i, line) in content.lines().enumerate() {
                     if line.contains(pattern) {
                         out.push(format!("{}:{}: {}", rel, i + 1, line.trim()));
@@ -376,12 +431,20 @@ fn run_command(root: &Path, command: &str) -> Result<String> {
 
 #[cfg(windows)]
 fn shell(command: &str, cwd: &Path) -> std::io::Result<std::process::Output> {
-    Command::new("cmd").arg("/C").arg(command).current_dir(cwd).output()
+    Command::new("cmd")
+        .arg("/C")
+        .arg(command)
+        .current_dir(cwd)
+        .output()
 }
 
 #[cfg(not(windows))]
 fn shell(command: &str, cwd: &Path) -> std::io::Result<std::process::Output> {
-    Command::new("sh").arg("-c").arg(command).current_dir(cwd).output()
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .output()
 }
 
 // ── path sandboxing + argument helpers ───────────────────────────────────────
@@ -437,7 +500,10 @@ fn arg_usize(call: &ToolCall, key: &str) -> Option<usize> {
 }
 
 fn arg_opt(call: &ToolCall, key: &str) -> Option<String> {
-    call.arguments.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    call.arguments
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
@@ -447,14 +513,21 @@ mod tests {
     use serde_json::{json, Value};
 
     fn call(name: &str, args: Value) -> ToolCall {
-        ToolCall { id: "t".into(), name: name.into(), arguments: args }
+        ToolCall {
+            id: "t".into(),
+            name: name.into(),
+            arguments: args,
+        }
     }
 
     #[test]
     fn write_then_read_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let w = execute(&call("write_file", json!({"path": "a/b.txt", "content": "hello"})), root);
+        let w = execute(
+            &call("write_file", json!({"path": "a/b.txt", "content": "hello"})),
+            root,
+        );
         assert!(w.starts_with("wrote"), "{}", w);
         let r = execute(&call("read_file", json!({"path": "a/b.txt"})), root);
         assert_eq!(r, "hello");
@@ -465,9 +538,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::write(root.join("f.txt"), "x x").unwrap();
-        let dup = execute(&call("edit_file", json!({"path": "f.txt", "old_string": "x", "new_string": "y"})), root);
+        let dup = execute(
+            &call(
+                "edit_file",
+                json!({"path": "f.txt", "old_string": "x", "new_string": "y"}),
+            ),
+            root,
+        );
         assert!(dup.contains("occurs 2 times"), "{}", dup);
-        let ok = execute(&call("edit_file", json!({"path": "f.txt", "old_string": "x x", "new_string": "y y"})), root);
+        let ok = execute(
+            &call(
+                "edit_file",
+                json!({"path": "f.txt", "old_string": "x x", "new_string": "y y"}),
+            ),
+            root,
+        );
         assert!(ok.starts_with("edited"), "{}", ok);
         assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "y y");
     }
@@ -476,7 +561,11 @@ mod tests {
     fn grep_finds_substring_with_location() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::write(root.join("code.rs").as_path(), "fn main() {}\nlet needle = 1;\n").unwrap();
+        std::fs::write(
+            root.join("code.rs").as_path(),
+            "fn main() {}\nlet needle = 1;\n",
+        )
+        .unwrap();
         let g = execute(&call("grep", json!({"pattern": "needle"})), root);
         assert!(g.contains("code.rs:2:"), "{}", g);
     }
@@ -485,8 +574,15 @@ mod tests {
     fn path_escape_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let r = execute(&call("read_file", json!({"path": "../../etc/passwd"})), root);
-        assert!(r.starts_with("ERROR:") && r.contains("outside the project root"), "{}", r);
+        let r = execute(
+            &call("read_file", json!({"path": "../../etc/passwd"})),
+            root,
+        );
+        assert!(
+            r.starts_with("ERROR:") && r.contains("outside the project root"),
+            "{}",
+            r
+        );
     }
 
     #[test]
@@ -498,14 +594,30 @@ mod tests {
 
     #[test]
     fn result_summaries_are_tool_aware() {
-        assert_eq!(result_summary("list_dir", "a.rs\nb.rs\nc.rs"), "ok — 3 entries");
-        assert_eq!(result_summary("list_dir", "(empty directory: x)"), "ok — empty");
-        assert_eq!(result_summary("grep", "no matches for 'x'"), "ok — no matches");
-        assert_eq!(result_summary("grep", "f.rs:1: a\nf.rs:2: b\n... [more matches truncated]"), "ok — 2 matches");
-        assert_eq!(result_summary("run_command", "exit code: 0\nhello"), "ok — exit 0");
-        assert_eq!(result_summary("read_file", "one\ntwo"), "ok — 2 lines, 7 bytes");
+        assert_eq!(
+            result_summary("list_dir", "a.rs\nb.rs\nc.rs"),
+            "ok — 3 entries"
+        );
+        assert_eq!(
+            result_summary("list_dir", "(empty directory: x)"),
+            "ok — empty"
+        );
+        assert_eq!(
+            result_summary("grep", "no matches for 'x'"),
+            "ok — no matches"
+        );
+        assert_eq!(
+            result_summary("grep", "f.rs:1: a\nf.rs:2: b\n... [more matches truncated]"),
+            "ok — 2 matches"
+        );
+        assert_eq!(
+            result_summary("run_command", "exit code: 0\nhello"),
+            "ok — exit 0"
+        );
+        assert_eq!(
+            result_summary("read_file", "one\ntwo"),
+            "ok — 2 lines, 7 bytes"
+        );
         assert!(result_summary("read_file", "ERROR: nope").starts_with("error —"));
     }
 }
-
-

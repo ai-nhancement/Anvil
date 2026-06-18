@@ -20,7 +20,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncWriteExt, stdout};
+use tokio::io::{stdout, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{CredentialRef, ProviderConnection};
@@ -56,10 +56,20 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, text: text.into(), tool_calls: vec![], tool_call_id: None }
+        Self {
+            role: Role::User,
+            text: text.into(),
+            tool_calls: vec![],
+            tool_call_id: None,
+        }
     }
     pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self { role: Role::Assistant, text: text.into(), tool_calls, tool_call_id: None }
+        Self {
+            role: Role::Assistant,
+            text: text.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
     }
     pub fn tool_result(tool_call_id: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
@@ -113,7 +123,9 @@ impl LlmClient {
             .user_agent("anvil/0.1 (https://github.com/ai-nhancement/Anvil)")
             .build()
             .expect("reqwest client");
-        Self { http: Arc::new(http) }
+        Self {
+            http: Arc::new(http),
+        }
     }
 
     /// Convenience helper so the synchronous CLI command functions (talk/plan/phase)
@@ -150,7 +162,11 @@ impl LlmClient {
                 if var_name == "OLLAMA_API_KEY" || var_name.to_uppercase().contains("OLLAMA") {
                     return Ok("ollama".to_string());
                 }
-                anyhow::bail!("environment variable {} not set (for provider {})", var_name, conn_name)
+                anyhow::bail!(
+                    "environment variable {} not set (for provider {})",
+                    var_name,
+                    conn_name
+                )
             }
             CredentialRef::None => {
                 // Local / unauthenticated endpoint. "ollama" is a conventional harmless placeholder.
@@ -181,7 +197,10 @@ impl LlmClient {
     pub async fn list_ollama_models(&self) -> Result<Vec<String>> {
         // Compat path via the general helper (exact IDs for /v1/chat/completions).
         // Uses the conventional placeholder key that unauthenticated Ollama accepts.
-        if let Ok(ids) = self.list_openai_compat_models("http://localhost:11434/v1", "ollama").await {
+        if let Ok(ids) = self
+            .list_openai_compat_models("http://localhost:11434/v1", "ollama")
+            .await
+        {
             if !ids.is_empty() {
                 return Ok(ids);
             }
@@ -217,7 +236,11 @@ impl LlmClient {
     /// Returns Ok([]) on network error, non-2xx, or empty/unparseable response so callers can
     /// silently fall back to static suggestions.
     /// Sends Bearer token; for Azure bases also sends api-key header (both are harmless together).
-    pub async fn list_openai_compat_models(&self, base_url: &str, api_key: &str) -> Result<Vec<String>> {
+    pub async fn list_openai_compat_models(
+        &self,
+        base_url: &str,
+        api_key: &str,
+    ) -> Result<Vec<String>> {
         let base = base_url.trim_end_matches('/');
         if base.is_empty() {
             return Ok(vec![]);
@@ -272,10 +295,16 @@ impl LlmClient {
     ) -> Result<String> {
         match conn.r#type.as_str() {
             "openai_compat" | "openai" | "azure_openai" => {
-                self.chat_openai_compat(conn, model, api_key, system, user, false).await
+                self.chat_openai_compat(conn, model, api_key, system, user, false)
+                    .await
             }
-            "anthropic" => self.chat_anthropic(conn, model, api_key, system, user, false).await,
-            "google" | "google_ai_studio" | "gemini" => self.chat_google(conn, model, api_key, system, user).await,
+            "anthropic" => {
+                self.chat_anthropic(conn, model, api_key, system, user, false)
+                    .await
+            }
+            "google" | "google_ai_studio" | "gemini" => {
+                self.chat_google(conn, model, api_key, system, user).await
+            }
             other => {
                 // Future: "aws_bedrock", "vertex" etc. For now, give a helpful message.
                 anyhow::bail!(
@@ -300,9 +329,13 @@ impl LlmClient {
     ) -> Result<String> {
         match conn.r#type.as_str() {
             "openai_compat" | "openai" | "azure_openai" => {
-                self.chat_openai_compat(conn, model, api_key, system, user, true).await
+                self.chat_openai_compat(conn, model, api_key, system, user, true)
+                    .await
             }
-            "anthropic" => self.chat_anthropic(conn, model, api_key, system, user, true).await,
+            "anthropic" => {
+                self.chat_anthropic(conn, model, api_key, system, user, true)
+                    .await
+            }
             "google" | "google_ai_studio" | "gemini" => {
                 // Gemini streaming is possible but more complex; fall back to non-stream for now.
                 let full = self.chat_google(conn, model, api_key, system, user).await?;
@@ -313,7 +346,10 @@ impl LlmClient {
                 Ok(full)
             }
             other => {
-                anyhow::bail!("provider type '{}' does not support streaming yet (or is not implemented)", other)
+                anyhow::bail!(
+                    "provider type '{}' does not support streaming yet (or is not implemented)",
+                    other
+                )
             }
         }
     }
@@ -333,10 +369,12 @@ impl LlmClient {
     ) -> Result<String> {
         match conn.r#type.as_str() {
             "openai_compat" | "openai" | "azure_openai" => {
-                self.chat_openai_compat_to_channel(conn, model, api_key, system, user, token_tx).await
+                self.chat_openai_compat_to_channel(conn, model, api_key, system, user, token_tx)
+                    .await
             }
             "anthropic" => {
-                self.chat_anthropic_to_channel(conn, model, api_key, system, user, token_tx).await
+                self.chat_anthropic_to_channel(conn, model, api_key, system, user, token_tx)
+                    .await
             }
             "google" | "google_ai_studio" | "gemini" => {
                 // Gemini streaming is more involved; send the whole response as a single chunk.
@@ -352,7 +390,10 @@ impl LlmClient {
                 }
             }
             other => {
-                let msg = format!("provider type '{}' does not support streaming yet (or is not implemented)", other);
+                let msg = format!(
+                    "provider type '{}' does not support streaming yet (or is not implemented)",
+                    other
+                );
                 let _ = token_tx.send(format!("\n[llm-error] {}", msg));
                 anyhow::bail!("{}", msg)
             }
@@ -397,7 +438,8 @@ impl LlmClient {
         }
 
         let base_for_detect = conn.base_url.as_deref().unwrap_or("");
-        let is_ollama = base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
+        let is_ollama =
+            base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
         let keep_alive = if let Some(k) = &conn.keep_alive {
             Some(k.clone())
         } else if is_ollama {
@@ -409,8 +451,14 @@ impl LlmClient {
         let req = Req {
             model,
             messages: vec![
-                Message { role: "system", content: system },
-                Message { role: "user", content: user },
+                Message {
+                    role: "system",
+                    content: system,
+                },
+                Message {
+                    role: "user",
+                    content: user,
+                },
             ],
             stream,
             temperature: None,
@@ -501,7 +549,12 @@ impl LlmClient {
                     }
                     // Try to parse the json chunk
                     if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
-                        if let Some(delta) = chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
+                        if let Some(delta) = chunk
+                            .choices
+                            .into_iter()
+                            .next()
+                            .and_then(|c| c.delta.content)
+                        {
                             if !delta.is_empty() {
                                 full.push_str(&delta);
                                 // Print live
@@ -555,7 +608,8 @@ impl LlmClient {
         }
 
         let base_for_detect = conn.base_url.as_deref().unwrap_or("");
-        let is_ollama = base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
+        let is_ollama =
+            base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
         let keep_alive = if let Some(k) = &conn.keep_alive {
             Some(k.clone())
         } else if is_ollama {
@@ -567,8 +621,14 @@ impl LlmClient {
         let req = Req {
             model,
             messages: vec![
-                Message { role: "system", content: system },
-                Message { role: "user", content: user },
+                Message {
+                    role: "system",
+                    content: system,
+                },
+                Message {
+                    role: "user",
+                    content: user,
+                },
             ],
             stream: true,
             temperature: None,
@@ -635,7 +695,12 @@ impl LlmClient {
                         return Ok(full);
                     }
                     if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
-                        if let Some(delta) = chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
+                        if let Some(delta) = chunk
+                            .choices
+                            .into_iter()
+                            .next()
+                            .and_then(|c| c.delta.content)
+                        {
                             if !delta.is_empty() {
                                 full.push_str(&delta);
                                 let _ = token_tx.send(delta);
@@ -655,7 +720,12 @@ impl LlmClient {
             if let Some(data) = line.strip_prefix("data: ") {
                 if data != "[DONE]" {
                     if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
-                        if let Some(delta) = chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
+                        if let Some(delta) = chunk
+                            .choices
+                            .into_iter()
+                            .next()
+                            .and_then(|c| c.delta.content)
+                        {
                             if !delta.is_empty() {
                                 full.push_str(&delta);
                                 let _ = token_tx.send(delta);
@@ -709,7 +779,10 @@ impl LlmClient {
             model,
             max_tokens: 8192,
             system,
-            messages: vec![AnthMessage { role: "user", content: user }],
+            messages: vec![AnthMessage {
+                role: "user",
+                content: user,
+            }],
             stream,
         };
 
@@ -746,7 +819,12 @@ impl LlmClient {
         }
 
         let body: AnthResp = resp.json().await?;
-        Ok(body.content.into_iter().next().map(|c| c.text).unwrap_or_default())
+        Ok(body
+            .content
+            .into_iter()
+            .next()
+            .map(|c| c.text)
+            .unwrap_or_default())
     }
 
     async fn handle_anthropic_stream(&self, resp: reqwest::Response) -> Result<String> {
@@ -824,7 +902,10 @@ impl LlmClient {
             model,
             max_tokens: 8192,
             system,
-            messages: vec![AnthMessage { role: "user", content: user }],
+            messages: vec![AnthMessage {
+                role: "user",
+                content: user,
+            }],
             stream: true,
         };
 
@@ -852,7 +933,8 @@ impl LlmClient {
             anyhow::bail!("{}", err_msg);
         }
 
-        self.handle_anthropic_stream_to_channel(resp, token_tx).await
+        self.handle_anthropic_stream_to_channel(resp, token_tx)
+            .await
     }
 
     async fn handle_anthropic_stream_to_channel(
@@ -909,7 +991,10 @@ impl LlmClient {
             .trim_end_matches('/');
 
         // Gemini uses {model}:generateContent?key=...
-        let url = format!("{}/v1beta/models/{}:generateContent?key={}", base, model, api_key);
+        let url = format!(
+            "{}/v1beta/models/{}:generateContent?key={}",
+            base, model, api_key
+        );
 
         #[derive(Serialize)]
         struct Req {
@@ -935,21 +1020,20 @@ impl LlmClient {
                 None
             } else {
                 Some(SystemInst {
-                    parts: vec![Part { text: system.to_string() }],
+                    parts: vec![Part {
+                        text: system.to_string(),
+                    }],
                 })
             },
             contents: vec![GemContent {
-                parts: vec![Part { text: user.to_string() }],
+                parts: vec![Part {
+                    text: user.to_string(),
+                }],
                 role: Some("user".to_string()),
             }],
         };
 
-        let resp = self
-            .http
-            .post(&url)
-            .json(&req)
-            .send()
-            .await?;
+        let resp = self.http.post(&url).json(&req).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -1055,10 +1139,12 @@ impl LlmClient {
     ) -> Result<AssistantTurn> {
         match conn.r#type.as_str() {
             "openai_compat" | "openai" | "azure_openai" => {
-                self.openai_turn_stream(conn, model, api_key, system, history, tools, token_tx).await
+                self.openai_turn_stream(conn, model, api_key, system, history, tools, token_tx)
+                    .await
             }
             "anthropic" => {
-                self.anthropic_turn_stream(conn, model, api_key, system, history, tools, token_tx).await
+                self.anthropic_turn_stream(conn, model, api_key, system, history, tools, token_tx)
+                    .await
             }
             "google" | "google_ai_studio" | "gemini" => {
                 // No tool calling for Gemini yet — flatten history to a single user
@@ -1067,7 +1153,10 @@ impl LlmClient {
                 match self.chat_google(conn, model, api_key, system, &user).await {
                     Ok(full) => {
                         let _ = token_tx.send(full.clone());
-                        Ok(AssistantTurn { text: full, tool_calls: vec![] })
+                        Ok(AssistantTurn {
+                            text: full,
+                            tool_calls: vec![],
+                        })
                     }
                     Err(e) => {
                         let _ = token_tx.send(format!("\n[llm-error] {}", e));
@@ -1104,11 +1193,15 @@ impl LlmClient {
         let messages = build_openai_messages(system, history);
 
         let base_for_detect = conn.base_url.as_deref().unwrap_or("");
-        let is_ollama = base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
-        let keep_alive = conn
-            .keep_alive
-            .clone()
-            .or_else(|| if is_ollama { Some("30s".to_string()) } else { None });
+        let is_ollama =
+            base_for_detect.contains("11434") || base_for_detect.to_lowercase().contains("ollama");
+        let keep_alive = conn.keep_alive.clone().or_else(|| {
+            if is_ollama {
+                Some("30s".to_string())
+            } else {
+                None
+            }
+        });
 
         let mut body = json!({
             "model": model,
@@ -1349,7 +1442,11 @@ impl LlmClient {
                             is_tool.insert(idx, tool);
                             blocks.insert(
                                 idx,
-                                (cb.id.unwrap_or_default(), cb.name.unwrap_or_default(), String::new()),
+                                (
+                                    cb.id.unwrap_or_default(),
+                                    cb.name.unwrap_or_default(),
+                                    String::new(),
+                                ),
                             );
                         }
                     }
@@ -1391,7 +1488,11 @@ impl LlmClient {
                 } else {
                     serde_json::from_str(&json_str).unwrap_or_else(|_| json!({}))
                 };
-                tool_calls.push(ToolCall { id, name, arguments });
+                tool_calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments,
+                });
             }
         }
         AssistantTurn { text, tool_calls }
@@ -1523,7 +1624,11 @@ fn finalize_tool_calls(acc: BTreeMap<usize, (String, String, String)>) -> Vec<To
             } else {
                 serde_json::from_str(&args).unwrap_or_else(|_| json!({}))
             };
-            ToolCall { id, name, arguments }
+            ToolCall {
+                id,
+                name,
+                arguments,
+            }
         })
         .collect()
 }
@@ -1679,8 +1784,16 @@ mod tests {
             ChatMessage::assistant(
                 "",
                 vec![
-                    ToolCall { id: "a".into(), name: "read_file".into(), arguments: json!({}) },
-                    ToolCall { id: "b".into(), name: "list_dir".into(), arguments: json!({}) },
+                    ToolCall {
+                        id: "a".into(),
+                        name: "read_file".into(),
+                        arguments: json!({}),
+                    },
+                    ToolCall {
+                        id: "b".into(),
+                        name: "list_dir".into(),
+                        arguments: json!({}),
+                    },
                 ],
             ),
             ChatMessage::tool_result("a", "file a"),
@@ -1712,7 +1825,10 @@ mod tests {
     #[test]
     fn finalize_skips_nameless_and_parses_args() {
         let mut acc: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
-        acc.insert(0, ("id0".into(), "write_file".into(), "{\"path\":\"x\"}".into()));
+        acc.insert(
+            0,
+            ("id0".into(), "write_file".into(), "{\"path\":\"x\"}".into()),
+        );
         acc.insert(1, ("id1".into(), String::new(), "garbage".into())); // no name → dropped
         let calls = finalize_tool_calls(acc);
         assert_eq!(calls.len(), 1);

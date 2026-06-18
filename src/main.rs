@@ -13,16 +13,16 @@
 //! Hard rule: exactly two review rounds per gate, from different model families. Review files
 //! live at repo root. Designed explicitly to kill the drift that kills vibe coding projects.
 
+mod agent;
 mod cli;
 mod config;
 mod llm;
-mod tools;
-mod agent;
+mod phase;
+mod plan;
 mod reality;
 mod state;
 mod talk;
-mod plan;
-mod phase;
+mod tools;
 mod ui;
 
 use clap::{Parser, Subcommand};
@@ -30,10 +30,16 @@ use colored::Colorize;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "anvil", version, about = "Structure for vibe coding — coder writes plan + phase review docs; sequential R1/R2 critical reviews (different models) with explicit human approve gates between")]
-#[command(long_about = "Anvil brings just enough structure to prevent drift in AI-assisted coding.\n\
+#[command(
+    name = "anvil",
+    version,
+    about = "Structure for vibe coding — coder writes plan + phase review docs; sequential R1/R2 critical reviews (different models) with explicit human approve gates between"
+)]
+#[command(
+    long_about = "Anvil brings just enough structure to prevent drift in AI-assisted coding.\n\
 The coder is a real agent — it reads, writes, and edits files and runs commands itself (no manual /include). Structure is imposed at two human gates: PLAN (discuss → coder writes plan.md → /lock-plan runs R1+R2 reviewers → coder revises → /accept-plan) and PHASE (build → /accept-phase runs R1+R2 on the git diff → fix → /ship-phase). The two reviewers are different model families for a genuine second opinion. All REVIEW_* live at repo root.\n\
-No R3+. Cross-provider by design. Ollama, local, Azure, Bedrock, every gateway supported.")]
+No R3+. Cross-provider by design. Ollama, local, Azure, Bedrock, every gateway supported."
+)]
 struct Cli {
     /// Subcommand. When omitted (i.e. bare `anvil` or `cargo run --`), we launch the interactive TUI.
     #[command(subcommand)]
@@ -157,7 +163,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             ConfigCmd::AddProvider => cli::cmd_config_add_provider(&cli.project),
         },
         Commands::Talk { model } => talk::run_talk(&cli.project, model.as_deref()),
-        Commands::Plan { fresh, accept, context } => {
+        Commands::Plan {
+            fresh,
+            accept,
+            context,
+        } => {
             if accept {
                 plan::accept_plan(&cli.project)
             } else {
@@ -167,7 +177,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Phase(sub) => match sub {
             PhaseCmd::Start { id } => phase::run_phase_start(&cli.project, &id),
             PhaseCmd::Review { id } => phase::run_phase_review(&cli.project, &id),
-            PhaseCmd::Accept { id, note } => phase::run_phase_accept(&cli.project, &id, note.as_deref()),
+            PhaseCmd::Accept { id, note } => {
+                phase::run_phase_accept(&cli.project, &id, note.as_deref())
+            }
             PhaseCmd::List => phase::run_phase_list(&cli.project),
         },
         Commands::Status => cli::cmd_status(&cli.project),

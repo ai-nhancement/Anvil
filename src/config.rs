@@ -89,9 +89,7 @@ pub enum CredentialRef {
     Keyring,
 
     /// Read from this environment variable at call time.
-    Env {
-        var_name: String,
-    },
+    Env { var_name: String },
 
     /// No credential / secret required (common for local Ollama at http://localhost:11434/v1,
     /// many self-hosted openai-compat servers, vLLM without auth, etc.).
@@ -196,21 +194,36 @@ impl AnvilConfig {
             "coder" | "planner" => self.roles.coder.as_deref(),
             "reviewer-a" | "reviewer_a" => self.roles.reviewer_a.as_deref(),
             "reviewer-b" | "reviewer_b" => self.roles.reviewer_b.as_deref(),
-            other => return Err(ConfigError::RoleNotConfigured { role: other.to_string() }),
+            other => {
+                return Err(ConfigError::RoleNotConfigured {
+                    role: other.to_string(),
+                })
+            }
         };
-        let name = binding_name.ok_or(ConfigError::RoleNotConfigured { role: role.to_string() })?;
+        let name = binding_name.ok_or(ConfigError::RoleNotConfigured {
+            role: role.to_string(),
+        })?;
         self.get_binding(name)
     }
 
     /// Returns (binding_name, binding, provider) for a role — convenient for calls.
-    pub fn resolve_role_full(&self, role: &str) -> Result<(&str, &ModelBinding, &ProviderConnection), ConfigError> {
+    pub fn resolve_role_full(
+        &self,
+        role: &str,
+    ) -> Result<(&str, &ModelBinding, &ProviderConnection), ConfigError> {
         let name = match role {
             "coder" | "planner" => self.roles.coder.as_deref(),
             "reviewer-a" | "reviewer_a" => self.roles.reviewer_a.as_deref(),
             "reviewer-b" | "reviewer_b" => self.roles.reviewer_b.as_deref(),
-            other => return Err(ConfigError::RoleNotConfigured { role: other.to_string() }),
+            other => {
+                return Err(ConfigError::RoleNotConfigured {
+                    role: other.to_string(),
+                })
+            }
         };
-        let name = name.ok_or(ConfigError::RoleNotConfigured { role: role.to_string() })?;
+        let name = name.ok_or(ConfigError::RoleNotConfigured {
+            role: role.to_string(),
+        })?;
         let binding = self.get_binding(name)?;
         let provider = self.get_provider(&binding.provider)?;
         Ok((name, binding, provider))
@@ -257,7 +270,9 @@ pub fn load_local_env(root: &Path) {
             }
             let mut val = line[eq + 1..].trim().to_string();
             // Strip a single pair of matching outer quotes (common when people copy examples)
-            if (val.starts_with('"') && val.ends_with('"')) || (val.starts_with('\'') && val.ends_with('\'')) {
+            if (val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\''))
+            {
                 if val.len() >= 2 {
                     val = val[1..val.len() - 1].to_string();
                 }

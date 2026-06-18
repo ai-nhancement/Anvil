@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
-use uuid::Uuid;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -31,12 +31,15 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
+use uuid::Uuid;
 
+use crate::agent::{Agent, ConfirmHandle};
 use crate::config::{
     ensure_anvil_dir, load_config, load_local_env, save_config, set_local_env_var, AnvilConfig,
     CredentialRef, ModelBinding, ProviderConnection,
 };
-use crate::agent::{Agent, ConfirmHandle};
 use crate::llm::{ChatMessage, LlmClient, Role};
 use crate::state::{load_state, reviews_dir, save_state};
 
@@ -44,9 +47,9 @@ use crate::state::{load_state, reviews_dir, save_state};
 /// display and tool use. Canonicalizes when possible and strips Windows'
 /// `\\?\` verbatim prefix; falls back to joining the current dir.
 fn resolve_project_root(root: &Path) -> PathBuf {
-    let abs = std::fs::canonicalize(root).ok().or_else(|| {
-        std::env::current_dir().ok().map(|cwd| cwd.join(root))
-    });
+    let abs = std::fs::canonicalize(root)
+        .ok()
+        .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(root)));
     match abs {
         Some(p) => {
             let s = p.to_string_lossy();
@@ -69,7 +72,11 @@ fn project_display_name(root: &Path) -> String {
         .filter(|s| !s.is_empty() && s != ".")
         .unwrap_or_else(|| {
             let d = root.display().to_string();
-            if d.is_empty() || d == "." { "project".to_string() } else { d }
+            if d.is_empty() || d == "." {
+                "project".to_string()
+            } else {
+                d
+            }
         })
 }
 
@@ -162,12 +169,12 @@ const FORGE_MOLTEN: Color = Color::Rgb(255, 140, 0);
 /// Blacksmith heat scale: stops from cold iron (steel blue-grey) up through
 /// dull red, cherry, and orange to amber. `heat_color` interpolates between them.
 const HEAT_STOPS: &[(f32, (u8, u8, u8))] = &[
-    (0.00, (84, 96, 120)),   // cold iron
-    (0.30, (120, 60, 50)),   // warming
-    (0.50, (170, 55, 38)),   // dull red
-    (0.72, (210, 75, 30)),   // cherry
-    (0.88, (226, 110, 34)),  // orange ember
-    (1.00, (255, 150, 20)),  // amber / molten
+    (0.00, (84, 96, 120)),  // cold iron
+    (0.30, (120, 60, 50)),  // warming
+    (0.50, (170, 55, 38)),  // dull red
+    (0.72, (210, 75, 30)),  // cherry
+    (0.88, (226, 110, 34)), // orange ember
+    (1.00, (255, 150, 20)), // amber / molten
 ];
 
 /// Color for a heat value in 0.0..=1.0, linearly interpolated across HEAT_STOPS.
@@ -185,7 +192,11 @@ fn heat_color(h: f32) -> Color {
     let span = (hi.0 - lo.0).max(f32::EPSILON);
     let t = ((h - lo.0) / span).clamp(0.0, 1.0);
     let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
-    Color::Rgb(lerp(lo.1 .0, hi.1 .0), lerp(lo.1 .1, hi.1 .1), lerp(lo.1 .2, hi.1 .2))
+    Color::Rgb(
+        lerp(lo.1 .0, hi.1 .0),
+        lerp(lo.1 .1, hi.1 .1),
+        lerp(lo.1 .2, hi.1 .2),
+    )
 }
 
 /// The blacksmith's name for a heat level — shown in the title bar.
@@ -215,25 +226,91 @@ const SYSTEM_COLOR: Color = Color::Yellow;
 /// Known providers: (display_name, suggested_connection_name, provider_type, base_url, needs_api_key)
 /// base_url = "" means the client uses the provider's SDK default (anthropic, google).
 const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
-    ("Anthropic",          "anthropic",  "anthropic",     "",                                          true),
-    ("OpenAI",             "openai",     "openai_compat", "https://api.openai.com/v1",                 true),
-    ("xAI",                "xai",        "openai_compat", "https://api.x.ai/v1",                       true),
-    ("Google",             "google",     "google",        "",                                          true),
-    ("Groq",               "groq",       "openai_compat", "https://api.groq.com/openai/v1",            true),
-    ("Mistral",            "mistral",    "openai_compat", "https://api.mistral.ai/v1",                 true),
-    ("Together AI",        "together",   "openai_compat", "https://api.together.xyz/v1",               true),
-    ("OpenRouter",         "openrouter", "openai_compat", "https://openrouter.ai/api/v1",              true),
-    ("Fireworks",          "fireworks",  "openai_compat", "https://api.fireworks.ai/inference/v1",     true),
-    ("Perplexity",         "perplexity", "openai_compat", "https://api.perplexity.ai",                 true),
-    ("DeepSeek",           "deepseek",   "openai_compat", "https://api.deepseek.com",                  true),
-    ("Cohere",             "cohere",     "openai_compat", "https://api.cohere.com/v2",                 true),
-    ("Azure",              "azure",      "azure_openai",  "",                                          true),
-    ("AWS",                "aws",        "openai_compat", "",                                          true),
-    ("Vertex AI",          "vertex",     "openai_compat", "",                                          true),
-    ("Gradient",           "gradient",   "openai_compat", "",                                          true),
-    ("Ollama (local)",     "ollama",     "openai_compat", "http://localhost:11434/v1",                 false),
-    ("LM Studio (local)",  "lmstudio",   "openai_compat", "http://localhost:1234/v1",                  false),
-    ("Other / custom",     "custom",     "openai_compat", "",                                          true),
+    ("Anthropic", "anthropic", "anthropic", "", true),
+    (
+        "OpenAI",
+        "openai",
+        "openai_compat",
+        "https://api.openai.com/v1",
+        true,
+    ),
+    ("xAI", "xai", "openai_compat", "https://api.x.ai/v1", true),
+    ("Google", "google", "google", "", true),
+    (
+        "Groq",
+        "groq",
+        "openai_compat",
+        "https://api.groq.com/openai/v1",
+        true,
+    ),
+    (
+        "Mistral",
+        "mistral",
+        "openai_compat",
+        "https://api.mistral.ai/v1",
+        true,
+    ),
+    (
+        "Together AI",
+        "together",
+        "openai_compat",
+        "https://api.together.xyz/v1",
+        true,
+    ),
+    (
+        "OpenRouter",
+        "openrouter",
+        "openai_compat",
+        "https://openrouter.ai/api/v1",
+        true,
+    ),
+    (
+        "Fireworks",
+        "fireworks",
+        "openai_compat",
+        "https://api.fireworks.ai/inference/v1",
+        true,
+    ),
+    (
+        "Perplexity",
+        "perplexity",
+        "openai_compat",
+        "https://api.perplexity.ai",
+        true,
+    ),
+    (
+        "DeepSeek",
+        "deepseek",
+        "openai_compat",
+        "https://api.deepseek.com",
+        true,
+    ),
+    (
+        "Cohere",
+        "cohere",
+        "openai_compat",
+        "https://api.cohere.com/v2",
+        true,
+    ),
+    ("Azure", "azure", "azure_openai", "", true),
+    ("AWS", "aws", "openai_compat", "", true),
+    ("Vertex AI", "vertex", "openai_compat", "", true),
+    ("Gradient", "gradient", "openai_compat", "", true),
+    (
+        "Ollama (local)",
+        "ollama",
+        "openai_compat",
+        "http://localhost:11434/v1",
+        false,
+    ),
+    (
+        "LM Studio (local)",
+        "lmstudio",
+        "openai_compat",
+        "http://localhost:1234/v1",
+        false,
+    ),
+    ("Other / custom", "custom", "openai_compat", "", true),
 ];
 
 /// Suggest a conventional environment variable name for a provider connection.
@@ -242,21 +319,51 @@ const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
 /// Prioritizes well-known names (XAI_API_KEY etc.) so tools and user scripts stay compatible.
 fn suggest_env_var_name(conn_name: &str, base_url: Option<&str>) -> String {
     let n = conn_name.to_lowercase();
-    if n == "xai" || n.contains("xai") { return "XAI_API_KEY".to_string(); }
-    if n == "openai" || n.contains("openai") { return "OPENAI_API_KEY".to_string(); }
-    if n.contains("groq") { return "GROQ_API_KEY".to_string(); }
-    if n.contains("anthropic") { return "ANTHROPIC_API_KEY".to_string(); }
-    if n.contains("mistral") { return "MISTRAL_API_KEY".to_string(); }
-    if n.contains("together") { return "TOGETHER_API_KEY".to_string(); }
-    if n.contains("fireworks") { return "FIREWORKS_API_KEY".to_string(); }
-    if n.contains("perplexity") { return "PERPLEXITY_API_KEY".to_string(); }
-    if n.contains("deepseek") { return "DEEPSEEK_API_KEY".to_string(); }
-    if n.contains("cohere") { return "COHERE_API_KEY".to_string(); }
-    if n.contains("azure") { return "AZURE_OPENAI_API_KEY".to_string(); }
-    if n.contains("google") || n.contains("gemini") || n.contains("vertex") { return "GOOGLE_API_KEY".to_string(); }
-    if n.contains("aws") { return "AWS_BEDROCK_API_KEY".to_string(); }
-    if n.contains("ollama") { return "OLLAMA_API_KEY".to_string(); }
-    if n.contains("lmstudio") || n.contains("lm-studio") { return "LMSTUDIO_API_KEY".to_string(); }
+    if n == "xai" || n.contains("xai") {
+        return "XAI_API_KEY".to_string();
+    }
+    if n == "openai" || n.contains("openai") {
+        return "OPENAI_API_KEY".to_string();
+    }
+    if n.contains("groq") {
+        return "GROQ_API_KEY".to_string();
+    }
+    if n.contains("anthropic") {
+        return "ANTHROPIC_API_KEY".to_string();
+    }
+    if n.contains("mistral") {
+        return "MISTRAL_API_KEY".to_string();
+    }
+    if n.contains("together") {
+        return "TOGETHER_API_KEY".to_string();
+    }
+    if n.contains("fireworks") {
+        return "FIREWORKS_API_KEY".to_string();
+    }
+    if n.contains("perplexity") {
+        return "PERPLEXITY_API_KEY".to_string();
+    }
+    if n.contains("deepseek") {
+        return "DEEPSEEK_API_KEY".to_string();
+    }
+    if n.contains("cohere") {
+        return "COHERE_API_KEY".to_string();
+    }
+    if n.contains("azure") {
+        return "AZURE_OPENAI_API_KEY".to_string();
+    }
+    if n.contains("google") || n.contains("gemini") || n.contains("vertex") {
+        return "GOOGLE_API_KEY".to_string();
+    }
+    if n.contains("aws") {
+        return "AWS_BEDROCK_API_KEY".to_string();
+    }
+    if n.contains("ollama") {
+        return "OLLAMA_API_KEY".to_string();
+    }
+    if n.contains("lmstudio") || n.contains("lm-studio") {
+        return "LMSTUDIO_API_KEY".to_string();
+    }
 
     // Generic fallback based on the connection name the user chose (e.g. "my-xai" -> MY_XAI_API_KEY)
     let base = if let Some(u) = base_url { u } else { "" };
@@ -266,7 +373,9 @@ fn suggest_env_var_name(conn_name: &str, base_url: Option<&str>) -> String {
     if stem.is_empty() {
         stem = "ANVIL".to_string();
     }
-    if base.contains("x.ai") && !stem.contains("XAI") { stem = "XAI".to_string(); }
+    if base.contains("x.ai") && !stem.contains("XAI") {
+        stem = "XAI".to_string();
+    }
     format!("{}_API_KEY", stem)
 }
 
@@ -275,25 +384,71 @@ fn models_for_connection(provider_type: &str, base_url: Option<&str>) -> &'stati
     if url.contains("x.ai") {
         // Static suggestions as last-resort fallback only. The live /v1/models path (when the
         // provider connection + key are valid) should return the current catalog for the key.
-        return &["grok-3", "grok-3-fast", "grok-3-mini", "grok-3-mini-fast", "grok-2-1212", "grok-beta", "grok-4.3", "grok-4.2", "grok-build-0.1"];
+        return &[
+            "grok-3",
+            "grok-3-fast",
+            "grok-3-mini",
+            "grok-3-mini-fast",
+            "grok-2-1212",
+            "grok-beta",
+            "grok-4.3",
+            "grok-4.2",
+            "grok-build-0.1",
+        ];
     }
     if url.contains("groq.com") {
-        return &["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it", "llama-guard-3-8b"];
+        return &[
+            "llama-3.3-70b-versatile",
+            "llama-3.1-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+            "llama-guard-3-8b",
+        ];
     }
     if url.contains("mistral.ai") {
-        return &["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest", "codestral-latest", "open-mistral-nemo", "open-codestral-mamba"];
+        return &[
+            "mistral-large-latest",
+            "mistral-medium-latest",
+            "mistral-small-latest",
+            "codestral-latest",
+            "open-mistral-nemo",
+            "open-codestral-mamba",
+        ];
     }
     if url.contains("together.xyz") {
-        return &["meta-llama/Llama-3.3-70B-Instruct-Turbo", "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo", "Qwen/Qwen2.5-72B-Instruct-Turbo", "deepseek-ai/DeepSeek-R1", "mistralai/Mixtral-8x7B-Instruct-v0.1"];
+        return &[
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+            "Qwen/Qwen2.5-72B-Instruct-Turbo",
+            "deepseek-ai/DeepSeek-R1",
+            "mistralai/Mixtral-8x7B-Instruct-v0.1",
+        ];
     }
     if url.contains("openrouter.ai") {
-        return &["anthropic/claude-opus-4-8", "anthropic/claude-sonnet-4-6", "openai/gpt-4o", "google/gemini-2.5-pro-preview", "meta-llama/llama-3.3-70b-instruct", "deepseek/deepseek-r1"];
+        return &[
+            "anthropic/claude-opus-4-8",
+            "anthropic/claude-sonnet-4-6",
+            "openai/gpt-4o",
+            "google/gemini-2.5-pro-preview",
+            "meta-llama/llama-3.3-70b-instruct",
+            "deepseek/deepseek-r1",
+        ];
     }
     if url.contains("fireworks.ai") {
-        return &["accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/llama-v3p1-405b-instruct", "accounts/fireworks/models/mixtral-8x7b-instruct", "accounts/fireworks/models/qwen2p5-72b-instruct"];
+        return &[
+            "accounts/fireworks/models/llama-v3p3-70b-instruct",
+            "accounts/fireworks/models/llama-v3p1-405b-instruct",
+            "accounts/fireworks/models/mixtral-8x7b-instruct",
+            "accounts/fireworks/models/qwen2p5-72b-instruct",
+        ];
     }
     if url.contains("perplexity.ai") {
-        return &["llama-3.1-sonar-large-128k-online", "llama-3.1-sonar-small-128k-online", "llama-3.1-sonar-huge-128k-online"];
+        return &[
+            "llama-3.1-sonar-large-128k-online",
+            "llama-3.1-sonar-small-128k-online",
+            "llama-3.1-sonar-huge-128k-online",
+        ];
     }
     if url.contains("deepseek.com") {
         return &["deepseek-chat", "deepseek-coder", "deepseek-reasoner"];
@@ -302,16 +457,36 @@ fn models_for_connection(provider_type: &str, base_url: Option<&str>) -> &'stati
         return &["command-r-plus", "command-r", "command-light", "command"];
     }
     if url.contains("openai.com") {
-        return &["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo", "o1-preview", "o1-mini", "o3-mini"];
+        return &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4-turbo",
+            "gpt-4",
+            "gpt-3.5-turbo",
+            "o1-preview",
+            "o1-mini",
+            "o3-mini",
+        ];
     }
     match provider_type {
-        "anthropic" => &["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"],
-        "google" => &["gemini-2.5-pro-preview-06-05", "gemini-2.5-flash-preview-05-20", "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+        "anthropic" => &[
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+        ],
+        "google" => &[
+            "gemini-2.5-pro-preview-06-05",
+            "gemini-2.5-flash-preview-05-20",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+        ],
         _ => &[],
     }
 }
-
-
 
 /// ASCII anvil silhouette (44 cols wide, 9 rows) — fallback when PNG decode fails.
 const SPLASH_ANVIL: &[&str] = &[
@@ -346,10 +521,14 @@ enum WizardStep {
     ModelName,
     BindingNote,
     // Role assignment
-    RoleAssignment { role: String },
+    RoleAssignment {
+        role: String,
+    },
     // Special first-run quick Ollama path: after auto-adding the local provider,
     // user scrolls the *live* fetched model list and picks (no more hardcoded defaults).
-    QuickOllamaModelPick { role: String },
+    QuickOllamaModelPick {
+        role: String,
+    },
 }
 
 /// Lightweight state for the /config wizard.
@@ -368,7 +547,7 @@ struct ConfigWizard {
     cred_kind: Option<String>, // "keyring" or "env"
     env_var: Option<String>,
     api_key: Option<String>,
-    no_auth: bool,   // true for local providers — skips credential steps
+    no_auth: bool, // true for local providers — skips credential steps
     model_options: Vec<String>,
 
     binding_provider: Option<String>,
@@ -436,7 +615,11 @@ pub fn run_ui(root: &Path) -> Result<()> {
 
     // Restore terminal state (critical on Windows and for users who ^C).
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste);
+    let _ = execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    );
     let _ = terminal.show_cursor();
 
     run_result
@@ -622,7 +805,10 @@ impl App {
         if let Ok(dir) = ensure_anvil_dir(&app.root) {
             let now = Utc::now();
             // Use milliseconds and replace '.' so the filename is clean on all filesystems.
-            let ts = now.format("%Y-%m-%d-%H-%M-%S%.3f").to_string().replace('.', "-");
+            let ts = now
+                .format("%Y-%m-%d-%H-%M-%S%.3f")
+                .to_string()
+                .replace('.', "-");
             let filename = format!("chat-{}.jsonl", ts);
             app.session_chat_log = Some(dir.join(&filename));
 
@@ -633,17 +819,20 @@ impl App {
                 "root": app.root.display().to_string(),
                 "version": env!("CARGO_PKG_VERSION"),
             });
-            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(app.session_chat_log.as_ref().unwrap()) {
+            if let Ok(mut f) = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(app.session_chat_log.as_ref().unwrap())
+            {
                 let _ = writeln!(f, "{}", start_rec);
             }
         }
 
         // Best-effort load of existing config so we can do real chat immediately if roles are set.
         app.cfg = load_config(&app.root).ok();
-        let has_reviewers = app
-            .cfg
-            .as_ref()
-            .map_or(false, |c| c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some());
+        let has_reviewers = app.cfg.as_ref().map_or(false, |c| {
+            c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some()
+        });
 
         app.push_system("Welcome to Anvil TUI.");
         app.push_system("Type to chat with your coder. Real streaming to your configured model. /plan /phase-done /status /help /quit");
@@ -653,7 +842,9 @@ impl App {
             // We keep one gentle note here; the wizard itself will guide the user.
             app.push_system("First run detected — the setup wizard will open so you can connect a model and assign roles in under a minute.");
         } else {
-            app.push_system("Configuration loaded. Reviewers are distinct — gates will enforce R1 then R2.");
+            app.push_system(
+                "Configuration loaded. Reviewers are distinct — gates will enforce R1 then R2.",
+            );
         }
         app.reconcile_stage_from_disk();
         app.update_status();
@@ -904,7 +1095,10 @@ impl App {
         }
         let col = self.input[line_start..cur].chars().count();
         let prev_end = line_start - 1; // the '\n' that ends the previous line
-        let prev_start = self.input[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let prev_start = self.input[..prev_end]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
         self.input_cursor = self.input[prev_start..prev_end]
             .char_indices()
             .nth(col)
@@ -969,7 +1163,11 @@ impl App {
         let start = convo.len().saturating_sub(6);
         for m in &convo[start..] {
             let first = m.text.lines().next().unwrap_or("").trim();
-            let more = if m.text.lines().count() > 1 { " …" } else { "" };
+            let more = if m.text.lines().count() > 1 {
+                " …"
+            } else {
+                ""
+            };
             match m.role {
                 Role::User => self.push(format!("[you] {}{}", first, more)),
                 Role::Assistant => self.push(format!("[coder] {}{}", first, more)),
@@ -1007,7 +1205,15 @@ impl App {
     /// Write one JSON event line into this session's dedicated chat log file.
     /// The file is created on first write for the session (timestamped name chosen in App::new).
     /// All events for one launch of the TUI go into exactly one file so you can inspect or delete per-session.
-    fn log_chat_event(&self, event: &str, turn_id: Option<&str>, role: Option<&str>, binding: Option<&str>, model: Option<&str>, content: &str) {
+    fn log_chat_event(
+        &self,
+        event: &str,
+        turn_id: Option<&str>,
+        role: Option<&str>,
+        binding: Option<&str>,
+        model: Option<&str>,
+        content: &str,
+    ) {
         if let Some(path) = &self.session_chat_log {
             let ts = Utc::now().to_rfc3339();
             let rec = serde_json::json!({
@@ -1031,9 +1237,15 @@ impl App {
             "UNCONFIGURED — press s for quick setup (when Ollama present)"
         } else {
             match self.stage {
-                WorkflowStage::Talk => "TALK (build with the coder; /lock-plan when plan.md is ready)",
-                WorkflowStage::PlanReviewsComplete => "PLAN REVIEWED (R1/R2 done) — /accept-plan to approve",
-                WorkflowStage::PlanAccepted => "PLAN ACCEPTED — build phases; /accept-phase when done",
+                WorkflowStage::Talk => {
+                    "TALK (build with the coder; /lock-plan when plan.md is ready)"
+                }
+                WorkflowStage::PlanReviewsComplete => {
+                    "PLAN REVIEWED (R1/R2 done) — /accept-plan to approve"
+                }
+                WorkflowStage::PlanAccepted => {
+                    "PLAN ACCEPTED — build phases; /accept-phase when done"
+                }
                 _ => "TALK",
             }
         };
@@ -1107,17 +1319,29 @@ impl App {
     /// Used by both the main chat Paragraph and the document viewer popups.
     fn render_message_as_lines(m: &str) -> Vec<Line<'static>> {
         let (base_style, body) = if m.starts_with("[system]") {
-            (Style::default().fg(SYSTEM_COLOR), m.strip_prefix("[system] ").unwrap_or(m))
+            (
+                Style::default().fg(SYSTEM_COLOR),
+                m.strip_prefix("[system] ").unwrap_or(m),
+            )
         } else if m.starts_with("[you]") {
-            (Style::default().fg(Color::Green), m.strip_prefix("[you] ").unwrap_or(m))
+            (
+                Style::default().fg(Color::Green),
+                m.strip_prefix("[you] ").unwrap_or(m),
+            )
         } else if m.starts_with("[demo]") {
-            (Style::default().fg(Color::Magenta), m.strip_prefix("[demo] ").unwrap_or(m))
+            (
+                Style::default().fg(Color::Magenta),
+                m.strip_prefix("[demo] ").unwrap_or(m),
+            )
         } else if m.starts_with("[review") || m.starts_with("[R1") || m.starts_with("[R2") {
             // Prominent treatment for the gate reviews and findings (the heart of the "exactly two" contract).
             // This covers both legacy "[review ...]" and our current "[R1 Plan Findings]", "[R2 Critical...]" etc.
             // The whole block (header + content) gets tinted so review output stands out from coder chat (light blue).
             (Style::default().fg(Color::Cyan).bold(), m)
-        } else if m.starts_with("[coder]") || m.starts_with("[planner]") || m.starts_with("[assistant") {
+        } else if m.starts_with("[coder]")
+            || m.starts_with("[planner]")
+            || m.starts_with("[assistant")
+        {
             // Coder (and planner fallback) responses are always blue.
             (Style::default().fg(ROLE_CODER), m)
         } else if m.starts_with("[reviewer-a]") || m.starts_with("[R1]") {
@@ -1152,10 +1376,16 @@ impl App {
                     } else {
                         format!("┌─── {} ", code_lang)
                     };
-                    out.push(Line::from(Span::styled(header, Style::default().fg(Color::Blue).bold())));
+                    out.push(Line::from(Span::styled(
+                        header,
+                        Style::default().fg(Color::Blue).bold(),
+                    )));
                 } else {
                     in_code = false;
-                    out.push(Line::from(Span::styled("└─── end code ", Style::default().fg(Color::Blue))));
+                    out.push(Line::from(Span::styled(
+                        "└─── end code ",
+                        Style::default().fg(Color::Blue),
+                    )));
                 }
                 continue;
             }
@@ -1163,7 +1393,11 @@ impl App {
             let style = if in_code {
                 // Code inside the visual card — muted so it doesn't fight the surrounding text.
                 Style::default().fg(Color::Gray)
-            } else if line.starts_with('#') || line.starts_with("**") || line.starts_with("Reviewer:") || line.starts_with("Date:") {
+            } else if line.starts_with('#')
+                || line.starts_with("**")
+                || line.starts_with("Reviewer:")
+                || line.starts_with("Date:")
+            {
                 // Common structural lines from plan.rs REVIEW headers + md in reviews/findings.
                 base_style.add_modifier(Modifier::BOLD)
             } else {
@@ -1182,7 +1416,9 @@ impl App {
             // This makes success/acceptance markers pop consistently everywhere in the chat.
             let line_spans: Vec<Span<'static>> = if displayed.contains('✓') {
                 let mut spans: Vec<Span<'static>> = vec![];
-                let green_check = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+                let green_check = Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD);
                 let mut rest = displayed.as_str();
                 while let Some(idx) = rest.find('✓') {
                     if idx > 0 {
@@ -1205,7 +1441,9 @@ impl App {
         }
 
         // If the original had a review prefix, make the very first line a strong banner for production feel.
-        if (m.starts_with("[review") || m.starts_with("[R1") || m.starts_with("[R2")) && !out.is_empty() {
+        if (m.starts_with("[review") || m.starts_with("[R1") || m.starts_with("[R2"))
+            && !out.is_empty()
+        {
             // Prepend a clear separator banner (the first real content line will follow).
             let banner = Line::from(Span::styled(
                 "════════════════════════════════════════════════════════════",
@@ -1219,7 +1457,9 @@ impl App {
             let fb_style = base_style;
             let line_spans: Vec<Span<'static>> = if m.contains('✓') {
                 let mut spans: Vec<Span<'static>> = vec![];
-                let green_check = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+                let green_check = Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD);
                 let mut rest = m;
                 while let Some(idx) = rest.find('✓') {
                     if idx > 0 {
@@ -1231,7 +1471,9 @@ impl App {
                 if !rest.is_empty() {
                     spans.push(Span::styled(rest.to_string(), fb_style));
                 }
-                if spans.is_empty() { spans.push(Span::styled(m.to_string(), fb_style)); }
+                if spans.is_empty() {
+                    spans.push(Span::styled(m.to_string(), fb_style));
+                }
                 spans
             } else {
                 vec![Span::styled(m.to_string(), fb_style)]
@@ -1292,9 +1534,15 @@ impl App {
                 if let Some(tx) = &self.confirm_tx {
                     let _ = tx.send(allow);
                 }
-                self.push_system(if allow { "Approved — running the command." } else { "Declined." });
+                self.push_system(if allow {
+                    "Approved — running the command."
+                } else {
+                    "Declined."
+                });
             } else {
-                self.push_system("A command is awaiting your decision. Type /y to allow or /n to deny.");
+                self.push_system(
+                    "A command is awaiting your decision. Type /y to allow or /n to deny.",
+                );
             }
             return;
         }
@@ -1321,14 +1569,24 @@ impl App {
                 .gpu_stats
                 .iter()
                 .enumerate()
-                .map(|(i, g)| (i, g.mem_used as f32 / 1024.0, g.mem_total as f32 / 1024.0, g.util))
+                .map(|(i, g)| {
+                    (
+                        i,
+                        g.mem_used as f32 / 1024.0,
+                        g.mem_total as f32 / 1024.0,
+                        g.util,
+                    )
+                })
                 .collect();
 
             // Quick VRAM/GPU snapshot in /status for convenience when debugging "full" cards.
             if !gpu_snap.is_empty() {
                 self.push_system("GPUs (nvidia-smi):");
                 for (i, used_g, tot_g, util) in &gpu_snap {
-                    self.push_system(&format!("  {}: {:.1}/{:.1}G used @ {}% util", i, used_g, tot_g, util));
+                    self.push_system(&format!(
+                        "  {}: {:.1}/{:.1}G used @ {}% util",
+                        i, used_g, tot_g, util
+                    ));
                 }
             }
 
@@ -1337,7 +1595,10 @@ impl App {
             let ollama_info: Option<(usize, f64)> = if let Some(rt) = &self.runtime {
                 match rt.block_on(self.llm.list_ollama_ps()) {
                     Ok(models) if !models.is_empty() => {
-                        let total_vram: f64 = models.iter().map(|m| (m.size_vram.max(m.size)) as f64 / 1e9).sum();
+                        let total_vram: f64 = models
+                            .iter()
+                            .map(|m| (m.size_vram.max(m.size)) as f64 / 1e9)
+                            .sum();
                         Some((models.len(), total_vram))
                     }
                     _ => None,
@@ -1346,7 +1607,10 @@ impl App {
                 None
             };
             if let Some((cnt, vram)) = ollama_info {
-                self.push_system(&format!("Ollama /ps: {} model(s) resident, ~{:.1} GB claimed VRAM", cnt, vram));
+                self.push_system(&format!(
+                    "Ollama /ps: {} model(s) resident, ~{:.1} GB claimed VRAM",
+                    cnt, vram
+                ));
             }
             return;
         }
@@ -1445,15 +1709,22 @@ impl App {
                 return;
             }
             let id = if cmd.contains(' ') {
-                cmd.split_once(' ').map(|(_, r)| r.trim().to_string()).unwrap_or_default()
+                cmd.split_once(' ')
+                    .map(|(_, r)| r.trim().to_string())
+                    .unwrap_or_default()
             } else {
                 load_state(&self.root).current_phase.unwrap_or_default()
             };
             if id.is_empty() {
-                self.push_system("Usage: /accept-phase P0   (or just /accept-phase while a phase is current)");
+                self.push_system(
+                    "Usage: /accept-phase P0   (or just /accept-phase while a phase is current)",
+                );
                 return;
             }
-            self.push_system(&format!("Reviewing phase {} — R1 + R2 on the current git diff. Findings appear below.", id));
+            self.push_system(&format!(
+                "Reviewing phase {} — R1 + R2 on the current git diff. Findings appear below.",
+                id
+            ));
             let (tx, rx) = mpsc::unbounded_channel::<String>();
             self.gate_rx = Some(rx);
             if let Some(rt) = &self.runtime {
@@ -1480,12 +1751,16 @@ impl App {
 
         if cmd.starts_with("/ship-phase") {
             let id = if cmd.contains(' ') {
-                cmd.split_once(' ').map(|(_, r)| r.trim().to_string()).unwrap_or_default()
+                cmd.split_once(' ')
+                    .map(|(_, r)| r.trim().to_string())
+                    .unwrap_or_default()
             } else {
                 load_state(&self.root).current_phase.unwrap_or_default()
             };
             if id.is_empty() {
-                self.push_system("Usage: /ship-phase P0   (or just /ship-phase while a phase is current)");
+                self.push_system(
+                    "Usage: /ship-phase P0   (or just /ship-phase while a phase is current)",
+                );
                 return;
             }
             match crate::phase::run_phase_accept(&self.root, &id, None) {
@@ -1507,19 +1782,31 @@ impl App {
         }
 
         if cmd == "/decisions" {
-            self.show_context_file(crate::agent::decisions_path(&self.root), "Decisions (.anvil/decisions.md — injected each turn)");
+            self.show_context_file(
+                crate::agent::decisions_path(&self.root),
+                "Decisions (.anvil/decisions.md — injected each turn)",
+            );
             return;
         }
         if cmd == "/assumptions" {
-            self.show_context_file(crate::agent::assumptions_path(&self.root), "Assumptions (.anvil/assumptions.md — unverified hypotheses, injected each turn)");
+            self.show_context_file(
+                crate::agent::assumptions_path(&self.root),
+                "Assumptions (.anvil/assumptions.md — unverified hypotheses, injected each turn)",
+            );
             return;
         }
         if cmd == "/scratch" {
-            self.show_context_file(crate::agent::scratch_path(&self.root), "Scratchpad (.anvil/scratch.md — disposable, never injected)");
+            self.show_context_file(
+                crate::agent::scratch_path(&self.root),
+                "Scratchpad (.anvil/scratch.md — disposable, never injected)",
+            );
             return;
         }
         if cmd == "/architecture" || cmd == "/arch" {
-            self.show_context_file(crate::agent::architecture_path(&self.root), "Architecture map (ARCHITECTURE.md — read on demand)");
+            self.show_context_file(
+                crate::agent::architecture_path(&self.root),
+                "Architecture map (ARCHITECTURE.md — read on demand)",
+            );
             return;
         }
 
@@ -1553,23 +1840,35 @@ impl App {
             let ledger_lines = std::fs::read_to_string(crate::agent::session_path(&self.root))
                 .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
                 .unwrap_or(0);
-            let wm = std::fs::read_to_string(crate::agent::working_memory_path(&self.root)).unwrap_or_default();
+            let wm = std::fs::read_to_string(crate::agent::working_memory_path(&self.root))
+                .unwrap_or_default();
             let wm_bytes = wm.trim().len();
             let snap_chars = crate::reality::snapshot(&self.root).len();
             let (hist_len, ctx_chars) = self
                 .agent
                 .as_ref()
-                .and_then(|a| a.try_lock().ok().map(|g| (g.history_len(), g.context_chars())))
+                .and_then(|a| {
+                    a.try_lock()
+                        .ok()
+                        .map(|g| (g.history_len(), g.context_chars()))
+                })
                 .unwrap_or((0, 0));
-            let dec_bytes = std::fs::read_to_string(crate::agent::decisions_path(&self.root)).map(|s| s.len().min(2000)).unwrap_or(0);
-            let asm_bytes = std::fs::read_to_string(crate::agent::assumptions_path(&self.root)).map(|s| s.len().min(2000)).unwrap_or(0);
+            let dec_bytes = std::fs::read_to_string(crate::agent::decisions_path(&self.root))
+                .map(|s| s.len().min(2000))
+                .unwrap_or(0);
+            let asm_bytes = std::fs::read_to_string(crate::agent::assumptions_path(&self.root))
+                .map(|s| s.len().min(2000))
+                .unwrap_or(0);
             let est_tokens = (ctx_chars + wm_bytes + snap_chars + dec_bytes + asm_bytes) / 4;
             // Project context files: size + whether they're injected this turn.
             let file_line = |path: std::path::PathBuf, label: &str, injected: bool| -> String {
                 let content = std::fs::read_to_string(&path).unwrap_or_default();
                 let body = content.lines().any(|l| {
                     let t = l.trim();
-                    !t.is_empty() && !t.starts_with('#') && !t.starts_with("<!--") && !t.starts_with('>')
+                    !t.is_empty()
+                        && !t.starts_with('#')
+                        && !t.starts_with("<!--")
+                        && !t.starts_with('>')
                 });
                 let status = if !body {
                     "empty".to_string()
@@ -1582,10 +1881,26 @@ impl App {
             };
             let ctx_files = format!(
                 "{}\n{}\n{}\n{}",
-                file_line(crate::agent::decisions_path(&self.root), "decisions.md", true),
-                file_line(crate::agent::assumptions_path(&self.root), "assumptions.md", true),
-                file_line(crate::agent::scratch_path(&self.root), "scratch.md (never injected)", false),
-                file_line(crate::agent::architecture_path(&self.root), "ARCHITECTURE.md", false),
+                file_line(
+                    crate::agent::decisions_path(&self.root),
+                    "decisions.md",
+                    true
+                ),
+                file_line(
+                    crate::agent::assumptions_path(&self.root),
+                    "assumptions.md",
+                    true
+                ),
+                file_line(
+                    crate::agent::scratch_path(&self.root),
+                    "scratch.md (never injected)",
+                    false
+                ),
+                file_line(
+                    crate::agent::architecture_path(&self.root),
+                    "ARCHITECTURE.md",
+                    false
+                ),
             );
             self.push_system(&format!(
                 "Memory layers:\n  ledger (.anvil/session.json): {} entries (append-only, full record)\n  in-session history: {} messages (recent window sent to the coder)\n  working memory (.anvil/working-memory.md): {} bytes\n  reality snapshot: {} bytes (rebuilt every turn)\nProject context files:\n{}\n  ≈ {}k tokens sent next turn (window + working memory + decisions + assumptions + snapshot)",
@@ -1601,7 +1916,12 @@ impl App {
             let cleared = self
                 .agent
                 .as_ref()
-                .and_then(|a| a.try_lock().ok().map(|mut g| { g.clear_history(); true }))
+                .and_then(|a| {
+                    a.try_lock().ok().map(|mut g| {
+                        g.clear_history();
+                        true
+                    })
+                })
                 .unwrap_or(false);
             if cleared || self.agent.is_none() {
                 self.push_system("Memory cleared: in-session history reset and working memory emptied. The ledger keeps the full record (a reset marker was written); plan.md / REVIEW_* are untouched.");
@@ -1627,11 +1947,15 @@ impl App {
             let r2 = rev_dir.join("REVIEW_plan_R2.md");
             // Build a combined document for the popup card.
             let mut combined = String::new();
-            combined.push_str("=== PLAN REVIEW R1 (reviewer-a critical on the plan written by coder) ===\n\n");
+            combined.push_str(
+                "=== PLAN REVIEW R1 (reviewer-a critical on the plan written by coder) ===\n\n",
+            );
             if let Ok(c) = std::fs::read_to_string(&r1) {
                 combined.push_str(&c);
             } else {
-                combined.push_str("(REVIEW_plan_R1.md not found — follow /plan → /save-plan → /lock-plan)\n");
+                combined.push_str(
+                    "(REVIEW_plan_R1.md not found — follow /plan → /save-plan → /lock-plan)\n",
+                );
             }
             combined.push_str("\n\n=== PLAN REVIEW R2 (reviewer-b) ===\n\n");
             if let Ok(c) = std::fs::read_to_string(&r2) {
@@ -1642,8 +1966,14 @@ impl App {
             // Also show the current phase's review docs if a phase is active.
             let st = load_state(&self.root);
             if let Some(pid) = &st.current_phase {
-                combined.push_str(&format!("\n\n--- Current phase {} reviews (from /accept-phase) ---\n", pid));
-                for nm in [format!("REVIEW_{}_R1.md", pid), format!("REVIEW_{}_R2.md", pid)] {
+                combined.push_str(&format!(
+                    "\n\n--- Current phase {} reviews (from /accept-phase) ---\n",
+                    pid
+                ));
+                for nm in [
+                    format!("REVIEW_{}_R1.md", pid),
+                    format!("REVIEW_{}_R2.md", pid),
+                ] {
                     let p = rev_dir.join(&nm);
                     if p.exists() {
                         if let Ok(c) = std::fs::read_to_string(&p) {
@@ -1653,7 +1983,10 @@ impl App {
                 }
             }
             combined.push_str("\n\n--- Source of truth: these REVIEW_* files at repo root + plan.md + state.json. ---\n");
-            self.viewing_doc = Some(("Reviews (plan + current phase) — Esc to close".to_string(), combined));
+            self.viewing_doc = Some((
+                "Reviews (plan + current phase) — Esc to close".to_string(),
+                combined,
+            ));
             self.push_system("Opened focused review card. Close with Esc.");
             return;
         }
@@ -1805,7 +2138,10 @@ impl App {
         if let Some(rt) = &self.runtime {
             if !specific.trim().is_empty() {
                 let _ = rt.block_on(self.llm.ollama_unload(specific));
-                self.push_system(&format!("Requested unload for '{}'. (Ollama will drop it from VRAM.)", specific));
+                self.push_system(&format!(
+                    "Requested unload for '{}'. (Ollama will drop it from VRAM.)",
+                    specific
+                ));
                 // Give nvidia-smi a moment on next refresh
                 self.refresh_gpu_stats();
                 return;
@@ -1817,7 +2153,10 @@ impl App {
                     for m in &models {
                         let _ = rt.block_on(self.llm.ollama_unload(&m.name));
                     }
-                    self.push_system(&format!("Unloaded {} model(s). VRAM should be freeing up.", models.len()));
+                    self.push_system(&format!(
+                        "Unloaded {} model(s). VRAM should be freeing up.",
+                        models.len()
+                    ));
                     self.refresh_gpu_stats();
                 }
                 Ok(_) => {
@@ -1860,7 +2199,10 @@ impl App {
                     vec![]
                 }
                 Err(e) => {
-                    self.push_system(&format!("Could not list Ollama models: {}. (Is Ollama still running?)", e));
+                    self.push_system(&format!(
+                        "Could not list Ollama models: {}. (Is Ollama still running?)",
+                        e
+                    ));
                     vec![]
                 }
             }
@@ -1875,7 +2217,9 @@ impl App {
 
         if let Some(w) = &mut self.config_wizard {
             w.ollama_model_list = models.clone();
-            w.step = WizardStep::QuickOllamaModelPick { role: "coder".to_string() };
+            w.step = WizardStep::QuickOllamaModelPick {
+                role: "coder".to_string(),
+            };
             w.list_items = models;
             if !w.list_items.is_empty() {
                 w.list_items.push("Other / type manually".to_string());
@@ -1897,7 +2241,9 @@ impl App {
     /// while reusing the already-fetched ollama_model_list.
     fn enter_next_quick_pick(&mut self, next_role: &str, display: &str) {
         if let Some(w) = &mut self.config_wizard {
-            w.step = WizardStep::QuickOllamaModelPick { role: next_role.to_string() };
+            w.step = WizardStep::QuickOllamaModelPick {
+                role: next_role.to_string(),
+            };
             w.list_items = w.ollama_model_list.clone();
             if !w.list_items.is_empty() {
                 w.list_items.push("Other / type manually".to_string());
@@ -1917,7 +2263,12 @@ impl App {
     /// missing base, no runtime, or non-compat provider types (anthropic/google keep their statics).
     /// When falling back for a remote provider we emit a visible [system] note so you can see
     /// why the live list wasn't used (bad/missing key, endpoint returned nothing, network, etc.).
-    fn live_or_static_models_for_provider(&mut self, prov_name: &str, ptype: &str, base_url: Option<&str>) -> Vec<String> {
+    fn live_or_static_models_for_provider(
+        &mut self,
+        prov_name: &str,
+        ptype: &str,
+        base_url: Option<&str>,
+    ) -> Vec<String> {
         let base = base_url.unwrap_or("");
         let is_local_ollama = base.contains("11434") || prov_name.to_lowercase().contains("ollama");
         if is_local_ollama {
@@ -1968,8 +2319,15 @@ impl App {
     /// suggested key, by type for strong-typed presets, or by base_url signature
     /// for well-known local endpoints like Ollama). Used to show a green check
     /// in the "Add / update a provider connection" list.
-    fn is_provider_preset_configured(&self, display_name: &str, suggested_name: &str, ptype: &str) -> bool {
-        let Some(cfg) = &self.cfg else { return false; };
+    fn is_provider_preset_configured(
+        &self,
+        display_name: &str,
+        suggested_name: &str,
+        ptype: &str,
+    ) -> bool {
+        let Some(cfg) = &self.cfg else {
+            return false;
+        };
         if suggested_name == "custom" {
             return false;
         }
@@ -1981,7 +2339,15 @@ impl App {
             if n == s_lower || n.contains(&s_lower) || s_lower.contains(&n) {
                 return true;
             }
-            if n == d_lower || n.contains(&d_lower.replace(" (local)", "").replace(" (", "").replace(")", "").replace(" ", "")) {
+            if n == d_lower
+                || n.contains(
+                    &d_lower
+                        .replace(" (local)", "")
+                        .replace(" (", "")
+                        .replace(")", "")
+                        .replace(" ", ""),
+                )
+            {
                 return true;
             }
             // Strong type match for non-openai_compat presets (e.g. "anthropic", "google", "azure_openai")
@@ -2015,7 +2381,9 @@ impl App {
         // before we do any live model fetches (which require &mut self).
         let (provider_infos, binding_keys): (Vec<(String, String, Option<String>)>, Vec<String>) =
             if let Some(cfg) = &self.cfg {
-                let provs = cfg.providers.iter()
+                let provs = cfg
+                    .providers
+                    .iter()
                     .map(|(name, conn)| (name.clone(), conn.r#type.clone(), conn.base_url.clone()))
                     .collect();
                 let binds = cfg.model_bindings.keys().cloned().collect();
@@ -2031,11 +2399,8 @@ impl App {
             let mut by_prov: Vec<(String, Vec<String>)> = provider_infos
                 .into_iter()
                 .map(|(name, ptype, base)| {
-                    let mods = self.live_or_static_models_for_provider(
-                        &name,
-                        &ptype,
-                        base.as_deref(),
-                    );
+                    let mods =
+                        self.live_or_static_models_for_provider(&name, &ptype, base.as_deref());
                     (name, mods)
                 })
                 .collect();
@@ -2054,9 +2419,9 @@ impl App {
         // or ad-hoc names) that aren't already represented by a direct model entry above.
         // These go at the end; primary content is the per-provider models.
         for bname in binding_keys {
-            let already = choices.iter().any(|c| {
-                c == &bname || c.starts_with(&format!("{}  [", bname))
-            });
+            let already = choices
+                .iter()
+                .any(|c| c == &bname || c.starts_with(&format!("{}  [", bname)));
             if !already {
                 choices.push(bname);
             }
@@ -2066,9 +2431,9 @@ impl App {
     }
 
     fn is_configured(&self) -> bool {
-        self.cfg
-            .as_ref()
-            .map_or(false, |c| c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some())
+        self.cfg.as_ref().map_or(false, |c| {
+            c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some()
+        })
     }
 
     /// Parse a choice string from the role assignment list (which may be a plain binding
@@ -2177,7 +2542,10 @@ impl App {
         let api_key = match self.llm.get_credential(&binding.provider, provider) {
             Ok(k) => k,
             Err(e) => {
-                self.push_system(&format!("Credential error for binding '{}' (provider '{}'): {}", binding_name, binding.provider, e));
+                self.push_system(&format!(
+                    "Credential error for binding '{}' (provider '{}'): {}",
+                    binding_name, binding.provider, e
+                ));
                 self.push_system("For local providers (Ollama etc.) use the quick setup or /config and pick 'No authentication' / CredentialRef::None. Real providers need a key in the keyring or a valid env var.");
                 return;
             }
@@ -2196,7 +2564,14 @@ impl App {
         self.current_role = Some(role.to_string());
         self.current_binding = Some(binding_name.clone());
         self.current_model = Some(model.clone());
-        self.log_chat_event("user", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), text);
+        self.log_chat_event(
+            "user",
+            Some(&turn_id),
+            Some(role),
+            Some(&binding_name),
+            Some(&model),
+            text,
+        );
 
         // Take an owned runtime handle so we can freely mutate self below before
         // spawning (a borrow of self.runtime would conflict with self.push etc.).
@@ -2235,7 +2610,14 @@ impl App {
         self.push(format!("[{}] ", role));
         self.assistant_open = true;
         self.follow_bottom = true;
-        self.log_chat_event("assistant_begin", Some(&turn_id), Some(role), Some(&binding_name), Some(&model), "[agent turn]");
+        self.log_chat_event(
+            "assistant_begin",
+            Some(&turn_id),
+            Some(role),
+            Some(&binding_name),
+            Some(&model),
+            "[agent turn]",
+        );
 
         let agent = self.agent.as_ref().unwrap().clone();
         let input = text.to_string();
@@ -2298,7 +2680,14 @@ impl App {
                     .trim_start_matches(": ")
                     .trim_start_matches(' ')
                     .to_string();
-                self.log_chat_event("error", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), &clean);
+                self.log_chat_event(
+                    "error",
+                    turn.as_deref(),
+                    role.as_deref(),
+                    binding.as_deref(),
+                    model.as_deref(),
+                    &clean,
+                );
                 self.push_system(&format!("model error: {}", clean));
                 changed = true;
                 continue;
@@ -2308,7 +2697,14 @@ impl App {
             if let Some(label) = delta.strip_prefix("[tool-start]") {
                 self.close_assistant_line();
                 self.tool_active = true;
-                self.log_chat_event("tool_start", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
+                self.log_chat_event(
+                    "tool_start",
+                    turn.as_deref(),
+                    role.as_deref(),
+                    binding.as_deref(),
+                    model.as_deref(),
+                    label,
+                );
                 self.push(format!("  🔨 {}", label.trim()));
                 changed = true;
                 continue;
@@ -2316,7 +2712,14 @@ impl App {
             // A tool finished: show its short result summary.
             if let Some(label) = delta.strip_prefix("[tool-end]") {
                 self.tool_active = false;
-                self.log_chat_event("tool_end", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
+                self.log_chat_event(
+                    "tool_end",
+                    turn.as_deref(),
+                    role.as_deref(),
+                    binding.as_deref(),
+                    model.as_deref(),
+                    label,
+                );
                 self.push(format!("    ↳ {}", label.trim()));
                 changed = true;
                 continue;
@@ -2324,7 +2727,14 @@ impl App {
             // The exact assembled prompt sent to the model this turn — logged to
             // the session JSONL for a complete audit trail, never shown in the UI.
             if let Some(prompt) = delta.strip_prefix("[prompt-log]") {
-                self.log_chat_event("prompt_sent", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), prompt);
+                self.log_chat_event(
+                    "prompt_sent",
+                    turn.as_deref(),
+                    role.as_deref(),
+                    binding.as_deref(),
+                    model.as_deref(),
+                    prompt,
+                );
                 continue;
             }
             // A non-intrusive advisory from the agent (e.g. the /compact nudge).
@@ -2339,7 +2749,14 @@ impl App {
                 self.close_assistant_line();
                 let cmd = cmd.trim().to_string();
                 self.awaiting_confirm = Some(cmd.clone());
-                self.log_chat_event("confirm_request", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), &cmd);
+                self.log_chat_event(
+                    "confirm_request",
+                    turn.as_deref(),
+                    role.as_deref(),
+                    binding.as_deref(),
+                    model.as_deref(),
+                    &cmd,
+                );
                 self.push_system(&format!("Run command?  $ {}", cmd));
                 self.push_system("Type /y to allow or /n to deny.");
                 changed = true;
@@ -2352,7 +2769,14 @@ impl App {
                 self.push("[coder] ".to_string());
                 self.assistant_open = true;
             }
-            self.log_chat_event("assistant_delta", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), &delta);
+            self.log_chat_event(
+                "assistant_delta",
+                turn.as_deref(),
+                role.as_deref(),
+                binding.as_deref(),
+                model.as_deref(),
+                &delta,
+            );
             if let Some(last) = self.messages.last_mut() {
                 last.push_str(&delta);
             }
@@ -2376,7 +2800,14 @@ impl App {
             // Log the final UI string for the turn. We take a fresh immutable borrow here so it doesn't overlap
             // with the previous mutable borrow from last_mut() when calling the &self logging method.
             if let Some(last) = self.messages.last() {
-                self.log_chat_event("assistant_final_ui", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), last);
+                self.log_chat_event(
+                    "assistant_final_ui",
+                    turn.as_deref(),
+                    role.as_deref(),
+                    binding.as_deref(),
+                    model.as_deref(),
+                    last,
+                );
             }
             // Clear turn correlation so next chat gets a fresh id.
             self.current_turn_id = None;
@@ -2524,7 +2955,9 @@ impl App {
 
         self.push_system("=== CONFIGURATION WIZARD ===");
         self.push_system("Scroll lists with ↑/↓, Enter to pick, Esc to go back/cancel, or type answers for text fields.");
-        self.push_system("All changes are saved to anvil.toml + keyring (when you choose keyring).");
+        self.push_system(
+            "All changes are saved to anvil.toml + keyring (when you choose keyring).",
+        );
 
         if self.first_run {
             self.push_system("Welcome! A 60-second setup gets you chatting with a real model and using the full Talk → /plan (coder writes) → /lock-plan (R1 auto) → coder fixes → /approve-r1 (R2 auto) → /accept-plan flow, plus per-phase coder-written review docs + critical reviewer passes with human approve gates.");
@@ -2580,7 +3013,8 @@ impl App {
                     "Config"
                 } else {
                     "What would you like to do? (↑↓ Enter)"
-                }.to_string();
+                }
+                .to_string();
             }
         }
         if self.first_run {
@@ -2626,7 +3060,11 @@ impl App {
                     self.start_quick_ollama_setup();
                     // The picker steps will call finish_config_wizard() themselves after the third choice
                     // (or update the local-coder/local-r1/local-r2 bindings on re-runs).
-                } else if (s == "1" || s == "2") || s.contains("add / update a provider") || s.contains("provider connection") || s.contains("provider") {
+                } else if (s == "1" || s == "2")
+                    || s.contains("add / update a provider")
+                    || s.contains("provider connection")
+                    || s.contains("provider")
+                {
                     // Covers first-run layouts (provider at 1 or 2 depending on Ollama presence).
                     // Uses distinctive phrases from the actual menu item labels (list selection gives "1. Add..." or "Add / update...").
                     self.start_add_provider();
@@ -2638,10 +3076,16 @@ impl App {
                 } else if (s == "3" || s == "4") || s.contains("show") || s.contains("current") {
                     self.show_current_config();
                     self.populate_main_menu();
-                } else if (s == "4" || s == "5") || s.contains("finish") || s.contains("return") || s.contains("done") {
+                } else if (s == "4" || s == "5")
+                    || s.contains("finish")
+                    || s.contains("return")
+                    || s.contains("done")
+                {
                     self.finish_config_wizard();
                 } else {
-                    self.push_system("Please choose a number or use the arrow keys + Enter on the list.");
+                    self.push_system(
+                        "Please choose a number or use the arrow keys + Enter on the list.",
+                    );
                 }
             }
 
@@ -2658,7 +3102,11 @@ impl App {
 
                 if let Some(w) = &mut self.config_wizard {
                     w.provider_type = Some(ptype.to_string());
-                    w.base_url = if url.is_empty() { None } else { Some(url.to_string()) };
+                    w.base_url = if url.is_empty() {
+                        None
+                    } else {
+                        Some(url.to_string())
+                    };
                     w.no_auth = !needs_key;
                     w.step = WizardStep::ProviderName;
                     w.list_items.clear();
@@ -2667,8 +3115,15 @@ impl App {
                 // Pre-fill input with the suggested connection name so user can just press Enter
                 self.set_input(suggested.to_string());
 
-                let url_note = if url.is_empty() { "provider default".to_string() } else { url.to_string() };
-                self.push_system(&format!("Provider: {}  (type={}, url={})", selected, ptype, url_note));
+                let url_note = if url.is_empty() {
+                    "provider default".to_string()
+                } else {
+                    url.to_string()
+                };
+                self.push_system(&format!(
+                    "Provider: {}  (type={}, url={})",
+                    selected, ptype, url_note
+                ));
                 self.push_system("Enter a name for this connection — press Enter to accept the suggestion, or type your own:");
             }
 
@@ -2732,8 +3187,12 @@ impl App {
                         w.list_title.clear();
                     }
                     self.input_secret = true;
-                    self.push_system("Using OS keyring (may not be readable on all Windows setups).");
-                    self.push_system("Paste or type the API key / token now (input will be hidden):");
+                    self.push_system(
+                        "Using OS keyring (may not be readable on all Windows setups).",
+                    );
+                    self.push_system(
+                        "Paste or type the API key / token now (input will be hidden):",
+                    );
                 } else if kind.contains("no auth") || kind.contains("none") || kind == "2" {
                     if let Some(w) = &mut self.config_wizard {
                         w.cred_kind = Some("none".to_string());
@@ -2752,8 +3211,12 @@ impl App {
                         w.list_title.clear();
                     }
                     self.input_secret = true;
-                    self.push_system("Using environment variable (auto-captured from the key you paste).");
-                    self.push_system("Paste or type the API key / token now (input will be hidden):");
+                    self.push_system(
+                        "Using environment variable (auto-captured from the key you paste).",
+                    );
+                    self.push_system(
+                        "Paste or type the API key / token now (input will be hidden):",
+                    );
                 }
             }
 
@@ -2794,13 +3257,22 @@ impl App {
                 // that is already set up: live /models pull (so the picker shows the provider's real
                 // current catalog rather than a hardcoded snapshot).
                 let (ptype_for_live, base_for_live) = if let Some(cfg) = &self.cfg {
-                    cfg.providers.get(prov)
+                    cfg.providers
+                        .get(prov)
                         .map(|c| (c.r#type.clone(), c.base_url.clone()))
                         .unwrap_or_default()
-                } else { (String::new(), None) };
+                } else {
+                    (String::new(), None)
+                };
                 let model_opts: Vec<String> = if !prov.is_empty() && !ptype_for_live.is_empty() {
-                    self.live_or_static_models_for_provider(prov, &ptype_for_live, base_for_live.as_deref())
-                } else { vec![] };
+                    self.live_or_static_models_for_provider(
+                        prov,
+                        &ptype_for_live,
+                        base_for_live.as_deref(),
+                    )
+                } else {
+                    vec![]
+                };
                 if let Some(w) = &mut self.config_wizard {
                     w.binding_provider = Some(prov.to_string());
                     w.model_options = model_opts.clone();
@@ -2818,10 +3290,19 @@ impl App {
                     w.note = None;
                 }
                 self.push_system(&format!("Provider: '{}'.", prov));
-                if self.config_wizard.as_ref().map(|w| !w.list_items.is_empty()).unwrap_or(false) {
-                    self.push_system("Select the model ID from the list, or choose 'Other / type manually':");
+                if self
+                    .config_wizard
+                    .as_ref()
+                    .map(|w| !w.list_items.is_empty())
+                    .unwrap_or(false)
+                {
+                    self.push_system(
+                        "Select the model ID from the list, or choose 'Other / type manually':",
+                    );
                 } else {
-                    self.push_system("Enter the model ID (e.g. grok-3, claude-sonnet-4-6, gpt-4o):");
+                    self.push_system(
+                        "Enter the model ID (e.g. grok-3, claude-sonnet-4-6, gpt-4o):",
+                    );
                 }
             }
 
@@ -2836,7 +3317,9 @@ impl App {
                         w.list_title.clear();
                     }
                     self.input.clear();
-                    self.push_system("Type the model ID (e.g. claude-sonnet-4-6, gpt-4o, llama3.1:8b):");
+                    self.push_system(
+                        "Type the model ID (e.g. claude-sonnet-4-6, gpt-4o, llama3.1:8b):",
+                    );
                     return;
                 }
                 if let Some(w) = &mut self.config_wizard {
@@ -2879,7 +3362,8 @@ impl App {
                         if !cfg.providers.contains_key(&prov) {
                             // As a safety net, ensure a plausible local-ollama entry exists
                             // (mirrors prior behavior for the very first quick-ollama case).
-                            if prov == "local-ollama" || !cfg.providers.contains_key("local-ollama") {
+                            if prov == "local-ollama" || !cfg.providers.contains_key("local-ollama")
+                            {
                                 cfg.providers.insert(
                                     "local-ollama".to_string(),
                                     ProviderConnection {
@@ -2897,7 +3381,9 @@ impl App {
                             ModelBinding {
                                 provider: prov.clone(),
                                 model: model.clone(),
-                                note: Some("from role assignment (provider models list)".to_string()),
+                                note: Some(
+                                    "from role assignment (provider models list)".to_string(),
+                                ),
                             },
                         );
                         did_auto_register = true;
@@ -2914,7 +3400,10 @@ impl App {
                 // Borrows on cfg have ended; safe to call other &mut self methods now.
                 self.save_current_config();
                 if did_auto_register {
-                    self.push_system(&format!("✓ Auto-registered model binding '{}' via {}.", binding_name, prov));
+                    self.push_system(&format!(
+                        "✓ Auto-registered model binding '{}' via {}.",
+                        binding_name, prov
+                    ));
                 }
                 let display_role = match role.as_str() {
                     "coder" => "coder",
@@ -3005,7 +3494,9 @@ impl App {
                     // All three chosen — finish the quick flow.
                     self.push_system("Quick setup complete!");
                     self.push_system("CODER (blue) • R1 (purple) • R2 (lime) are now assigned from your live Ollama models.");
-                    self.push_system("Type to chat, or run /plan for the full R1+R2 gated workflow.");
+                    self.push_system(
+                        "Type to chat, or run /plan for the full R1+R2 gated workflow.",
+                    );
                     self.finish_config_wizard();
                 }
             }
@@ -3046,7 +3537,8 @@ impl App {
     }
 
     fn finish_add_provider(&mut self) {
-        let (ptype, name, base, cred_kind, api_key, env_var) = if let Some(w) = &self.config_wizard {
+        let (ptype, name, base, cred_kind, api_key, env_var) = if let Some(w) = &self.config_wizard
+        {
             (
                 w.provider_type.clone().unwrap_or_default(),
                 w.provider_name.clone().unwrap_or_default(),
@@ -3094,32 +3586,57 @@ impl App {
             }
 
             // Cross-platform explanation printed right after the user pastes the key.
-            self.push_system(&format!("✓ Key captured as environment variable {} (current session).", var_name));
+            self.push_system(&format!(
+                "✓ Key captured as environment variable {} (current session).",
+                var_name
+            ));
             self.push_system("  We also wrote it to .anvil/.env (plain text — keep the .anvil directory private).");
             self.push_system("  Any future `anvil` run from this project directory will auto-load it (no shell config required).");
             self.push_system("");
             self.push_system("  How this works everywhere (PowerShell, bash, Docker, CI, WSL, macOS, Linux servers...):");
-            self.push_system("    • The *runtime* (std::env::var + set_var) is the same on every OS and shell.");
+            self.push_system(
+                "    • The *runtime* (std::env::var + set_var) is the same on every OS and shell.",
+            );
             self.push_system("    • .anvil/.env is loaded automatically by anvil on every start (TUI + all CLI commands).");
             self.push_system("    • For global use or when running anvil from other directories, set the variable");
             self.push_system("      in your normal environment:");
-            self.push_system(&format!("        Windows (PowerShell):  $env:{} = \"<key>\"     (or use setx)", var_name));
-            self.push_system(&format!("        Windows (cmd):         set {}=\"<key>\"", var_name));
-            self.push_system(&format!("        Linux / macOS / WSL / Git Bash:   export {}=\"<key>\"", var_name));
-            self.push_system(&format!("        fish:                  set -x {} \"<key>\"", var_name));
+            self.push_system(&format!(
+                "        Windows (PowerShell):  $env:{} = \"<key>\"     (or use setx)",
+                var_name
+            ));
+            self.push_system(&format!(
+                "        Windows (cmd):         set {}=\"<key>\"",
+                var_name
+            ));
+            self.push_system(&format!(
+                "        Linux / macOS / WSL / Git Bash:   export {}=\"<key>\"",
+                var_name
+            ));
+            self.push_system(&format!(
+                "        fish:                  set -x {} \"<key>\"",
+                var_name
+            ));
             self.push_system("    • CI / Docker / scripts / systemd: just make sure the variable is present in the");
             self.push_system("      environment of the process that executes `anvil` (GitHub secrets, -e flags, etc.).");
             self.push_system("    • The exact same variable names (XAI_API_KEY, OPENAI_API_KEY, ...) are used by");
             self.push_system("      many other tools, so you can often reuse existing secrets.");
 
-            (CredentialRef::Env { var_name: var_name.clone() }, Some(var_name))
+            (
+                CredentialRef::Env {
+                    var_name: var_name.clone(),
+                },
+                Some(var_name),
+            )
         } else if cred_kind.as_deref() == Some("keyring") {
             if let Some(key) = &api_key {
                 let entry_name = format!("provider:{}", name);
                 match keyring::Entry::new("anvil", &entry_name) {
                     Ok(entry) => {
                         if let Err(e) = entry.set_password(key) {
-                            self.push_system(&format!("Warning: could not store key in keyring: {}", e));
+                            self.push_system(&format!(
+                                "Warning: could not store key in keyring: {}",
+                                e
+                            ));
                         } else if entry.get_password().is_ok() {
                             self.push_system("✓ Key stored securely in OS keyring.");
                         } else {
@@ -3135,12 +3652,15 @@ impl App {
         } else if cred_kind.as_deref() == Some("none") {
             (CredentialRef::None, None)
         } else {
-            (CredentialRef::Env {
-                var_name: env_var.unwrap_or_else(|| "API_KEY".to_string()),
-            }, None)
+            (
+                CredentialRef::Env {
+                    var_name: env_var.unwrap_or_else(|| "API_KEY".to_string()),
+                },
+                None,
+            )
         };
 
-        let cred = cred;  // for use below
+        let cred = cred; // for use below
         let _auto_var = auto_var; // already explained in the messages above
 
         let normalized_type = if ptype.starts_with("openai_compat") {
@@ -3152,7 +3672,9 @@ impl App {
         } else {
             ptype.clone()
         };
-        let is_remote_compat = normalized_type == "openai_compat" || normalized_type == "openai" || normalized_type.starts_with("azure");
+        let is_remote_compat = normalized_type == "openai_compat"
+            || normalized_type == "openai"
+            || normalized_type.starts_with("azure");
 
         {
             let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
@@ -3187,11 +3709,12 @@ impl App {
         // Subsequent "Assign roles" / live_or_static calls still use the normal stored credential path.
         if is_remote_compat {
             let b = base.as_deref().unwrap_or("").trim().to_string();
-            let probe_key: Option<String> = if cred_kind.as_deref() == Some("keyring") || cred_kind.as_deref() == Some("env") {
-                api_key.clone().filter(|k| !k.trim().is_empty())
-            } else {
-                None
-            };
+            let probe_key: Option<String> =
+                if cred_kind.as_deref() == Some("keyring") || cred_kind.as_deref() == Some("env") {
+                    api_key.clone().filter(|k| !k.trim().is_empty())
+                } else {
+                    None
+                };
             let note = if let Some(key) = probe_key {
                 // Use the just-entered key directly so the live list succeeds even if keyring readback is flaky right now.
                 if let Some(rt) = &self.runtime {
@@ -3207,7 +3730,9 @@ impl App {
                             format!("[models] Error fetching live models for '{}': {} (using suggestions)", name, e)
                         }
                     }
-                } else { String::new() }
+                } else {
+                    String::new()
+                }
             } else if let Some(c) = &self.cfg {
                 // No just-entered key available (e.g. pure env var flow); fall back to normal credential lookup.
                 if let Some(conn) = c.providers.get(&name) {
@@ -3216,9 +3741,11 @@ impl App {
                         match self.llm.get_credential(&name, conn) {
                             Ok(key) => {
                                 if let Some(rt) = &self.runtime {
-                                    match rt.block_on(self.llm.list_openai_compat_models(&bb, &key)) {
+                                    match rt.block_on(self.llm.list_openai_compat_models(&bb, &key))
+                                    {
                                         Ok(models) if !models.is_empty() => {
-                                            let preview: Vec<String> = models.iter().take(3).cloned().collect();
+                                            let preview: Vec<String> =
+                                                models.iter().take(3).cloned().collect();
                                             format!("✓ Live model list for '{}': {} models. Examples: {}", name, models.len(), preview.join(", "))
                                         }
                                         Ok(_) => {
@@ -3228,15 +3755,23 @@ impl App {
                                             format!("[models] Error fetching live models for '{}': {} (using suggestions)", name, e)
                                         }
                                     }
-                                } else { String::new() }
+                                } else {
+                                    String::new()
+                                }
                             }
                             Err(e) => {
                                 format!("[models] Could not read credential for '{}' after add ({}). Live models unavailable.", name, e)
                             }
                         }
-                    } else { String::new() }
-                } else { String::new() }
-            } else { String::new() };
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
             if !note.is_empty() {
                 self.push_system(&note);
             }
@@ -3267,13 +3802,22 @@ impl App {
             // Use live fetch for local Ollama (same as the BindingProvider -> ModelName path)
             // so reconfig after quick setup can surface currently-pulled tags instead of [] .
             let (ptype_for_live, base_for_live) = if let Some(cfg) = &self.cfg {
-                cfg.providers.get(&prov)
+                cfg.providers
+                    .get(&prov)
                     .map(|c| (c.r#type.clone(), c.base_url.clone()))
                     .unwrap_or_default()
-            } else { (String::new(), None) };
+            } else {
+                (String::new(), None)
+            };
             let model_opts: Vec<String> = if !prov.is_empty() && !ptype_for_live.is_empty() {
-                self.live_or_static_models_for_provider(&prov, &ptype_for_live, base_for_live.as_deref())
-            } else { vec![] };
+                self.live_or_static_models_for_provider(
+                    &prov,
+                    &ptype_for_live,
+                    base_for_live.as_deref(),
+                )
+            } else {
+                vec![]
+            };
 
             if let Some(w) = &mut self.config_wizard {
                 w.binding_provider = Some(prov.clone());
@@ -3292,8 +3836,15 @@ impl App {
                 w.note = None;
             }
             self.push_system(&format!("Adding a model for provider '{}'.", prov));
-            if self.config_wizard.as_ref().map(|w| !w.list_items.is_empty()).unwrap_or(false) {
-                self.push_system("Select the model ID from the list, or choose 'Other / type manually':");
+            if self
+                .config_wizard
+                .as_ref()
+                .map(|w| !w.list_items.is_empty())
+                .unwrap_or(false)
+            {
+                self.push_system(
+                    "Select the model ID from the list, or choose 'Other / type manually':",
+                );
             } else {
                 self.push_system("Enter the model ID (e.g. grok-3, claude-sonnet-4-6, gpt-4o):");
             }
@@ -3301,7 +3852,9 @@ impl App {
             // Show the provider list for the user to choose from.
             let prov_names: Vec<String> = if let Some(cfg) = &self.cfg {
                 cfg.providers.keys().cloned().collect()
-            } else { vec![] };
+            } else {
+                vec![]
+            };
             if let Some(w) = &mut self.config_wizard {
                 w.step = WizardStep::BindingProvider;
                 w.list_items = prov_names;
@@ -3345,8 +3898,13 @@ impl App {
         );
 
         self.save_current_config();
-        self.push_system(&format!("✓ Model '{}' saved via provider '{}'.", model, prov));
-        self.push_system("Use 'Assign roles' from the menu to assign it to coder / reviewer-R1 / reviewer-R2.");
+        self.push_system(&format!(
+            "✓ Model '{}' saved via provider '{}'.",
+            model, prov
+        ));
+        self.push_system(
+            "Use 'Assign roles' from the menu to assign it to coder / reviewer-R1 / reviewer-R2.",
+        );
 
         self.populate_main_menu();
     }
@@ -3368,7 +3926,9 @@ impl App {
         }
 
         if let Some(w) = &mut self.config_wizard {
-            w.step = WizardStep::RoleAssignment { role: role.to_string() };
+            w.step = WizardStep::RoleAssignment {
+                role: role.to_string(),
+            };
             w.list_items = binding_names;
             w.list_selected = 0;
             w.current_role = Some(role.to_string());
@@ -3415,8 +3975,12 @@ impl App {
             WizardStep::BindingNote => WizardStep::ModelName,
             WizardStep::RoleAssignment { role } => {
                 match role.as_str() {
-                    "reviewer_a" => WizardStep::RoleAssignment { role: "coder".to_string() },
-                    "reviewer_b" => WizardStep::RoleAssignment { role: "reviewer_a".to_string() },
+                    "reviewer_a" => WizardStep::RoleAssignment {
+                        role: "coder".to_string(),
+                    },
+                    "reviewer_b" => WizardStep::RoleAssignment {
+                        role: "reviewer_a".to_string(),
+                    },
                     _ => {
                         // Backing from "coder" role assignment (or unknown) goes to main menu
                         self.populate_main_menu();
@@ -3431,17 +3995,19 @@ impl App {
                 self.push_system("(back)");
                 return;
             }
-            WizardStep::QuickOllamaModelPick { role } => {
-                match role.as_str() {
-                    "reviewer_b" => WizardStep::QuickOllamaModelPick { role: "reviewer_a".to_string() },
-                    "reviewer_a" => WizardStep::QuickOllamaModelPick { role: "coder".to_string() },
-                    _ => {
-                        self.populate_main_menu();
-                        self.push_system("(back)");
-                        return;
-                    }
+            WizardStep::QuickOllamaModelPick { role } => match role.as_str() {
+                "reviewer_b" => WizardStep::QuickOllamaModelPick {
+                    role: "reviewer_a".to_string(),
+                },
+                "reviewer_a" => WizardStep::QuickOllamaModelPick {
+                    role: "coder".to_string(),
+                },
+                _ => {
+                    self.populate_main_menu();
+                    self.push_system("(back)");
+                    return;
                 }
-            }
+            },
             _ => {
                 self.populate_main_menu();
                 self.push_system("(back)");
@@ -3452,11 +4018,12 @@ impl App {
         // Snapshot role list (with live models) *before* taking the long &mut borrow on .config_wizard.
         // The build now performs &mut self live fetches (for the per-provider /models calls), so
         // we do the snapshot early while no wizard state is mutably borrowed.
-        let role_list_items: Option<Vec<String>> = if matches!(prev, WizardStep::RoleAssignment { .. }) {
-            Some(self.build_available_bindings_for_roles())
-        } else {
-            None
-        };
+        let role_list_items: Option<Vec<String>> =
+            if matches!(prev, WizardStep::RoleAssignment { .. }) {
+                Some(self.build_available_bindings_for_roles())
+            } else {
+                None
+            };
 
         // Now take a short-lived mutable borrow to apply the back step + update lists/input state.
         if let Some(w) = &mut self.config_wizard {
@@ -3490,7 +4057,9 @@ impl App {
                         w.list_items = w.model_options.clone();
                         w.list_items.push("Other / type manually".to_string());
                         w.list_selected = 0;
-                        w.list_title = "Select a model ID (↑↓ then Enter, or choose 'Other' to type):".to_string();
+                        w.list_title =
+                            "Select a model ID (↑↓ then Enter, or choose 'Other' to type):"
+                                .to_string();
                     } else {
                         w.list_items.clear();
                         w.list_title.clear();
@@ -3571,11 +4140,9 @@ impl App {
             match &w.step {
                 WizardStep::ProviderType => {
                     if let Some(pt) = &w.provider_type {
-                        if let Some(idx) = w
-                            .list_items
-                            .iter()
-                            .position(|s| s.to_lowercase().starts_with(&pt.to_lowercase()) || s.contains(pt))
-                        {
+                        if let Some(idx) = w.list_items.iter().position(|s| {
+                            s.to_lowercase().starts_with(&pt.to_lowercase()) || s.contains(pt)
+                        }) {
                             w.list_selected = idx;
                         }
                     }
@@ -3649,13 +4216,27 @@ impl App {
                     CredentialRef::Keyring => "auth=keyring".to_string(),
                     CredentialRef::Env { var_name } => format!("auth=env:{}", var_name),
                 };
-                let ka = p.keep_alive.as_deref().map(|k| format!(" keep_alive={}", k)).unwrap_or_default();
-                out.push(format!("  {} (type={}, base={}, {}{})", name, p.r#type, base, auth, ka));
+                let ka = p
+                    .keep_alive
+                    .as_deref()
+                    .map(|k| format!(" keep_alive={}", k))
+                    .unwrap_or_default();
+                out.push(format!(
+                    "  {} (type={}, base={}, {}{})",
+                    name, p.r#type, base, auth, ka
+                ));
             }
             out.push("Model Bindings:".to_string());
             for (name, b) in &cfg.model_bindings {
-                let note = b.note.as_deref().map(|n| format!(" ({})", n)).unwrap_or_default();
-                out.push(format!("  {} → {} via {}{}", name, b.model, b.provider, note));
+                let note = b
+                    .note
+                    .as_deref()
+                    .map(|n| format!(" ({})", n))
+                    .unwrap_or_default();
+                out.push(format!(
+                    "  {} → {} via {}{}",
+                    name, b.model, b.provider, note
+                ));
             }
             out.push("-----------------------------".to_string());
             out
@@ -3732,7 +4313,9 @@ fn run_app_loop<B: ratatui::backend::Backend>(
 
         if event::poll(std::time::Duration::from_millis(80))? {
             match event::read()? {
-                Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
                     if handle_key(app, key)? {
                         break;
                     }
@@ -3862,7 +4445,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             app.should_quit = true;
             return Ok(true);
         }
-        KeyCode::Char('q') if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() => {
+        KeyCode::Char('q')
+            if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() =>
+        {
             // Only quit on 'q' when idle — not while the wizard is open or input contains text,
             // so pasting an API key that contains 'q' doesn't eject the user.
             app.should_quit = true;
@@ -3873,7 +4458,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             return Ok(true);
         }
 
-        KeyCode::Char('s') if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() => {
+        KeyCode::Char('s')
+            if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() =>
+        {
             // Quick local Ollama setup / re-setup. Always available (when Ollama reachable) so users
             // can easily change the models assigned to CODER / R1 / R2 later by re-picking from live tags.
             // Guarded by config_wizard.is_none() (like the 'q' hotkey) so that:
@@ -3926,11 +4513,11 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
                     // Never open the / command palette while the config wizard is active
                     app.showing_command_palette = false;
                 }
-            // Clamp in case previous selection is now past the end of a narrowed list.
-            let n = app.filtered_commands().len();
-            if n > 0 {
-                app.command_selected = app.command_selected.min(n - 1);
-            }
+                // Clamp in case previous selection is now past the end of a narrowed list.
+                let n = app.filtered_commands().len();
+                if n > 0 {
+                    app.command_selected = app.command_selected.min(n - 1);
+                }
             }
             return Ok(false);
         }
@@ -4116,7 +4703,9 @@ fn render_splash(f: &mut Frame, app: &App) {
 
     lines.push(Line::from(Span::styled(
         "        Structure for vibe coding.        ".to_string(),
-        Style::default().fg(Color::White).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(Span::styled(
         "  Talk  →  Plan (R1+R2)  →  Build  →  Ship  ".to_string(),
@@ -4125,7 +4714,10 @@ fn render_splash(f: &mut Frame, app: &App) {
 
     lines.push(Line::from(Span::raw("".to_string())));
 
-    let ver_line = format!("  v{}  —  model-agnostic, cross-provider  ", env!("CARGO_PKG_VERSION"));
+    let ver_line = format!(
+        "  v{}  —  model-agnostic, cross-provider  ",
+        env!("CARGO_PKG_VERSION")
+    );
     lines.push(Line::from(Span::styled(
         ver_line,
         Style::default().fg(Color::DarkGray),
@@ -4133,8 +4725,8 @@ fn render_splash(f: &mut Frame, app: &App) {
 
     if let Some(cfg) = &app.cfg {
         let coder = splash_model_label(cfg, "coder");
-        let r1    = splash_model_label(cfg, "reviewer-a");
-        let r2    = splash_model_label(cfg, "reviewer-b");
+        let r1 = splash_model_label(cfg, "reviewer-a");
+        let r2 = splash_model_label(cfg, "reviewer-b");
         if coder != "—" || r1 != "—" {
             lines.push(Line::from(vec![
                 Span::styled("  CODER ".to_string(), Style::default().fg(ROLE_CODER)),
@@ -4151,7 +4743,11 @@ fn render_splash(f: &mut Frame, app: &App) {
     lines.push(Line::from(Span::raw("".to_string())));
 
     // Pulsing dismiss hint
-    let hint_color = if (app.anim_tick / 6) % 2 == 0 { Color::DarkGray } else { Color::Gray };
+    let hint_color = if (app.anim_tick / 6) % 2 == 0 {
+        Color::DarkGray
+    } else {
+        Color::Gray
+    };
     lines.push(Line::from(Span::styled(
         "           Press any key to continue…           ".to_string(),
         Style::default().fg(hint_color),
@@ -4166,7 +4762,11 @@ fn render_splash(f: &mut Frame, app: &App) {
             break;
         }
         // Center each line independently so short text lines don't inherit the image's left_pad.
-        let line_w = line.spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16;
+        let line_w = line
+            .spans
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum::<usize>() as u16;
         let left_pad = area.width.saturating_sub(line_w) / 2;
         let row_area = Rect {
             x: area.x + left_pad,
@@ -4195,9 +4795,9 @@ fn render_main(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),        // bordered header — 5 info rows
-            Constraint::Min(4),           // chat log
-            Constraint::Length(input_h),  // bordered input — grows with content (capped)
+            Constraint::Length(7),       // bordered header — 5 info rows
+            Constraint::Min(4),          // chat log
+            Constraint::Length(input_h), // bordered input — grows with content (capped)
         ])
         .split(area);
 
@@ -4221,20 +4821,26 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         "UNCONFIGURED — /config or press s".to_string()
     } else {
         match app.stage {
-            WorkflowStage::Talk                => "TALK — build with the coder; it writes plan.md, then /lock-plan".to_string(),
-            WorkflowStage::PlanReviewsComplete => "PLAN REVIEWED (R1+R2) — /accept-plan to approve".to_string(),
-            WorkflowStage::PlanAccepted        => "PLAN ACCEPTED — build phases; /accept-phase then /ship-phase".to_string(),
-            WorkflowStage::Unconfigured        => "UNCONFIGURED".to_string(),
+            WorkflowStage::Talk => {
+                "TALK — build with the coder; it writes plan.md, then /lock-plan".to_string()
+            }
+            WorkflowStage::PlanReviewsComplete => {
+                "PLAN REVIEWED (R1+R2) — /accept-plan to approve".to_string()
+            }
+            WorkflowStage::PlanAccepted => {
+                "PLAN ACCEPTED — build phases; /accept-phase then /ship-phase".to_string()
+            }
+            WorkflowStage::Unconfigured => "UNCONFIGURED".to_string(),
         }
     };
     let stage_color = if app.first_run || app.stage == WorkflowStage::Unconfigured {
         Color::Red
     } else {
         match app.stage {
-            WorkflowStage::Talk                => Color::Yellow,
+            WorkflowStage::Talk => Color::Yellow,
             WorkflowStage::PlanReviewsComplete => Color::Magenta,
-            WorkflowStage::PlanAccepted        => Color::LightGreen,
-            WorkflowStage::Unconfigured        => Color::Red,
+            WorkflowStage::PlanAccepted => Color::LightGreen,
+            WorkflowStage::Unconfigured => Color::Red,
         }
     };
 
@@ -4243,20 +4849,31 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // right where the user is looking, so it's impossible to miss.
     let row0: Vec<Span<'static>> = vec![Span::styled(
         stage_text,
-        Style::default().fg(stage_color).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(stage_color)
+            .add_modifier(Modifier::BOLD),
     )];
 
     // ── Row 1: coder / R1 / R2 model labels ──
     let row1: Vec<Span<'static>> = if let Some(cfg) = &app.cfg {
         let coder = header_model_label(cfg, "coder");
-        let r1    = header_model_label(cfg, "reviewer-a");
-        let r2    = header_model_label(cfg, "reviewer-b");
+        let r1 = header_model_label(cfg, "reviewer-a");
+        let r2 = header_model_label(cfg, "reviewer-b");
         vec![
-            Span::styled(" 🔨 CODER ".to_string(), Style::default().fg(ROLE_CODER).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " 🔨 CODER ".to_string(),
+                Style::default().fg(ROLE_CODER).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(coder, Style::default().fg(Color::White)),
-            Span::styled("   ◈ R1 ".to_string(), Style::default().fg(ROLE_R1).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "   ◈ R1 ".to_string(),
+                Style::default().fg(ROLE_R1).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(r1, Style::default().fg(Color::White)),
-            Span::styled("   ◈ R2 ".to_string(), Style::default().fg(ROLE_R2).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "   ◈ R2 ".to_string(),
+                Style::default().fg(ROLE_R2).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(r2, Style::default().fg(Color::White)),
         ]
     } else {
@@ -4275,7 +4892,9 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let phase_spans: Vec<Span<'static>> = if phases.contains('✓') {
         let mut spans: Vec<Span<'static>> = vec![];
         let base = Style::default().fg(Color::Gray);
-        let green_check = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+        let green_check = Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD);
         let mut rest = phases.as_str();
         while let Some(idx) = rest.find('✓') {
             if idx > 0 {
@@ -4293,7 +4912,12 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
 
     let row2: Vec<Span<'static>> = vec![
-        Span::styled(" ⬡ ".to_string(), Style::default().fg(FORGE_MOLTEN).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " ⬡ ".to_string(),
+            Style::default()
+                .fg(FORGE_MOLTEN)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(proj, Style::default().fg(Color::Rgb(170, 200, 255))),
         Span::styled("  │  ".to_string(), Style::default().fg(Color::DarkGray)),
     ];
@@ -4307,8 +4931,14 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(heat_color(app.forge_heat)))
         .title(Span::styled(
-            format!("Anvil v{}  🔥  forge: {} ", env!("CARGO_PKG_VERSION"), heat_name(app.forge_heat)),
-            Style::default().fg(FORGE_MOLTEN).add_modifier(Modifier::BOLD),
+            format!(
+                "Anvil v{}  🔥  forge: {} ",
+                env!("CARGO_PKG_VERSION"),
+                heat_name(app.forge_heat)
+            ),
+            Style::default()
+                .fg(FORGE_MOLTEN)
+                .add_modifier(Modifier::BOLD),
         ));
 
     let inner = block.inner(area);
@@ -4364,7 +4994,11 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 fn splash_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
     if let Ok((_, binding, _)) = cfg.resolve_role_full(role) {
         let m = &binding.model;
-        if m.len() > 18 { m[..18].to_string() } else { m.clone() }
+        if m.len() > 18 {
+            m[..18].to_string()
+        } else {
+            m.clone()
+        }
     } else {
         "—".to_string()
     }
@@ -4374,7 +5008,11 @@ fn splash_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
 fn header_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
     if let Ok((_, binding, _)) = cfg.resolve_role_full(role) {
         let m = &binding.model;
-        if m.len() > 22 { m[..22].to_string() } else { m.clone() }
+        if m.len() > 22 {
+            m[..22].to_string()
+        } else {
+            m.clone()
+        }
     } else {
         "not configured".to_string()
     }
@@ -4403,7 +5041,11 @@ fn build_phase_progress(app: &App) -> String {
                 let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                 if !digits.is_empty() {
                     let id = format!("P{}", digits);
-                    if seen.insert(id.clone()) { Some(id) } else { None }
+                    if seen.insert(id.clone()) {
+                        Some(id)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -4443,7 +5085,10 @@ fn render_gpu_line(stat: &GpuStat, idx: usize) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = vec![];
 
     // Subtle column separator so the right GPU list is visually distinct from left content.
-    out.push(Span::styled("│ ", Style::default().fg(Color::Rgb(60, 60, 80))));
+    out.push(Span::styled(
+        "│ ",
+        Style::default().fg(Color::Rgb(60, 60, 80)),
+    ));
 
     let short = short_gpu_name(&stat.name);
     out.push(Span::styled(
@@ -4519,21 +5164,22 @@ fn short_gpu_name(name: &str) -> String {
 
 fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let chat_title = match app.stage {
-        WorkflowStage::PlanReviewsComplete =>
-            " Plan R1+R2 done (sequential via /lock-plan) — /accept-plan (↑↓ scroll) ",
-        WorkflowStage::PlanAccepted =>
-            " Plan accepted — /phase-start Px ; coder writes review docs on phase done (↑↓ / cmds) ",
-        _ =>
-            "Chat Log (↑↓ scroll)",
+        WorkflowStage::PlanReviewsComplete => {
+            " Plan R1+R2 done (sequential via /lock-plan) — /accept-plan (↑↓ scroll) "
+        }
+        WorkflowStage::PlanAccepted => {
+            " Plan accepted — /phase-start Px ; coder writes review docs on phase done (↑↓ / cmds) "
+        }
+        _ => "Chat Log (↑↓ scroll)",
     };
 
     let border_color = if app.first_run || app.stage == WorkflowStage::Unconfigured {
         Color::Rgb(120, 80, 0)
     } else {
         match app.stage {
-            WorkflowStage::PlanAccepted        => Color::Rgb(40, 120, 40),
+            WorkflowStage::PlanAccepted => Color::Rgb(40, 120, 40),
             WorkflowStage::PlanReviewsComplete => Color::Rgb(100, 40, 120),
-            _                                  => Color::Rgb(50, 50, 70),
+            _ => Color::Rgb(50, 50, 70),
         }
     };
 
@@ -4545,17 +5191,35 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let status_line: Line = if is_streaming {
         let ember = heat_color(app.forge_heat);
         let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
-        let verb = if app.tool_active { "smithing… " } else { "forging… " };
+        let verb = if app.tool_active {
+            "smithing… "
+        } else {
+            "forging… "
+        };
         Line::from(vec![
-            Span::styled(format!(" {} ", sp), Style::default().fg(ember).add_modifier(Modifier::BOLD)),
-            Span::styled(verb, Style::default().fg(ember).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {} ", sp),
+                Style::default().fg(ember).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                verb,
+                Style::default().fg(ember).add_modifier(Modifier::BOLD),
+            ),
         ])
     } else {
-        Line::from(Span::styled("Ready.", Style::default().fg(FORGE_MOLTEN).add_modifier(Modifier::BOLD)))
+        Line::from(Span::styled(
+            "Ready.",
+            Style::default()
+                .fg(FORGE_MOLTEN)
+                .add_modifier(Modifier::BOLD),
+        ))
     };
 
     let chat_block = Block::default()
-        .title(Span::styled(chat_title, Style::default().fg(Color::DarkGray)))
+        .title(Span::styled(
+            chat_title,
+            Style::default().fg(Color::DarkGray),
+        ))
         .title_bottom(status_line.left_aligned())
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(border_color));
@@ -4573,7 +5237,8 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         // so the newest text appears anchored toward the bottom of the chat area as the
         // conversation (and live stream) grows. This eliminates the "jumps to top on Enter"
         // and gives natural downward scroll/progress.
-        let all_lines: Vec<Line> = app.messages
+        let all_lines: Vec<Line> = app
+            .messages
             .iter()
             .flat_map(|m| App::render_message_as_lines(m))
             .collect();
@@ -4581,8 +5246,8 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         // Scroll must be measured in WRAPPED rows, not logical lines: long messages
         // wrap, and Paragraph::scroll skips wrapped rows. Counting logical lines made
         // follow-bottom under-scroll, hiding the newest (live) line below the viewport.
-        let inner_w = area.width.max(1);                   // full width — no left/right borders
-        let h = area.height.saturating_sub(2).max(1);      // visible rows inside top/bottom borders
+        let inner_w = area.width.max(1); // full width — no left/right borders
+        let h = area.height.saturating_sub(2).max(1); // visible rows inside top/bottom borders
         let para = Paragraph::new(all_lines).wrap(Wrap { trim: false });
         let total_rows = para.line_count(inner_w) as u16;
         let max_scroll = total_rows.saturating_sub(h);
@@ -4605,13 +5270,13 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let (prompt, title) = if let Some(wizard) = &app.config_wizard {
         let p = match &wizard.step {
-            WizardStep::ProviderName  => "provider name> ",
-            WizardStep::BaseUrl       => "base url> ",
-            WizardStep::EnvVarName    => "env var name> ",
-            WizardStep::ApiKeySecret  => "api key (hidden)> ",
-            WizardStep::ModelName     => "model id> ",
-            WizardStep::BindingNote   => "note (optional)> ",
-            _                         => "config> ",
+            WizardStep::ProviderName => "provider name> ",
+            WizardStep::BaseUrl => "base url> ",
+            WizardStep::EnvVarName => "env var name> ",
+            WizardStep::ApiKeySecret => "api key (hidden)> ",
+            WizardStep::ModelName => "model id> ",
+            WizardStep::BindingNote => "note (optional)> ",
+            _ => "config> ",
         };
         let t = if wizard.list_title.is_empty() {
             " Config wizard — type answer + Enter (Esc=back) ".to_string()
@@ -4620,7 +5285,10 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         };
         (p, t)
     } else {
-        ("> ", "Input (Enter=send, Shift+Enter=newline, /=commands, Esc/q=quit)".to_string())
+        (
+            "> ",
+            "Input (Enter=send, Shift+Enter=newline, /=commands, Esc/q=quit)".to_string(),
+        )
     };
 
     let _ = prompt; // prompt is now part of input_full_text(); title is still used below
@@ -4717,7 +5385,7 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     // Scroll in WRAPPED rows so the cursor line (bottom) is always visible once
     // the input grows past the box cap — same wrapped-row math as the chat log.
-    let inner_w = area.width.max(1);                 // full width — no left/right borders
+    let inner_w = area.width.max(1); // full width — no left/right borders
     let inner_h = area.height.saturating_sub(2).max(1);
     let para = Paragraph::new(input_text).wrap(Wrap { trim: false });
     let total_rows = Paragraph::new(format!("{}▌", full_text))
@@ -4773,7 +5441,10 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!(" {} ", cmd),
-                        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         format!("  {}", desc),
@@ -4856,7 +5527,12 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
                     // Green checkmark for already-configured providers. Names left-aligned within this list.
                     ListItem::new(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled("✓ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "✓ ",
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::raw(format!("{}  ", display)),
                     ]))
                 } else if matches!(wizard.step, WizardStep::ProviderType) {
@@ -4932,10 +5608,11 @@ fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) 
                 .border_style(Style::default().fg(Color::Magenta))
                 .title(Span::styled(
                     format!(" {} (Esc to close) ", title),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 )),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(viewer, popup);
 }
-

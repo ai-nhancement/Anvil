@@ -24,7 +24,8 @@ const MAX_GIT: usize = 1600;
 
 /// Build the reality snapshot for `root`. Always returns a delimited block.
 pub fn snapshot(root: &Path) -> String {
-    let mut s = String::from("--- REALITY SNAPSHOT (live; disk + git are the source of truth) ---\n");
+    let mut s =
+        String::from("--- REALITY SNAPSHOT (live; disk + git are the source of truth) ---\n");
 
     s.push_str(&format!("Platform: {}\n", std::env::consts::OS));
     s.push_str(&format!("Stage: {}\n", stage_label(root)));
@@ -34,7 +35,10 @@ pub fn snapshot(root: &Path) -> String {
         s.push_str(&format!("Current phase: {}\n", phase));
     }
     if !state.shipped_phases.is_empty() {
-        s.push_str(&format!("Shipped phases: {}\n", state.shipped_phases.join(", ")));
+        s.push_str(&format!(
+            "Shipped phases: {}\n",
+            state.shipped_phases.join(", ")
+        ));
     }
 
     // Plan excerpt for the current phase (so the agent sees the spec it's building to).

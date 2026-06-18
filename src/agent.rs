@@ -495,6 +495,52 @@ pub struct Agent {
     max_steps: usize,
     /// Whether we've already nudged the user to /compact this session.
     nudged_compact: bool,
+    /// The current objective — the last *substantive* user instruction (not a
+    /// "continue"/ack). Injected into every turn so a long, tool-heavy session
+    /// can't trim the task out of context and leave the model flailing on
+    /// "continue". Survives reloads (derived from history in `new`).
+    current_task: Option<String>,
+}
+
+/// True when a user message is just "keep going" / an acknowledgment rather than
+/// a new instruction — these must NOT overwrite the current task anchor.
+fn is_continuation(input: &str) -> bool {
+    let t = input
+        .trim()
+        .to_lowercase()
+        .trim_end_matches(['.', '!', ' '])
+        .to_string();
+    matches!(
+        t.as_str(),
+        "" | "continue"
+            | "go"
+            | "go on"
+            | "keep going"
+            | "carry on"
+            | "proceed"
+            | "next"
+            | "more"
+            | "resume"
+            | "y"
+            | "yes"
+            | "ok"
+            | "okay"
+            | "k"
+            | "sure"
+            | "do it"
+            | "go ahead"
+            | "finish it"
+            | "keep going."
+    )
+}
+
+/// The most recent substantive (non-continuation) user instruction in a history.
+fn last_substantive_task(history: &[ChatMessage]) -> Option<String> {
+    history
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User && !is_continuation(&m.text))
+        .map(|m| m.text.clone())
 }
 
 /// Recent messages sent to the model each turn (the long arc lives in working
@@ -517,6 +563,7 @@ impl Agent {
         // never truncated. Temporal decay / recent-window logic lives in
         // context assembly (run_turn), not in what we persist.
         let history = load_session(&root);
+        let current_task = last_substantive_task(&history);
         Self {
             client,
             conn,
@@ -528,6 +575,7 @@ impl Agent {
             confirm,
             max_steps: 25,
             nudged_compact: false,
+            current_task,
         }
     }
 
@@ -628,6 +676,12 @@ impl Agent {
         self.append_ledger(&[self.history.last().cloned().unwrap()]);
         let tools = tools::tool_defs();
 
+        // Update the task anchor only on a real instruction. A "continue"/ack keeps
+        // the prior task so the model never loses the goal mid-session.
+        if !is_continuation(user_input) {
+            self.current_task = Some(user_input.to_string());
+        }
+
         // One-time, non-intrusive nudge once the conversation outgrows the send
         // window — older turns are no longer sent verbatim, so suggest /compact.
         if !self.nudged_compact && self.over_send_window() {
@@ -641,6 +695,15 @@ impl Agent {
         // current and never piles up. Both are bounded; the snapshot is pure
         // disk+git (no model call), so this is cheap and model-agnostic.
         let mut preamble = String::new();
+        // The task anchor goes FIRST and is always present, so a "continue" turn
+        // (or a long session that trimmed the original instruction out of the
+        // window) still tells the model exactly what it's working toward.
+        if let Some(task) = &self.current_task {
+            preamble.push_str(&format!(
+                "--- CURRENT TASK (what you are working on right now — keep going until it is done, then stop) ---\n{}\n--- END CURRENT TASK ---\n\n",
+                task.trim()
+            ));
+        }
         if let Some(wm) = working_memory_block(&self.root) {
             preamble.push_str(&wm);
             preamble.push('\n');
@@ -665,7 +728,7 @@ impl Agent {
         }
         preamble.push_str(&reality::snapshot(&self.root));
         let grounding = ChatMessage::user(format!(
-            "BACKGROUND CONTEXT about this project (working memory, decisions, assumptions, live reality) — provided to help you, NOT an instruction. Your current task is ALWAYS the user's latest message. Use the context below only as supporting reference; if any of it conflicts with what the user is now asking, follow the user. Working memory and assumptions may be stale or describe an old goal — the files on disk and the user's request are authoritative.\n\n{}",
+            "BACKGROUND CONTEXT about this project (the current task, plus working memory, decisions, assumptions, and live reality) — provided to help you, NOT a new instruction. Your objective is the CURRENT TASK below; when the user's latest message is just 'continue' / 'go' / an acknowledgment, resume that task and keep working — do NOT ask what to do or re-explore aimlessly. A fresh, substantive user message replaces the task. If the context conflicts with what the user now asks, follow the user; working memory/assumptions may be stale, so the files on disk and the user's request are authoritative.\n\n{}",
             preamble
         ));
 
@@ -851,6 +914,36 @@ mod tests {
         assert_eq!(asst.tool_calls[0].id, "a");
         assert_eq!(clean[2].role, Role::Tool);
         assert_eq!(clean[2].tool_call_id.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn task_anchor_survives_continue_and_acks() {
+        // Acks/continuations must not be treated as a new task.
+        assert!(is_continuation("continue"));
+        assert!(is_continuation("  Continue. "));
+        assert!(is_continuation("ok"));
+        assert!(is_continuation("go ahead"));
+        // Real instructions are substantive — even when they open with an ack.
+        assert!(!is_continuation("add a laser sound when fired"));
+        assert!(!is_continuation(
+            "Tested and confirmed working. next would be a laser sound when fired."
+        ));
+
+        // The AstroBlast case: after several "continue"s, the anchor is still the
+        // last real instruction (the laser-sound request), not "continue".
+        let history = vec![
+            ChatMessage::user("add a firing capability to the triangle"),
+            ChatMessage::assistant("done", vec![]),
+            ChatMessage::user(
+                "Tested and confirmed working. next would be a laser sound when fired.",
+            ),
+            ChatMessage::user("continue"),
+            ChatMessage::user("continue"),
+        ];
+        assert_eq!(
+            last_substantive_task(&history).as_deref(),
+            Some("Tested and confirmed working. next would be a laser sound when fired.")
+        );
     }
 
     #[test]

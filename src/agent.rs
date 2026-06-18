@@ -24,7 +24,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::anvil_dir;
 use crate::config::ProviderConnection;
-use crate::llm::{ChatMessage, LlmClient, Role};
+use crate::llm::{ChatMessage, LlmClient, Role, ToolCall};
 use crate::{reality, tools};
 
 /// Where the immutable append-only conversation ledger lives for this project.
@@ -202,6 +202,61 @@ fn append_working_memory(root: &Path, ts: &str, summary: &str) -> Result<()> {
     Ok(())
 }
 
+/// Repair a message sequence so every `tool` result follows an assistant turn
+/// whose `tool_calls` includes its id, and every assistant `tool_call` has a
+/// matching result. Orphan tool results are dropped; unanswered tool_calls are
+/// stripped (the assistant's text is kept). Guarantees a sequence both the
+/// OpenAI-compatible and Anthropic APIs will accept.
+fn sanitize_history(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(msgs.len());
+    let mut i = 0;
+    while i < msgs.len() {
+        let m = &msgs[i];
+        match m.role {
+            Role::Assistant if !m.tool_calls.is_empty() => {
+                // Collect the contiguous tool results that follow this turn.
+                let mut j = i + 1;
+                let mut result_ids: Vec<String> = Vec::new();
+                while j < msgs.len() && msgs[j].role == Role::Tool {
+                    if let Some(id) = &msgs[j].tool_call_id {
+                        result_ids.push(id.clone());
+                    }
+                    j += 1;
+                }
+                // Keep only tool_calls that actually have a matching result.
+                let kept: Vec<ToolCall> = m
+                    .tool_calls
+                    .iter()
+                    .filter(|tc| result_ids.iter().any(|id| id == &tc.id))
+                    .cloned()
+                    .collect();
+                if kept.is_empty() {
+                    if !m.text.trim().is_empty() {
+                        out.push(ChatMessage::assistant(m.text.clone(), vec![]));
+                    }
+                } else {
+                    out.push(ChatMessage::assistant(m.text.clone(), kept.clone()));
+                    for t in &msgs[i + 1..j] {
+                        if t.tool_call_id.as_ref().map_or(false, |id| kept.iter().any(|tc| &tc.id == id)) {
+                            out.push(t.clone());
+                        }
+                    }
+                }
+                i = j;
+            }
+            Role::Tool => {
+                // Orphan tool result (no preceding assistant tool_calls) — drop.
+                i += 1;
+            }
+            _ => {
+                out.push(m.clone());
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Render the exact prompt sent to the model (system + assembled messages) as a
 /// readable block for the session log, so a turn can be reproduced from the log.
 fn render_prompt_for_log(system: &str, sent: &[ChatMessage]) -> String {
@@ -352,6 +407,11 @@ impl Agent {
             let removed = window.remove(0);
             total = total.saturating_sub(removed.text.len());
         }
+        // Repair tool/tool_call pairing so the request is always valid for the
+        // providers (drops orphan tool results, strips unanswered tool_calls).
+        // This protects against ledgers written before the recording fix, and
+        // against a window edge that splits a tool-call group.
+        let mut window = sanitize_history(&window);
         while window.first().map(|m| m.role != Role::User).unwrap_or(false) {
             window.remove(0);
         }
@@ -490,13 +550,15 @@ impl Agent {
                 )
                 .await?;
 
-            // Record the assistant turn (text + any tool calls) in history.
-            self.history
-                .push(ChatMessage::assistant(turn.text.clone(), turn.tool_calls.clone()));
+            // Record the assistant turn (text + any tool calls) in history AND the
+            // ledger. Crucially this includes the tool-call assistant turn — without
+            // it, reloaded tool results would be orphaned and providers reject them.
+            let assistant_msg = ChatMessage::assistant(turn.text.clone(), turn.tool_calls.clone());
+            self.history.push(assistant_msg.clone());
+            self.append_ledger(&[assistant_msg]);
 
             // No tool calls → the model gave its final answer for this turn.
             if turn.tool_calls.is_empty() {
-                self.append_ledger(&[self.history.last().cloned().unwrap()]);
                 return Ok(());
             }
 
@@ -562,6 +624,40 @@ mod tests {
     fn load_session_empty_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_session(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn sanitize_drops_orphan_tool_results() {
+        // The corruption pattern: a tool result with no preceding assistant tool_call
+        // (the assistant-tool_calls message was missing from the ledger).
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::tool_result("orphan", "stray result"),
+            ChatMessage::assistant("answer", vec![]),
+        ];
+        let clean = sanitize_history(&msgs);
+        assert_eq!(clean.len(), 2);
+        assert_eq!(clean[0].role, Role::User);
+        assert_eq!(clean[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_tool_pair_and_strips_unanswered() {
+        let call_ok = ToolCall { id: "a".into(), name: "read_file".into(), arguments: serde_json::json!({}) };
+        let call_missing = ToolCall { id: "b".into(), name: "grep".into(), arguments: serde_json::json!({}) };
+        let msgs = vec![
+            ChatMessage::user("go"),
+            ChatMessage::assistant("", vec![call_ok, call_missing]),
+            ChatMessage::tool_result("a", "ok"), // only 'a' answered; 'b' has no result
+        ];
+        let clean = sanitize_history(&msgs);
+        // assistant keeps only the answered call; the matching result is kept.
+        let asst = &clean[1];
+        assert_eq!(asst.role, Role::Assistant);
+        assert_eq!(asst.tool_calls.len(), 1);
+        assert_eq!(asst.tool_calls[0].id, "a");
+        assert_eq!(clean[2].role, Role::Tool);
+        assert_eq!(clean[2].tool_call_id.as_deref(), Some("a"));
     }
 
     #[test]

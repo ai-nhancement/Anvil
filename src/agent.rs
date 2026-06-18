@@ -700,12 +700,12 @@ impl Agent {
         }
         let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
         let _ = tx.send(
-            "[note]Session is long — auto-compacting older turns into working memory (.anvil/working-memory.md) so the thread of work isn't lost."
+            "[note]Forge is full — clinkering: folding older turns into working memory (.anvil/working-memory.md) so the thread of work isn't lost."
                 .to_string(),
         );
         if self.compact(&ts).await.is_ok() {
             let _ = tx.send(
-                "[note]Compacted: earlier context is now summarized in working memory and injected every turn."
+                "[note]Clinkered: earlier context is now summarized in working memory and injected every turn."
                     .to_string(),
             );
         }

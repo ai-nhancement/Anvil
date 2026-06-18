@@ -178,7 +178,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/accept-phase [id]", "Phase gate: R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
-    ("/compact", "Summarize the conversation into .anvil/working-memory.md and trim the live history"),
+    ("/compact", "Clinker the forge: fold the conversation into .anvil/working-memory.md and rake out older turns (alias /clinker)"),
     ("/memory", "Inspect the coder's memory + context files (ledger, history window, working memory, decisions, assumptions, token estimate)"),
     ("/clear-memory", "Reset the in-session history + working memory (the append-only ledger is kept)"),
     ("/decisions", "View .anvil/decisions.md — durable preferences + verification commands (injected each turn)"),
@@ -732,6 +732,8 @@ struct App {
     // and tool context persist across turns. Wrapped in Arc<Mutex> so the
     // streaming task can own a handle while the App keeps one.
     agent: Option<Arc<Mutex<Agent>>>,
+    // Abort handle for the in-flight agent turn, so Ctrl+B can interrupt it.
+    agent_task: Option<tokio::task::AbortHandle>,
     // Sends the user's y/n decision to an agent blocked on a run_command confirm.
     confirm_tx: Option<mpsc::UnboundedSender<bool>>,
     // The command awaiting confirmation (Some => render the y/N prompt; /y or /n resolve it).
@@ -841,6 +843,7 @@ impl App {
             cfg: None,
             llm_rx: None,
             agent: None,
+            agent_task: None,
             confirm_tx: None,
             awaiting_confirm: None,
             assistant_open: false,
@@ -1894,21 +1897,21 @@ impl App {
             return;
         }
 
-        if cmd == "/compact" || cmd == "/summarize" {
+        if cmd == "/compact" || cmd == "/clinker" || cmd == "/summarize" {
             if self.gate_flow.is_some() {
                 self.push_system(
-                    "Can't compact during a review gate — finish or let it abort first.",
+                    "Can't clinker during a review gate — finish or let it abort first.",
                 );
                 return;
             }
             let agent = match &self.agent {
                 Some(a) => a.clone(),
                 None => {
-                    self.push_system("Nothing to compact yet — chat with the coder first.");
+                    self.push_system("Nothing to clinker yet — chat with the coder first.");
                     return;
                 }
             };
-            self.push_system("Compacting the conversation into working memory (.anvil/working-memory.md), then trimming the live history…");
+            self.push_system("Clinkering the forge — folding the conversation into working memory (.anvil/working-memory.md), then raking out the older turns…");
             let ts = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
             let (tx, rx) = mpsc::unbounded_channel::<String>();
             self.gate_rx = Some(rx);
@@ -1916,8 +1919,8 @@ impl App {
                 rt.spawn(async move {
                     let mut guard = agent.lock().await;
                     match guard.compact(&ts).await {
-                        Ok(summary) => { let _ = tx.send(format!("[findings]✓ Compacted into .anvil/working-memory.md (injected each turn now); older turns trimmed:\n\n{}", summary)); }
-                        Err(e) => { let _ = tx.send(format!("[gate-error]compact: {}", e)); }
+                        Ok(summary) => { let _ = tx.send(format!("[findings]✓ Clinkered into .anvil/working-memory.md (injected each turn now); older turns raked out:\n\n{}", summary)); }
+                        Err(e) => { let _ = tx.send(format!("[gate-error]clinker: {}", e)); }
                     }
                 });
             }
@@ -2082,7 +2085,7 @@ impl App {
         }
 
         if cmd == "/help" || cmd == "?" {
-            self.push_system("Keys: Enter=chat (streams), Ctrl-X or /q=quit (Esc no longer quits; Ctrl-C is free for copy), Ctrl-S=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
+            self.push_system("Keys: Enter=chat (streams), Ctrl-B=break in / interrupt the coder, Ctrl-X or /q=quit (Esc no longer quits; Ctrl-C is free for copy), Ctrl-S=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
             self.push_system("Editing: ←/→ move cursor (Ctrl+←/→ by word), ↑/↓ move between input lines (or scroll chat at the edges), Home/End start/end of line, Del forward-delete, Shift+Enter newline.");
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
@@ -2715,7 +2718,7 @@ impl App {
 
         let agent = self.agent.as_ref().unwrap().clone();
         let input = text.to_string();
-        handle.spawn(async move {
+        let join = handle.spawn(async move {
             // Hold the agent lock for the whole turn. The UI never locks the
             // agent during a turn (it only drains llm_rx and may send a confirm
             // decision over the separate confirm channel), so this can't deadlock.
@@ -2723,6 +2726,8 @@ impl App {
             let _ = guard.run_turn(&input, tx).await;
             // When the task ends, `tx` drops → the UI sees stream disconnect.
         });
+        // Keep an abort handle so Ctrl+B can pull the work off the anvil mid-turn.
+        self.agent_task = Some(join.abort_handle());
     }
 
     /// Drain any pending token deltas from the current LLM stream and append them
@@ -3341,6 +3346,38 @@ impl App {
                 model
             ));
         }
+    }
+
+    /// Ctrl+B: pull the current work off the anvil — abort the in-flight coder
+    /// turn (and any review gate), deny a pending command confirm, and reset
+    /// transient turn state so the user can redirect.
+    fn interrupt_agent(&mut self) {
+        let running = self.llm_rx.is_some()
+            || self.gate_rx.is_some()
+            || self.awaiting_confirm.is_some()
+            || self.agent_task.is_some();
+        if !running {
+            self.push_system("Nothing running to interrupt.");
+            return;
+        }
+        if let Some(h) = self.agent_task.take() {
+            h.abort();
+        }
+        // Deny a pending run_command confirm so the (aborted) task can't proceed.
+        if self.awaiting_confirm.take().is_some() {
+            if let Some(tx) = &self.confirm_tx {
+                let _ = tx.send(false);
+            }
+        }
+        self.llm_rx = None;
+        self.gate_rx = None;
+        self.tool_active = false;
+        self.gate_flow = None;
+        self.close_assistant_line();
+        self.push_system(
+            "⏹ Pulled the work off the anvil (Ctrl+B). The coder stopped — tell it what to do next.",
+        );
+        self.follow_bottom = true;
     }
 
     /// `/models` — show each role's model with its models.dev facts (context
@@ -5084,6 +5121,12 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             return Ok(false);
         }
 
+        // Ctrl+B: break in — interrupt the coder mid-turn and take back control.
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.interrupt_agent();
+            return Ok(false);
+        }
+
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 // Shift+Enter inserts a newline for multi-line input (the input box is several lines tall and auto-tails).
@@ -5847,17 +5890,17 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     };
 
     // Live forge status pinned to the bottom-left of the chat box border, in the
-    // current heat color — "smithing…" while a tool is actually running (action),
-    // "forging…" while the agent is thinking, "ready" (dim) when idle. This is the
-    // at-a-glance "is it doing something?" signal, right where the user looks.
+    // current heat color — "forging…" while a tool is actually running (hands on
+    // the metal), "smithing…" while the agent is thinking, "ready" (dim) when idle.
+    // This is the at-a-glance "is it doing something?" signal, right where the user looks.
     let is_streaming = app.llm_rx.is_some() || app.gate_rx.is_some();
     let status_line: Line = if is_streaming {
         let ember = heat_color(app.forge_heat);
         let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
         let verb = if app.tool_active {
-            "smithing… "
-        } else {
             "forging… "
+        } else {
+            "smithing… "
         };
         Line::from(vec![
             Span::styled(

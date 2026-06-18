@@ -118,6 +118,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/accept-phase [id]", "Run R1 + R2 reviewers on the current git diff for the phase (the phase gate)"),
     ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
+    ("/compact", "Summarize the conversation into .anvil/working-memory.md and trim the live history"),
     ("/y", "Approve a pending run_command"),
     ("/n", "Deny a pending run_command"),
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
@@ -450,8 +451,9 @@ struct App {
     root: PathBuf,
     messages: Vec<String>,
     input: String,
-    view_offset: usize, // line offset into full transcript (used for manual scroll when !follow_bottom)
+    view_offset: usize, // wrapped-row offset into full transcript (manual scroll when !follow_bottom)
     follow_bottom: bool, // when true, render auto-scrolls so newest content is visible at bottom of chat area
+    last_max_scroll: u16, // cached from the last chat render: max scroll offset (in wrapped rows) that still shows content
     should_quit: bool,
     first_run: bool,
     status_line: String,
@@ -552,6 +554,7 @@ impl App {
             input: String::new(),
             view_offset: 0,
             follow_bottom: true,
+            last_max_scroll: 0,
             should_quit: false,
             first_run: false,
             status_line: String::new(),
@@ -664,6 +667,57 @@ impl App {
             }
             self.assistant_open = false;
         }
+    }
+
+    /// Scroll the chat up by `n` wrapped rows. Leaving follow-bottom starts from
+    /// the current bottom so the view moves up smoothly (not jumping to the top).
+    fn scroll_up(&mut self, n: usize) {
+        if self.follow_bottom {
+            self.follow_bottom = false;
+            self.view_offset = self.last_max_scroll as usize;
+        }
+        self.view_offset = self.view_offset.saturating_sub(n);
+    }
+
+    /// Scroll the chat down by `n` wrapped rows. Reaching the bottom re-engages
+    /// follow-bottom so new output keeps the live line in view automatically.
+    fn scroll_down(&mut self, n: usize) {
+        let max = self.last_max_scroll as usize;
+        let next = self.view_offset.saturating_add(n);
+        if next >= max {
+            self.view_offset = max;
+            self.follow_bottom = true;
+        } else {
+            self.follow_bottom = false;
+            self.view_offset = next;
+        }
+    }
+
+    /// The prompt shown at the start of the input box (varies in the config wizard).
+    fn input_prompt(&self) -> &'static str {
+        if let Some(w) = &self.config_wizard {
+            match &w.step {
+                WizardStep::ProviderName => "provider name> ",
+                WizardStep::BaseUrl => "base url> ",
+                WizardStep::EnvVarName => "env var name> ",
+                WizardStep::ApiKeySecret => "api key (hidden)> ",
+                WizardStep::ModelName => "model id> ",
+                WizardStep::BindingNote => "note (optional)> ",
+                _ => "config> ",
+            }
+        } else {
+            "> "
+        }
+    }
+
+    /// The full text rendered in the input box (prompt + current input, masked if secret).
+    fn input_full_text(&self) -> String {
+        let display = if self.input_secret {
+            "•".repeat(self.input.chars().count())
+        } else {
+            self.input.clone()
+        };
+        format!("{}{}", self.input_prompt(), display)
     }
 
     /// Show a short tail of a restored session so a relaunched TUI isn't blank.
@@ -1224,6 +1278,30 @@ impl App {
             return;
         }
 
+        if cmd == "/compact" || cmd == "/summarize" {
+            let agent = match &self.agent {
+                Some(a) => a.clone(),
+                None => {
+                    self.push_system("Nothing to compact yet — chat with the coder first.");
+                    return;
+                }
+            };
+            self.push_system("Compacting the conversation into working memory (.anvil/working-memory.md), then trimming the live history…");
+            let ts = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+            let (tx, rx) = mpsc::unbounded_channel::<String>();
+            self.gate_rx = Some(rx);
+            if let Some(rt) = &self.runtime {
+                rt.spawn(async move {
+                    let mut guard = agent.lock().await;
+                    match guard.compact(&ts).await {
+                        Ok(summary) => { let _ = tx.send(format!("[findings]✓ Compacted into .anvil/working-memory.md (injected each turn now); older turns trimmed:\n\n{}", summary)); }
+                        Err(e) => { let _ = tx.send(format!("[gate-error]compact: {}", e)); }
+                    }
+                });
+            }
+            return;
+        }
+
         if cmd == "/config" || cmd == "/setup" {
             self.start_config_wizard();
             return;
@@ -1275,6 +1353,7 @@ impl App {
             self.push_system("Keys: Enter=chat (streams), Esc/Ctrl-C/q=quit, s=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
+            self.push_system("Memory: chat persists across restarts. /compact summarizes the conversation into .anvil/working-memory.md (curated, editable) which is injected each turn.");
             self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2 auto) → coder revises → /accept-plan.");
             self.push_system("Phase gate: build the phase with the coder → /accept-phase (R1+R2 on the diff) → fix findings → /ship-phase.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");
@@ -3531,26 +3610,20 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         }
 
         KeyCode::Up => {
-            app.follow_bottom = false;
-            if app.view_offset > 0 {
-                app.view_offset -= 1;
-            }
+            app.scroll_up(1);
             return Ok(false);
         }
         KeyCode::Down => {
-            app.follow_bottom = false;
-            app.view_offset = app.view_offset.saturating_add(1);
+            app.scroll_down(1);
             return Ok(false);
         }
 
         KeyCode::PageUp => {
-            app.follow_bottom = false;
-            app.view_offset = app.view_offset.saturating_sub(10);
+            app.scroll_up(10);
             return Ok(false);
         }
         KeyCode::PageDown => {
-            app.follow_bottom = false;
-            app.view_offset = app.view_offset.saturating_add(10);
+            app.scroll_down(10);
             return Ok(false);
         }
 
@@ -3559,7 +3632,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
     Ok(false)
 }
 
-fn render_ui(f: &mut Frame, app: &App) {
+fn render_ui(f: &mut Frame, app: &mut App) {
     if app.splash_ticks > 0 {
         render_splash(f, app);
         return;
@@ -3727,15 +3800,24 @@ fn render_splash(f: &mut Frame, app: &App) {
 
 // ─── Main UI ─────────────────────────────────────────────────────────────────
 
-fn render_main(f: &mut Frame, app: &App) {
+fn render_main(f: &mut Frame, app: &mut App) {
     let area = f.area();
+
+    // Input box auto-grows with the number of (wrapped) input rows, up to a cap,
+    // so multi-line input stays visible instead of dropping below a fixed box.
+    let input_inner_w = area.width.saturating_sub(2).max(1);
+    let input_rows = Paragraph::new(app.input_full_text())
+        .wrap(Wrap { trim: false })
+        .line_count(input_inner_w)
+        .clamp(1, 8) as u16;
+    let input_h = input_rows + 2; // + top/bottom borders
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7), // bordered header — 5 info rows (taller for GPUs on right + breathing room)
-            Constraint::Min(4),    // chat log
-            Constraint::Length(4), // bordered input — 2 content rows
+            Constraint::Length(7),        // bordered header — 5 info rows
+            Constraint::Min(4),           // chat log
+            Constraint::Length(input_h),  // bordered input — grows with content (capped)
         ])
         .split(area);
 
@@ -4055,7 +4137,7 @@ fn short_gpu_name(name: &str) -> String {
 
 // ─── Chat area ───────────────────────────────────────────────────────────────
 
-fn render_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let chat_title = match app.stage {
         WorkflowStage::PlanReviewsComplete =>
             " Plan R1+R2 done (sequential via /lock-plan) — /accept-plan (↑↓ scroll) ",
@@ -4114,18 +4196,25 @@ fn render_chat(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             .iter()
             .flat_map(|m| App::render_message_as_lines(m))
             .collect();
-        let total = all_lines.len() as u16;
-        let h = area.height.saturating_sub(2).max(1);
+
+        // Scroll must be measured in WRAPPED rows, not logical lines: long messages
+        // wrap, and Paragraph::scroll skips wrapped rows. Counting logical lines made
+        // follow-bottom under-scroll, hiding the newest (live) line below the viewport.
+        let inner_w = area.width.saturating_sub(2).max(1); // minus borders
+        let h = area.height.saturating_sub(2).max(1);      // visible rows inside borders
+        let para = Paragraph::new(all_lines).wrap(Wrap { trim: false });
+        let total_rows = para.line_count(inner_w) as u16;
+        let max_scroll = total_rows.saturating_sub(h);
+
+        // Cache for the key handlers so manual scroll can clamp + re-engage follow.
+        app.last_max_scroll = max_scroll;
+
         let scroll_y = if app.follow_bottom {
-            total.saturating_sub(h)
+            max_scroll
         } else {
-            // Manual scroll position (now line-granular). Clamp to valid range.
-            (app.view_offset as u16).min(total.saturating_sub(1))
+            (app.view_offset as u16).min(max_scroll)
         };
-        Paragraph::new(all_lines)
-            .block(chat_block)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll_y, 0))
+        para.block(chat_block).scroll((scroll_y, 0))
     };
     f.render_widget(chat, area);
 }
@@ -4153,17 +4242,9 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ("> ", " Input (Enter=send, Shift+Enter=newline, /=commands, Esc/q=quit) ".to_string())
     };
 
-    let display = if app.input_secret {
-        "•".repeat(app.input.len())
-    } else {
-        app.input.clone()
-    };
+    let _ = prompt; // prompt is now part of input_full_text(); title is still used below
 
-    let full_text = format!("{}{}", prompt, display);
-    let inner_h = (area.height as usize).saturating_sub(2).max(1);
-    let all_lines: Vec<&str> = full_text.lines().collect();
-    let start = if all_lines.len() > inner_h { all_lines.len() - inner_h } else { 0 };
-    let visible_text = if start > 0 { all_lines[start..].join("\n") } else { full_text };
+    let full_text = app.input_full_text();
 
     let border_color = if app.config_wizard.is_some() {
         Color::Yellow
@@ -4179,7 +4260,15 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Style::default().fg(Color::White)
     };
 
-    let input_widget = Paragraph::new(visible_text)
+    // Scroll in WRAPPED rows so the cursor line (bottom) is always visible once
+    // the input grows past the box cap — same wrapped-row math as the chat log.
+    let inner_w = area.width.saturating_sub(2).max(1);
+    let inner_h = area.height.saturating_sub(2).max(1);
+    let para = Paragraph::new(full_text).wrap(Wrap { trim: false });
+    let total_rows = para.line_count(inner_w) as u16;
+    let scroll_y = total_rows.saturating_sub(inner_h);
+
+    let input_widget = para
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -4187,7 +4276,7 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .title(Span::styled(title, Style::default().fg(Color::DarkGray))),
         )
         .style(text_style)
-        .wrap(Wrap { trim: false });
+        .scroll((scroll_y, 0));
     f.render_widget(input_widget, area);
 }
 

@@ -121,7 +121,7 @@ pub fn git_summary(root: &Path) -> String {
 }
 
 /// Truncate to `max` chars on a char boundary, appending a marker if cut.
-fn cap(s: &str, max: usize) -> String {
+pub(crate) fn cap(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

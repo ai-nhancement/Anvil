@@ -1254,6 +1254,20 @@ impl LlmClient {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             let msg = format!("{} error ({}): {}", conn.r#type, status, text);
+            // Capture the exact request that the provider rejected so 4xx issues
+            // (especially after several tool-call rounds) are diagnosable. The UI
+            // writes this to .anvil/last-llm-error.json. The API key lives in the
+            // Authorization header, not in `body`, so nothing secret is captured.
+            let diag = json!({
+                "url": url,
+                "status": status.as_u16(),
+                "response": text,
+                "request": body,
+            });
+            let _ = token_tx.send(format!(
+                "[error-request]{}",
+                serde_json::to_string_pretty(&diag).unwrap_or_default()
+            ));
             let _ = token_tx.send(format!("\n[llm-error] {}", msg));
             anyhow::bail!("{}", msg);
         }

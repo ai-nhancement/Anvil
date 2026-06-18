@@ -2742,6 +2742,22 @@ impl App {
 
         let mut had_llm_error = false;
         for delta in deltas {
+            // The streaming layer captured the exact request a provider rejected.
+            // Persist it so the failing payload can be inspected/shared (the API
+            // key is in the auth header, not this body, so nothing secret leaks).
+            if let Some(diag) = delta.strip_prefix("[error-request]") {
+                let dir = self.root.join(".anvil");
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join("last-llm-error.json");
+                let _ = std::fs::write(&path, diag);
+                self.push_system(&format!(
+                    "↳ Wrote the failing request + response to {} (share it to diagnose the provider error).",
+                    path.display()
+                ));
+                changed = true;
+                continue;
+            }
+
             // Special handling for errors injected by the streaming layer (so the user
             // sees *why* there was no reply, e.g. Ollama not running, model not pulled,
             // bad endpoint, auth, etc.). We remove the placeholder assistant line we

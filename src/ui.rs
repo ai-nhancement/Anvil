@@ -185,7 +185,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/assumptions", "View .anvil/assumptions.md — the coder's unverified working hypotheses (injected each turn)"),
     ("/scratch", "View .anvil/scratch.md — disposable notes (never injected)"),
     ("/architecture", "View ARCHITECTURE.md — the maintained code map (read on demand)"),
-    ("/y", "Approve a pending run_command"),
+    ("/y", "Approve a pending run_command once (or ↑/↓ + Enter on the prompt)"),
+    ("/a", "Approve + allow all of this program's commands for the session"),
     ("/n", "Deny a pending run_command"),
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
     ("/setup", "Alias for /config — providers, models, keys"),
@@ -606,6 +607,12 @@ struct ConfigWizard {
     ollama_model_list: Vec<String>,
 }
 
+/// The program a shell command invokes — its first whitespace token, lowercased
+/// (e.g. "cargo build" → "cargo"). Used for the session approval allowlist.
+fn program_of(cmd: &str) -> String {
+    cmd.split_whitespace().next().unwrap_or("").to_lowercase()
+}
+
 /// Entry point called from main when no subcommand (or `anvil ui`) is given.
 pub fn run_ui(root: &Path) -> Result<()> {
     // Load any secrets from .anvil/.env into the process env *before* we do anything
@@ -736,8 +743,13 @@ struct App {
     agent_task: Option<tokio::task::AbortHandle>,
     // Sends the user's y/n decision to an agent blocked on a run_command confirm.
     confirm_tx: Option<mpsc::UnboundedSender<bool>>,
-    // The command awaiting confirmation (Some => render the y/N prompt; /y or /n resolve it).
+    // The command awaiting confirmation (Some => render the selectable prompt).
     awaiting_confirm: Option<String>,
+    // Highlighted option in the confirm prompt (0=yes once, 1=yes+remember, 2=no).
+    confirm_selected: usize,
+    // Programs (first command token) the user allowed for the rest of the session,
+    // so the same kind of command isn't re-confirmed over and over.
+    approved_programs: std::collections::HashSet<String>,
     // True while we have an open "[coder] " line accumulating streamed text. A
     // tool/confirm line closes it so the next text delta starts a fresh line.
     assistant_open: bool,
@@ -846,6 +858,8 @@ impl App {
             agent_task: None,
             confirm_tx: None,
             awaiting_confirm: None,
+            confirm_selected: 0,
+            approved_programs: std::collections::HashSet::new(),
             assistant_open: false,
             tool_active: false,
             update_rx: None,
@@ -1617,20 +1631,15 @@ impl App {
         // waiting for the user's y/n. Resolve it (or nudge for an answer) and
         // do not start a new chat turn until it's settled.
         if self.awaiting_confirm.is_some() {
-            if cmd == "/y" || cmd == "/yes" || cmd == "/n" || cmd == "/no" {
-                let allow = cmd == "/y" || cmd == "/yes";
-                self.awaiting_confirm = None;
-                if let Some(tx) = &self.confirm_tx {
-                    let _ = tx.send(allow);
-                }
-                self.push_system(if allow {
-                    "Approved — running the command."
-                } else {
-                    "Declined."
-                });
+            if cmd == "/y" || cmd == "/yes" {
+                self.resolve_confirm(0);
+            } else if cmd == "/a" || cmd == "/always" {
+                self.resolve_confirm(1);
+            } else if cmd == "/n" || cmd == "/no" {
+                self.resolve_confirm(2);
             } else {
                 self.push_system(
-                    "A command is awaiting your decision. Type /y to allow or /n to deny.",
+                    "A command is awaiting your decision — ↑/↓ then Enter, or /y (yes) / /a (yes+remember) / /n (no).",
                 );
             }
             return;
@@ -2861,11 +2870,10 @@ impl App {
                 changed = true;
                 continue;
             }
-            // A run_command needs the user's y/n decision.
+            // A run_command needs the user's decision.
             if let Some(cmd) = delta.strip_prefix("[confirm]") {
                 self.close_assistant_line();
                 let cmd = cmd.trim().to_string();
-                self.awaiting_confirm = Some(cmd.clone());
                 self.log_chat_event(
                     "confirm_request",
                     turn.as_deref(),
@@ -2874,8 +2882,23 @@ impl App {
                     model.as_deref(),
                     &cmd,
                 );
+                // Auto-approve if this program was already allowed this session.
+                let prog = program_of(&cmd);
+                if !prog.is_empty() && self.approved_programs.contains(&prog) {
+                    self.push_system(&format!(
+                        "↳ auto-approved (`{}` allowed this session):  $ {}",
+                        prog, cmd
+                    ));
+                    if let Some(tx) = &self.confirm_tx {
+                        let _ = tx.send(true);
+                    }
+                    changed = true;
+                    continue;
+                }
+                self.awaiting_confirm = Some(cmd.clone());
+                self.confirm_selected = 0;
                 self.push_system(&format!("Run command?  $ {}", cmd));
-                self.push_system("Type /y to allow or /n to deny.");
+                self.push_system("↑/↓ to choose, Enter to confirm (or /y / /n).");
                 changed = true;
                 continue;
             }
@@ -3377,6 +3400,35 @@ impl App {
         self.push_system(
             "⏹ Pulled the work off the anvil (Ctrl+B). The coder stopped — tell it what to do next.",
         );
+        self.follow_bottom = true;
+    }
+
+    /// Resolve the pending run_command confirm. choice: 0=yes once, 1=yes and
+    /// remember this program for the session, 2=no.
+    fn resolve_confirm(&mut self, choice: usize) {
+        let Some(cmd) = self.awaiting_confirm.take() else {
+            return;
+        };
+        let allow = choice <= 1;
+        if choice == 1 {
+            let prog = program_of(&cmd);
+            if !prog.is_empty() {
+                self.approved_programs.insert(prog.clone());
+                self.push_system(&format!(
+                    "✓ Approved — and won't ask again for `{}` commands this session.",
+                    prog
+                ));
+            } else {
+                self.push_system("✓ Approved — running the command.");
+            }
+        } else if allow {
+            self.push_system("✓ Approved — running the command.");
+        } else {
+            self.push_system("✗ Declined.");
+        }
+        if let Some(tx) = &self.confirm_tx {
+            let _ = tx.send(allow);
+        }
         self.follow_bottom = true;
     }
 
@@ -5098,6 +5150,30 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         return Ok(false);
     }
 
+    // Run-command confirm prompt: ↑/↓ move the choice, Enter (on an empty input)
+    // picks it, Esc denies. Typing still flows through (so /y / /a / /n work).
+    if app.awaiting_confirm.is_some() && app.config_wizard.is_none() {
+        match key.code {
+            KeyCode::Up => {
+                app.confirm_selected = app.confirm_selected.saturating_sub(1);
+                return Ok(false);
+            }
+            KeyCode::Down => {
+                app.confirm_selected = (app.confirm_selected + 1).min(2);
+                return Ok(false);
+            }
+            KeyCode::Enter if app.input.trim().is_empty() => {
+                app.resolve_confirm(app.confirm_selected);
+                return Ok(false);
+            }
+            KeyCode::Esc => {
+                app.resolve_confirm(2);
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         // Quit is Ctrl+X (or /q / :q). Ctrl+C is deliberately NOT bound — it's left
         // free so the terminal can use it to copy selected text from the chat. ESC
@@ -5462,6 +5538,7 @@ fn render_main(f: &mut Frame, app: &mut App) {
 
     // Overlays rendered last so they float on top
     render_palette_popup(f, app, chunks[1]);
+    render_confirm_popup(f, app, chunks[1]);
     render_wizard_popup(f, app, chunks[1]);
     render_doc_popup(f, app, chunks[1]);
 }
@@ -6179,6 +6256,70 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
     let mut state = ListState::default();
     state.select(Some(selected));
     f.render_stateful_widget(list, popup, &mut state);
+}
+
+/// The selectable run_command approval prompt (↑/↓ + Enter), floated over chat.
+fn render_confirm_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+    let Some(cmd) = &app.awaiting_confirm else {
+        return;
+    };
+    let prog = program_of(cmd);
+    let options = [
+        "Yes — run it once".to_string(),
+        format!("Yes — and allow all `{}` commands this session", prog),
+        "No — don't run it".to_string(),
+    ];
+    let selected = app.confirm_selected.min(options.len() - 1);
+
+    let h = (options.len() as u16) + 3; // command line + options + borders
+    let popup = ratatui::layout::Rect {
+        x: chat_area.x + 2,
+        y: chat_area.y + chat_area.height.saturating_sub(h),
+        width: chat_area.width.saturating_sub(4),
+        height: h,
+    };
+    f.render_widget(Clear, popup);
+
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled("  $ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            cmd.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    for (i, opt) in options.iter().enumerate() {
+        let marker = if i == selected { " ▶ " } else { "   " };
+        let style = if i == selected {
+            let bg = if i == options.len() - 1 {
+                Color::Rgb(120, 35, 35)
+            } else {
+                Color::Rgb(30, 90, 45)
+            };
+            Style::default()
+                .fg(Color::White)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", marker, opt),
+            style,
+        )));
+    }
+
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Rgb(255, 170, 60)))
+            .title(Span::styled(
+                " Run command? (↑↓ choose · Enter confirm · Esc = No) ",
+                Style::default().fg(Color::DarkGray),
+            )),
+    );
+    f.render_widget(para, popup);
 }
 
 fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {

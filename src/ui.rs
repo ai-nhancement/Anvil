@@ -152,6 +152,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
     ("/unload [model]", "Force immediate unload (keep_alive=0) of one or all loaded models"),
     ("/help", "Show key bindings and available commands"),
+    ("/update", "Update anvil to the latest release (when one is available)"),
     ("/quit", "Exit the TUI"),
     ("/view-plan", "Open the current plan.md in a focused review popup"),
     ("/view-reviews", "Open the REVIEW_* files (plan + current phase) in a focused popup"),
@@ -603,6 +604,11 @@ pub fn run_ui(root: &Path) -> Result<()> {
         }
     }
 
+    // Fire a background check for a newer release. If one exists, the header shows
+    // a pulsing "UPDATE vX.Y.Z — /update to apply" indicator. Non-blocking; silent
+    // on failure; honors ANVIL_NO_UPDATE_CHECK.
+    app.spawn_update_check();
+
     // Setup terminal (raw mode + alternate screen). We must restore on any exit path.
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -688,6 +694,14 @@ struct App {
     // True while a tool is actually executing (between [tool-start] and [tool-end]).
     // Drives the status label: "smithing…" when acting vs "forging…" when thinking.
     tool_active: bool,
+
+    // Self-update. The boot check sends the newer version (if any) over update_rx;
+    // update_available then drives the pulsing header indicator. /update applies it
+    // and streams status lines back over update_apply_rx.
+    update_rx: Option<mpsc::UnboundedReceiver<String>>,
+    update_available: Option<String>,
+    update_apply_rx: Option<mpsc::UnboundedReceiver<String>>,
+    update_in_progress: bool,
 
     // Workflow + plan gate (phase 3)
     stage: WorkflowStage,
@@ -780,6 +794,10 @@ impl App {
             awaiting_confirm: None,
             assistant_open: false,
             tool_active: false,
+            update_rx: None,
+            update_available: None,
+            update_apply_rx: None,
+            update_in_progress: false,
             stage: WorkflowStage::Talk,
             gate_rx: None,
             showing_command_palette: false,
@@ -1779,6 +1797,21 @@ impl App {
             let snap = crate::reality::snapshot(&self.root);
             self.push_system("Reality snapshot (the coder receives this each turn):");
             self.push(snap);
+            self.follow_bottom = true;
+            return;
+        }
+
+        if cmd == "/update" {
+            if self.update_in_progress {
+                self.push_system("An update is already in progress…");
+            } else if self.update_available.is_some() {
+                self.spawn_update_apply();
+            } else {
+                self.push_system(&format!(
+                    "anvil is up to date (v{}), or no newer release has been detected yet.",
+                    crate::update::current_version()
+                ));
+            }
             self.follow_bottom = true;
             return;
         }
@@ -2901,6 +2934,110 @@ impl App {
             changed = true;
         }
         changed
+    }
+
+    /// Kick off a one-shot, non-blocking check for a newer release. Runs the
+    /// (blocking) GitHub call on the runtime's blocking pool so boot stays
+    /// instant; only sends if a newer version exists. Best-effort — any failure
+    /// is silent. Respects ANVIL_NO_UPDATE_CHECK (handled inside the check).
+    fn spawn_update_check(&mut self) {
+        if self.runtime.is_none() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        self.update_rx = Some(rx);
+        let root = self.root.clone();
+        if let Some(rt) = &self.runtime {
+            rt.spawn(async move {
+                if let Ok(Some(v)) = tokio::task::spawn_blocking(move || {
+                    crate::update::check_with_cache_blocking(&root)
+                })
+                .await
+                {
+                    let _ = tx.send(v);
+                }
+            });
+        }
+    }
+
+    /// Drain the boot update-check result + any in-flight /update apply status.
+    fn drain_update_events(&mut self) -> bool {
+        let mut changed = false;
+
+        if let Some(rx) = &mut self.update_rx {
+            if let Ok(v) = rx.try_recv() {
+                self.update_available = Some(v);
+                self.update_rx = None; // one-shot
+                changed = true;
+            }
+        }
+
+        let mut apply_msgs: Vec<String> = Vec::new();
+        let mut apply_done = false;
+        if let Some(rx) = &mut self.update_apply_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => apply_msgs.push(msg),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        apply_done = true;
+                        break;
+                    }
+                }
+            }
+        }
+        for msg in apply_msgs {
+            if let Some(ok) = msg.strip_prefix("[update-ok]") {
+                self.update_available = None; // applied — clear the indicator
+                self.push_system(ok.trim());
+            } else if let Some(err) = msg.strip_prefix("[update-error]") {
+                self.push_system(&format!("Update failed: {}", err.trim()));
+            } else {
+                self.push_system(&msg);
+            }
+            changed = true;
+        }
+        if apply_done {
+            self.update_apply_rx = None;
+            self.update_in_progress = false;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Apply the available update in the background (download + self-replace),
+    /// streaming status back over update_apply_rx.
+    fn spawn_update_apply(&mut self) {
+        if self.update_in_progress || self.runtime.is_none() {
+            return;
+        }
+        self.update_in_progress = true;
+        self.push_system("Updating anvil — downloading the latest release…");
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        self.update_apply_rx = Some(rx);
+        let current = crate::update::current_version().to_string();
+        if let Some(rt) = &self.runtime {
+            rt.spawn(async move {
+                let res = tokio::task::spawn_blocking(crate::update::apply_update_blocking).await;
+                match res {
+                    Ok(Ok(v)) if v == current => {
+                        let _ = tx.send(format!("[update-ok]Already up to date (v{}).", current));
+                    }
+                    Ok(Ok(v)) => {
+                        let _ = tx.send(format!(
+                            "[update-ok]✓ Updated {} → {}. Quit and relaunch anvil to use the new version.",
+                            current, v
+                        ));
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx.send(format!("[update-error]{}", e));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(format!("[update-error]{}", e));
+                    }
+                }
+            });
+        }
     }
 
     /// Returns the subset of SLASH_COMMANDS that match the text after the leading `/`.
@@ -4304,6 +4441,7 @@ fn run_app_loop<B: ratatui::backend::Backend>(
         // Non-blocking so the TUI stays responsive during long planner/reviewer calls.
         let chat = app.drain_llm_stream();
         let gate = app.drain_gate_events();
+        app.drain_update_events();
         app.anim_tick = app.anim_tick.wrapping_add(1);
 
         // Live GPU stats ~every 2 seconds (80ms * 25). Cheap and useful for local models.
@@ -4935,7 +5073,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     // Draw bordered block then overlay rows inside it. The border glows along
     // the forge heat scale (cold steel when idle → amber while forging).
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(heat_color(app.forge_heat)))
         .title(Span::styled(
@@ -4948,6 +5086,36 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .fg(FORGE_MOLTEN)
                 .add_modifier(Modifier::BOLD),
         ));
+
+    // Self-update indicator, pinned to the header's bottom-right border. While an
+    // update is being applied it reads "updating…"; otherwise, when the boot check
+    // found a newer release, it pulses through warm colors to draw the eye.
+    if app.update_in_progress {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                " ⬇ updating… ".to_string(),
+                Style::default()
+                    .fg(FORGE_MOLTEN)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    } else if let Some(v) = &app.update_available {
+        let palette = [
+            Color::Rgb(255, 90, 20),
+            Color::Rgb(255, 140, 40),
+            Color::Rgb(255, 195, 80),
+            Color::Rgb(255, 140, 40),
+        ];
+        let c = palette[(app.anim_tick as usize / 3) % palette.len()];
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" ⬆ UPDATE v{} — /update to apply ", v),
+                Style::default().fg(c).add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    }
 
     let inner = block.inner(area);
     f.render_widget(block, area);

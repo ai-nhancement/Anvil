@@ -24,6 +24,7 @@ mod state;
 mod talk;
 mod tools;
 mod ui;
+mod update;
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;
@@ -99,6 +100,9 @@ enum Commands {
 
     /// Launch the full interactive TUI (this is also the default when no subcommand is provided)
     Ui,
+
+    /// Update anvil to the latest release (downloads a prebuilt binary and replaces this one)
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -183,5 +187,21 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             PhaseCmd::List => phase::run_phase_list(&cli.project),
         },
         Commands::Status => cli::cmd_status(&cli.project),
+        Commands::Update => {
+            let current = update::current_version();
+            println!("Checking for the latest anvil release...");
+            let installed = update::apply_update_blocking()?;
+            if installed == current {
+                println!("{} already up to date (v{}).", "anvil".green(), current);
+            } else {
+                println!(
+                    "{} updated {} → {}. Restart anvil to use the new version.",
+                    "anvil".green(),
+                    current,
+                    installed
+                );
+            }
+            Ok(())
+        }
     }
 }

@@ -46,6 +46,21 @@ cargo install --path .
 Prebuilt binaries for every release live on the [Releases page](https://github.com/ai-nhancement/Anvil/releases).
 </details>
 
+## Updating
+
+Anvil keeps itself current. On launch it does a quiet, cached (once/day) check for a
+newer release; when one exists, the header shows a pulsing **`⬆ UPDATE vX.Y.Z — /update to apply`**.
+To update:
+
+```sh
+anvil update     # from the shell, or
+/update          # from inside the TUI
+```
+
+Either one downloads the right prebuilt binary for your platform and replaces the
+running one in place — no reinstall, no toolchain. Restart anvil to use the new
+version. (Set `ANVIL_NO_UPDATE_CHECK=1` to silence the boot check.)
+
 ## Quick Start
 
 ```sh

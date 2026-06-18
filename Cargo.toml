@@ -1,6 +1,6 @@
 [package]
 name = "anvil"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Structure for vibe coding. Model-agnostic CLI with Talk → Plan (R1+R2) → phased build (R1+R2 per phase). Exactly two cross-provider reviews. No drift."
@@ -35,6 +35,16 @@ keyring = { version = "3", features = ["linux-native"] }
 
 # Image rendering (splash screen half-block technique)
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Self-update: GitHub Releases backend + in-place self-replacement
+# (powers `anvil update`, the TUI /update command, and the boot update check).
+self_update = { version = "0.41", default-features = false, features = [
+    "rustls",
+    "archive-tar",
+    "archive-zip",
+    "compression-flate2",
+    "compression-zip-deflate",
+] }
 
 # Errors and utils
 anyhow = "1"

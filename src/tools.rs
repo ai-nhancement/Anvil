@@ -192,7 +192,12 @@ pub fn result_summary(name: &str, result: &str) -> String {
                 .and_then(|l| l.strip_prefix("exit code:"))
                 .map(|c| c.trim())
                 .unwrap_or("?");
-            format!("ok — exit {}", code)
+            // Don't label a non-zero exit "ok" — it reads like success in the UI.
+            if code == "0" {
+                "exit 0 (ok)".to_string()
+            } else {
+                format!("exit {} (FAILED)", code)
+            }
         }
         // write_file / edit_file already return a descriptive one-liner.
         _ => format!("ok —{}", truncate_one_line(result)),
@@ -612,7 +617,11 @@ mod tests {
         );
         assert_eq!(
             result_summary("run_command", "exit code: 0\nhello"),
-            "ok — exit 0"
+            "exit 0 (ok)"
+        );
+        assert_eq!(
+            result_summary("run_command", "exit code: 101\nerror[E0425]"),
+            "exit 101 (FAILED)"
         );
         assert_eq!(
             result_summary("read_file", "one\ntwo"),

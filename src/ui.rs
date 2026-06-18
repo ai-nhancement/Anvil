@@ -95,6 +95,7 @@ Always use your built-in read_file / grep / list_dir tools to read and search th
 For LARGE files (hundreds of lines, e.g. src/ui.rs), do NOT read the whole file repeatedly — grep for the symbol or text you need to find its line, then read_file with offset+limit to read just that section. Reading whole large files wastes context and makes you lose track. Don't re-run the same read/list/project_state call you already ran this turn.\n\
 \n\
 Work like a real engineer: read what you need before editing (never ask the user to paste files — open them yourself), make the changes with write_file/edit_file, and verify with run_command. Keep prose short; let the tools do the work. Prefer small, precise edits over rewriting whole files. Stay on the user's current request; don't switch to a different task from background context.\n\
+Keep going until the task is actually done — do not stop after a partial step or narrate what you are *about* to do without doing it. ACT with tool calls, don't describe. When a run_command FAILS (non-zero exit), that is not a stopping point: read the error output in the tool result, fix the cause (edit the file, add the dependency, correct the command), and run it again. Repeat until it passes. Only stop and ask the user when you are genuinely blocked (a real decision is needed, or you've tried and cannot resolve it) — never stop merely because a build or test failed.\n\
 \n\
 Anvil adds just enough structure to stop drift, at exactly TWO human gates:\n\
 1. PLAN: discuss the work with the user, then write the plan yourself to plan.md (phases ## P0 — Name, each with a goal, 3–8 actions, a deliverable, and 2–5 acceptance criteria). When the user is happy they run /lock-plan, which drives a SEQUENTIAL review loop: reviewer R1 critiques plan.md → you are asked to apply R1's fixes to plan.md → the user reviews and continues → reviewer R2 critiques the revised plan → you apply R2's fixes → you summarize → the user runs /accept-plan. When Anvil hands you a round's findings, edit plan.md to address the real issues and then STOP (don't summarize until asked).\n\
@@ -1295,7 +1296,7 @@ impl App {
     fn update_status(&mut self) {
         let proj = project_display_name(&self.root);
         let stage = if self.first_run || self.stage == WorkflowStage::Unconfigured {
-            "UNCONFIGURED — press s for quick setup (when Ollama present)"
+            "UNCONFIGURED — Ctrl+S or /config for quick setup (Ollama if present)"
         } else {
             match self.stage {
                 WorkflowStage::Talk => {
@@ -2066,7 +2067,7 @@ impl App {
         }
 
         if cmd == "/help" || cmd == "?" {
-            self.push_system("Keys: Enter=chat (streams), Esc/Ctrl-C/q=quit, s=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
+            self.push_system("Keys: Enter=chat (streams), Ctrl-C or /q=quit (Esc no longer quits), Ctrl-S=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
             self.push_system("Editing: ←/→ move cursor (Ctrl+←/→ by word), ↑/↓ move between input lines (or scroll chat at the edges), Home/End start/end of line, Del forward-delete, Shift+Enter newline.");
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
@@ -2093,7 +2094,7 @@ impl App {
         if self.is_configured() {
             self.start_real_chat(trimmed);
         } else {
-            self.push_system("Not configured yet — the wizard should have opened automatically (or press 's' for instant local Ollama, or /config).");
+            self.push_system("Not configured yet — the wizard should have opened automatically (or Ctrl+S for instant local Ollama, or /config).");
             if trimmed.len() > 3 {
                 self.push("[system] (demo) Understood. After setup your messages will stream from the real model.".to_string());
             }
@@ -2252,7 +2253,7 @@ impl App {
     fn start_quick_ollama_setup(&mut self) {
         if !self.is_ollama_available() {
             self.push_system("Ollama not detected at http://localhost:11434.");
-            self.push_system("Install from https://ollama.com, run `ollama serve` (or launch the app), pull a couple models, then press 's' or choose Quick setup again.");
+            self.push_system("Install from https://ollama.com, run `ollama serve` (or launch the app), pull a couple models, then Ctrl+S or /config to set up again.");
             if self.config_wizard.is_none() {
                 self.start_config_wizard();
             }
@@ -4927,34 +4928,22 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
     }
 
     match key.code {
-        KeyCode::Esc if key.modifiers.is_empty() && app.config_wizard.is_none() => {
-            // Only quit on Esc at the top level. When the config wizard (or other modal) is open,
-            // Esc is handled above to go back one menu or exit the config menu.
-            app.should_quit = true;
-            return Ok(true);
-        }
-        KeyCode::Char('q')
-            if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() =>
-        {
-            // Only quit on 'q' when idle — not while the wizard is open or input contains text,
-            // so pasting an API key that contains 'q' doesn't eject the user.
-            app.should_quit = true;
-            return Ok(true);
-        }
+        // Ctrl+C still force-quits. ESC no longer quits — it only closes popups /
+        // steps back in the wizard (handled above this match). There is no bare
+        // single-letter quit either; use /q (or /quit) so a stray keystroke on an
+        // empty line can never eject you out of the program.
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
             return Ok(true);
         }
 
+        // Ctrl+S: quick local Ollama setup / re-pick of CODER / R1 / R2 models.
+        // (Was a bare 's', which hijacked any sentence starting with 's' on an
+        // empty line.) If a terminal swallows Ctrl+S for flow control, /config or
+        // /setup do exactly the same thing.
         KeyCode::Char('s')
-            if key.modifiers.is_empty() && app.config_wizard.is_none() && app.input.is_empty() =>
+            if key.modifiers.contains(KeyModifiers::CONTROL) && app.config_wizard.is_none() =>
         {
-            // Quick local Ollama setup / re-setup. Always available (when Ollama reachable) so users
-            // can easily change the models assigned to CODER / R1 / R2 later by re-picking from live tags.
-            // Guarded by config_wizard.is_none() (like the 'q' hotkey) so that:
-            // - Pasting or typing an API key that starts with 's' (sk-... for OpenAI, many others) during
-            //   the provider key entry step does not hijack into Quick Ollama.
-            // - Accidental 's' while inside any part of /config or first-time setup is ignored.
             app.showing_command_palette = false;
             app.start_quick_ollama_setup();
             return Ok(false);
@@ -5306,7 +5295,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     // ── Row 0: brand • stage • streaming indicator • context badge ──
     let stage_text = if app.first_run || app.stage == WorkflowStage::Unconfigured {
-        "UNCONFIGURED — /config or press s".to_string()
+        "UNCONFIGURED — /config or Ctrl+S".to_string()
     } else {
         match app.stage {
             WorkflowStage::Talk => {
@@ -5366,7 +5355,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         ]
     } else {
         vec![Span::styled(
-            " Run /config or press s for quick setup (Ollama if available)".to_string(),
+            " Run /config or Ctrl+S for quick setup (Ollama if available)".to_string(),
             Style::default().fg(Color::Yellow),
         )]
     };
@@ -5826,7 +5815,7 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         (
             "> ",
-            "Input (Enter=send, Shift+Enter=newline, /=commands, Esc/q=quit)".to_string(),
+            "Input (Enter=send, Shift+Enter=newline, /=commands, /q=quit)".to_string(),
         )
     };
 

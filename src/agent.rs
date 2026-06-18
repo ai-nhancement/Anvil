@@ -493,8 +493,6 @@ pub struct Agent {
     confirm: ConfirmHandle,
     /// Safety cap on tool-call iterations within a single user turn.
     max_steps: usize,
-    /// Whether we've already nudged the user to /compact this session.
-    nudged_compact: bool,
     /// The current objective — the last *substantive* user instruction (not a
     /// "continue"/ack). Injected into every turn so a long, tool-heavy session
     /// can't trim the task out of context and leave the model flailing on
@@ -574,7 +572,6 @@ impl Agent {
             history,
             confirm,
             max_steps: 25,
-            nudged_compact: false,
             current_task,
         }
     }
@@ -609,7 +606,7 @@ impl Agent {
     /// untouched; a reset marker is written separately so reloads start fresh.
     pub fn clear_history(&mut self) {
         self.history.clear();
-        self.nudged_compact = false;
+        self.current_task = None;
     }
 
     /// Append the given messages to the immutable ledger (append-only JSONL).
@@ -664,6 +661,30 @@ impl Agent {
         Ok(summary)
     }
 
+    /// At the end of a long turn, fold older history into working memory
+    /// automatically (Codex-style auto-compact; see docs/ROADMAP_codex.md #2)
+    /// instead of nudging the user to run /compact. The summary is re-injected
+    /// every turn, so the thread of work is retained rather than silently dropped
+    /// from the send window. Best-effort: a failed summary leaves history intact.
+    /// After a successful compaction the in-memory history is small again, so this
+    /// can't fire on every turn.
+    async fn maybe_auto_compact(&mut self, tx: &UnboundedSender<String>) {
+        if !self.over_send_window() {
+            return;
+        }
+        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+        let _ = tx.send(
+            "[note]Session is long — auto-compacting older turns into working memory (.anvil/working-memory.md) so the thread of work isn't lost."
+                .to_string(),
+        );
+        if self.compact(&ts).await.is_ok() {
+            let _ = tx.send(
+                "[note]Compacted: earlier context is now summarized in working memory and injected every turn."
+                    .to_string(),
+            );
+        }
+    }
+
     #[allow(dead_code)]
     pub fn history(&self) -> &[ChatMessage] {
         &self.history
@@ -680,13 +701,6 @@ impl Agent {
         // the prior task so the model never loses the goal mid-session.
         if !is_continuation(user_input) {
             self.current_task = Some(user_input.to_string());
-        }
-
-        // One-time, non-intrusive nudge once the conversation outgrows the send
-        // window — older turns are no longer sent verbatim, so suggest /compact.
-        if !self.nudged_compact && self.over_send_window() {
-            let _ = tx.send("[note]This session is getting long — older turns are now summarized out of each request rather than sent verbatim. Run /compact to fold them into working memory.".to_string());
-            self.nudged_compact = true;
         }
 
         // Re-ground at the start of every turn: working memory (curated) + a fresh
@@ -781,6 +795,7 @@ impl Agent {
 
             // No tool calls → the model gave its final answer for this turn.
             if turn.tool_calls.is_empty() {
+                self.maybe_auto_compact(&tx).await;
                 return Ok(());
             }
 
@@ -841,6 +856,7 @@ impl Agent {
             self.max_steps
         ));
         // Final assistant message (if any) was already appended when it was produced.
+        self.maybe_auto_compact(&tx).await;
         Ok(())
     }
 }

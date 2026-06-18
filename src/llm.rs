@@ -1513,12 +1513,11 @@ fn build_openai_messages(system: &str, history: &[ChatMessage]) -> Vec<Value> {
             Role::Assistant => {
                 let mut obj = serde_json::Map::new();
                 obj.insert("role".into(), json!("assistant"));
-                // content may be null when the turn is purely tool calls.
-                if m.text.is_empty() {
-                    obj.insert("content".into(), Value::Null);
-                } else {
-                    obj.insert("content".into(), json!(m.text));
-                }
+                // For a purely-tool-call turn the text is empty. OpenAI allows a
+                // null content here, but some OpenAI-compatible servers (notably
+                // Ollama: "invalid message content type: <nil>") reject null and
+                // require a string — so always send a string ("" when empty).
+                obj.insert("content".into(), json!(m.text));
                 if !m.tool_calls.is_empty() {
                     let tcs: Vec<Value> = m
                         .tool_calls
@@ -1747,9 +1746,10 @@ mod tests {
         let msgs = build_openai_messages("SYS", &sample_history());
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "SYS");
-        // assistant turn carries a tool_calls array, content null
+        // assistant turn carries a tool_calls array; content is an empty string
+        // (not null — Ollama's OpenAI-compat layer rejects a null content).
         assert_eq!(msgs[2]["role"], "assistant");
-        assert!(msgs[2]["content"].is_null());
+        assert_eq!(msgs[2]["content"], "");
         let tc = &msgs[2]["tool_calls"][0];
         assert_eq!(tc["id"], "call_1");
         assert_eq!(tc["type"], "function");

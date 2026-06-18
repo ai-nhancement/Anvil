@@ -202,6 +202,31 @@ fn append_working_memory(root: &Path, ts: &str, summary: &str) -> Result<()> {
     Ok(())
 }
 
+/// Render the exact prompt sent to the model (system + assembled messages) as a
+/// readable block for the session log, so a turn can be reproduced from the log.
+fn render_prompt_for_log(system: &str, sent: &[ChatMessage]) -> String {
+    let mut out = String::from("=== SYSTEM PROMPT ===\n");
+    out.push_str(system);
+    out.push_str(&format!("\n\n=== MESSAGES SENT TO MODEL ({}) ===\n", sent.len()));
+    for m in sent {
+        match m.role {
+            Role::User => out.push_str(&format!("\n[USER]\n{}\n", m.text)),
+            Role::Assistant => {
+                out.push_str(&format!("\n[ASSISTANT]\n{}\n", m.text));
+                for tc in &m.tool_calls {
+                    out.push_str(&format!("  (tool call: {} {})\n", tc.name, tc.arguments));
+                }
+            }
+            Role::Tool => out.push_str(&format!(
+                "\n[TOOL RESULT {}]\n{}\n",
+                m.tool_call_id.as_deref().unwrap_or(""),
+                m.text
+            )),
+        }
+    }
+    out
+}
+
 /// Flatten history into a plain transcript for summarization, bounded to the tail
 /// when very long (compaction only needs the recent arc plus what working memory
 /// already holds).
@@ -438,12 +463,19 @@ impl Agent {
             preamble
         ));
 
-        for _ in 0..self.max_steps {
+        for step in 0..self.max_steps {
             // Send only the recent, budgeted window — not the whole ledger.
             let window = self.context_window();
             let mut sent: Vec<ChatMessage> = Vec::with_capacity(window.len() + 1);
             sent.push(grounding.clone());
             sent.extend(window);
+
+            // Log the exact assembled prompt (system + injected grounding + sent
+            // window) once per user turn, so the session log can reproduce what the
+            // model actually saw. Logged, not displayed (see drain_llm_stream).
+            if step == 0 {
+                let _ = tx.send(format!("[prompt-log]{}", render_prompt_for_log(&self.system, &sent)));
+            }
 
             let turn = self
                 .client

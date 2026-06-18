@@ -2049,6 +2049,12 @@ impl App {
                 changed = true;
                 continue;
             }
+            // The exact assembled prompt sent to the model this turn — logged to
+            // the session JSONL for a complete audit trail, never shown in the UI.
+            if let Some(prompt) = delta.strip_prefix("[prompt-log]") {
+                self.log_chat_event("prompt_sent", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), prompt);
+                continue;
+            }
             // A non-intrusive advisory from the agent (e.g. the /compact nudge).
             if let Some(note) = delta.strip_prefix("[note]") {
                 self.close_assistant_line();
@@ -3609,6 +3615,18 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
                 // Shift+Enter inserts a newline for multi-line input (the input box is several lines tall and auto-tails).
                 app.input.push('\n');
                 // Keep palette closed unless this is starting a command (unlikely with shift).
+                if !app.input.starts_with('/') {
+                    app.showing_command_palette = false;
+                }
+                return Ok(false);
+            }
+            // Paste robustness: on terminals that don't deliver bracketed paste,
+            // a pasted newline arrives as a plain Enter. If more terminal input is
+            // already queued, this Enter is part of a paste burst — insert a newline
+            // instead of submitting, so the whole block accumulates and only the
+            // trailing (real) Enter sends it. A lone human Enter has nothing queued.
+            if event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+                app.input.push('\n');
                 if !app.input.starts_with('/') {
                     app.showing_command_palette = false;
                 }

@@ -228,6 +228,23 @@ impl AnvilConfig {
         let provider = self.get_provider(&binding.provider)?;
         Ok((name, binding, provider))
     }
+
+    /// Resolve a reviewer reference that may be **either** a role keyword
+    /// ("reviewer_a"/"reviewer_b") or the bound binding name stored in that role.
+    /// Callers in the review pipeline pass the stored binding name, so we try the
+    /// role keyword first and then fall back to treating the string as a binding
+    /// name directly. Returns (binding_name, binding, provider).
+    pub fn resolve_role_or_binding<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Result<(&'a str, &'a ModelBinding, &'a ProviderConnection), ConfigError> {
+        if let Ok(full) = self.resolve_role_full(key) {
+            return Ok(full);
+        }
+        let binding = self.get_binding(key)?;
+        let provider = self.get_provider(&binding.provider)?;
+        Ok((key, binding, provider))
+    }
 }
 
 /// Path to the per-project local env file that `anvil` can load automatically.
@@ -348,5 +365,60 @@ pub fn set_local_env_var(root: &Path, key: &str, value: &str) {
             perms.set_mode(0o600);
             let _ = std::fs::set_permissions(&path, perms);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mirrors the config the role-assignment wizard produces: the role stores the
+    /// binding name, and a model_binding + provider exist under that name.
+    fn config_with_reviewer_named(binding: &str) -> AnvilConfig {
+        let mut cfg = AnvilConfig::default();
+        cfg.providers.insert(
+            "local-ollama".to_string(),
+            ProviderConnection {
+                r#type: "openai_compat".to_string(),
+                base_url: Some("http://localhost:11434/v1".to_string()),
+                credential: CredentialRef::None,
+                extra: Default::default(),
+                keep_alive: Some("30s".to_string()),
+            },
+        );
+        cfg.model_bindings.insert(
+            binding.to_string(),
+            ModelBinding {
+                provider: "local-ollama".to_string(),
+                model: binding.to_string(),
+                note: None,
+            },
+        );
+        cfg.roles.reviewer_a = Some(binding.to_string());
+        cfg
+    }
+
+    #[test]
+    fn resolve_reviewer_by_binding_name() {
+        // Regression: /lock-plan passes the bound binding name (e.g. the model tag)
+        // rather than the "reviewer_a" keyword. Both must resolve.
+        let cfg = config_with_reviewer_named("qwen2.5-coder:32b");
+
+        // The way the review pipeline actually calls it (binding name):
+        let (name, binding, provider) = cfg
+            .resolve_role_or_binding("qwen2.5-coder:32b")
+            .expect("binding-name form should resolve");
+        assert_eq!(name, "qwen2.5-coder:32b");
+        assert_eq!(binding.model, "qwen2.5-coder:32b");
+        assert_eq!(provider.r#type, "openai_compat");
+
+        // The role-keyword form must keep working too.
+        assert!(cfg.resolve_role_or_binding("reviewer_a").is_ok());
+    }
+
+    #[test]
+    fn resolve_reviewer_unknown_fails() {
+        let cfg = config_with_reviewer_named("qwen2.5-coder:32b");
+        assert!(cfg.resolve_role_or_binding("does-not-exist").is_err());
     }
 }

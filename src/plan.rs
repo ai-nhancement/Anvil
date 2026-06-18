@@ -232,8 +232,10 @@ pub fn run_single_review(
     reviews_dir: &Path,
     artifact: &str,
 ) -> Result<String> {
+    // Accepts either a role keyword ("reviewer_a"/"reviewer_b") or the bound
+    // binding name stored in that role — callers pass the latter.
     let (name, binding, provider) = cfg
-        .resolve_role_full(reviewer_role)
+        .resolve_role_or_binding(reviewer_role)
         .map_err(|_| anyhow!("reviewer role '{}' is not fully configured", reviewer_role))?;
 
     let api_key = client.get_credential(&binding.provider, provider)?;
@@ -292,8 +294,10 @@ pub fn run_critical_review_on_doc(
     artifact: &str,
     extra_context: &str,
 ) -> Result<String> {
+    // Accepts either a role keyword ("reviewer_a"/"reviewer_b") or the bound
+    // binding name stored in that role — callers pass the latter.
     let (name, binding, provider) = cfg
-        .resolve_role_full(reviewer_role)
+        .resolve_role_or_binding(reviewer_role)
         .map_err(|_| anyhow!("reviewer role '{}' is not fully configured", reviewer_role))?;
 
     let api_key = client.get_credential(&binding.provider, provider)?;

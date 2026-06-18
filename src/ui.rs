@@ -173,10 +173,10 @@ struct GateFlow {
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/plan", "How to plan: discuss with the coder, then it writes plan.md itself"),
     ("/lock-plan", "Plan gate: R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
-    ("/accept-plan", "Approve the reviewed plan (records the hash, unlocks phases)"),
+    ("/accept-plan", "Quench the reviewed plan — lock it in (records the hash, unlocks phases)"),
     ("/phase-start <id>", "Set the current phase (e.g. P0). Optional — you can also just tell the coder to start"),
     ("/accept-phase [id]", "Phase gate: R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
-    ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
+    ("/ship-phase [id]", "Quench the phase — ship it after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Clinker the forge: fold the conversation into .anvil/working-memory.md and rake out older turns (alias /clinker)"),
     ("/memory", "Inspect the coder's memory + context files (ledger, history window, working memory, decisions, assumptions, token estimate)"),
@@ -1329,7 +1329,7 @@ impl App {
                     "TALK (build with the coder; /lock-plan when plan.md is ready)"
                 }
                 WorkflowStage::PlanReviewsComplete => {
-                    "PLAN REVIEWED (R1/R2 done) — /accept-plan to approve"
+                    "PLAN REVIEWED (R1/R2 done) — /accept-plan to quench"
                 }
                 WorkflowStage::PlanAccepted => {
                     "PLAN ACCEPTED — build phases; /accept-phase when done"
@@ -1768,7 +1768,7 @@ impl App {
             self.reconcile_stage_from_disk();
             self.update_status();
 
-            self.push_system("✓ Plan accepted (R1 + R2 reviewed, hash recorded). Now just build: tell the coder to start the first phase, or /phase-start P0. When a phase is done, run /accept-phase.");
+            self.push_system("✓ Quenched — plan locked in (R1 + R2 reviewed, hash recorded). Now build: tell the coder to start the first phase, or /phase-start P0. When a phase is done, /accept-phase.");
             return;
         }
 
@@ -1830,7 +1830,7 @@ impl App {
                 return;
             }
             match crate::phase::run_phase_accept(&self.root, &id, None) {
-                Ok(()) => self.push_system(&format!("✓ Phase {} shipped (R1 + R2 reviewed and accepted). Start the next phase with /phase-start, or just tell the coder to continue.", id)),
+                Ok(()) => self.push_system(&format!("✓ Quenched — phase {} shipped (R1 + R2 reviewed and accepted). Start the next phase with /phase-start, or just tell the coder to continue.", id)),
                 Err(e) => self.push_system(&format!("ship phase: {} (run /accept-phase {} first to produce the reviews)", e, id)),
             }
             self.reconcile_stage_from_disk();
@@ -3213,7 +3213,7 @@ impl App {
                     GateArtifact::Phase(id) => format!("/ship-phase {}", id),
                 };
                 self.push_system(&format!(
-                    "✓ Review gate complete (R1 + R2, fixes applied both rounds). When you're happy, {} to proceed.",
+                    "✓ Review gate complete (R1 + R2, fixes applied both rounds) — the work is tempered. When you're happy, {} to quench it.",
                     accept
                 ));
                 self.gate_flow = None; // gate done; the accept/ship command checks files as before
@@ -5557,7 +5557,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 "TALK — build with the coder; it writes plan.md, then /lock-plan".to_string()
             }
             WorkflowStage::PlanReviewsComplete => {
-                "PLAN REVIEWED (R1+R2) — /accept-plan to approve".to_string()
+                "PLAN REVIEWED (R1+R2) — /accept-plan to quench".to_string()
             }
             WorkflowStage::PlanAccepted => {
                 "PLAN ACCEPTED — build phases; /accept-phase then /ship-phase".to_string()

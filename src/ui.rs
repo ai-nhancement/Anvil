@@ -473,6 +473,10 @@ struct App {
     root: PathBuf,
     messages: Vec<String>,
     input: String,
+    // Byte offset of the edit cursor into `input` (always on a char boundary,
+    // always <= input.len()). Drives arrow/Home/End navigation and where typed
+    // chars are inserted. 0 = before the first char, input.len() = at the end.
+    input_cursor: usize,
     view_offset: usize, // wrapped-row offset into full transcript (manual scroll when !follow_bottom)
     follow_bottom: bool, // when true, render auto-scrolls so newest content is visible at bottom of chat area
     last_max_scroll: u16, // cached from the last chat render: max scroll offset (in wrapped rows) that still shows content
@@ -577,6 +581,7 @@ impl App {
             root,
             messages: vec![],
             input: String::new(),
+            input_cursor: 0,
             view_offset: 0,
             follow_bottom: true,
             last_max_scroll: 0,
@@ -747,6 +752,189 @@ impl App {
         } else {
             "> "
         }
+    }
+
+    // ─── Input editing + cursor navigation ──────────────────────────────────
+    // The cursor is a byte offset into `self.input`. Every helper below first
+    // snaps it back onto a valid char boundary (<= len) so direct assignments
+    // to `self.input` elsewhere can never make a later edit panic.
+
+    /// Clamp the cursor to a valid char boundary within the current input.
+    fn clamp_cursor(&mut self) {
+        if self.input_cursor > self.input.len() {
+            self.input_cursor = self.input.len();
+        }
+        while self.input_cursor > 0 && !self.input.is_char_boundary(self.input_cursor) {
+            self.input_cursor -= 1;
+        }
+    }
+
+    /// Replace the whole input buffer and park the cursor at the end (used by
+    /// wizard prefills and similar). Clearing should set the cursor to 0.
+    fn set_input(&mut self, s: String) {
+        self.input = s;
+        self.input_cursor = self.input.len();
+    }
+
+    /// Insert a char at the cursor and advance past it.
+    fn input_insert(&mut self, ch: char) {
+        self.clamp_cursor();
+        self.input.insert(self.input_cursor, ch);
+        self.input_cursor += ch.len_utf8();
+    }
+
+    /// Insert a string at the cursor and advance past it (used for paste).
+    fn input_insert_str(&mut self, s: &str) {
+        self.clamp_cursor();
+        self.input.insert_str(self.input_cursor, s);
+        self.input_cursor += s.len();
+    }
+
+    /// Delete the char before the cursor (Backspace).
+    fn input_backspace(&mut self) {
+        self.clamp_cursor();
+        if self.input_cursor == 0 {
+            return;
+        }
+        // Walk back to the previous char boundary, then remove that char.
+        let mut prev = self.input_cursor - 1;
+        while prev > 0 && !self.input.is_char_boundary(prev) {
+            prev -= 1;
+        }
+        self.input.replace_range(prev..self.input_cursor, "");
+        self.input_cursor = prev;
+    }
+
+    /// Delete the char at the cursor (Delete / forward-delete).
+    fn input_delete_forward(&mut self) {
+        self.clamp_cursor();
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let mut next = self.input_cursor + 1;
+        while next < self.input.len() && !self.input.is_char_boundary(next) {
+            next += 1;
+        }
+        self.input.replace_range(self.input_cursor..next, "");
+    }
+
+    /// Move the cursor one char left.
+    fn input_left(&mut self) {
+        self.clamp_cursor();
+        if self.input_cursor == 0 {
+            return;
+        }
+        let mut prev = self.input_cursor - 1;
+        while prev > 0 && !self.input.is_char_boundary(prev) {
+            prev -= 1;
+        }
+        self.input_cursor = prev;
+    }
+
+    /// Move the cursor one char right.
+    fn input_right(&mut self) {
+        self.clamp_cursor();
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let mut next = self.input_cursor + 1;
+        while next < self.input.len() && !self.input.is_char_boundary(next) {
+            next += 1;
+        }
+        self.input_cursor = next;
+    }
+
+    /// Jump the cursor to the start / end of the current line (Home / End). With
+    /// a single-line input these are start/end of the whole buffer; with
+    /// Shift+Enter multi-line input they stop at the surrounding newlines.
+    fn input_home(&mut self) {
+        self.clamp_cursor();
+        self.input_cursor = self.input[..self.input_cursor]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+    }
+
+    fn input_end(&mut self) {
+        self.clamp_cursor();
+        self.input_cursor = match self.input[self.input_cursor..].find('\n') {
+            Some(off) => self.input_cursor + off,
+            None => self.input.len(),
+        };
+    }
+
+    /// Move the cursor one word left / right (Ctrl+Left / Ctrl+Right). A word is
+    /// a run of non-whitespace; we skip whitespace first, then the word.
+    fn input_word_left(&mut self) {
+        self.clamp_cursor();
+        let bytes = self.input.as_bytes();
+        let mut i = self.input_cursor;
+        while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        self.input_cursor = i;
+    }
+
+    fn input_word_right(&mut self) {
+        self.clamp_cursor();
+        let bytes = self.input.as_bytes();
+        let len = bytes.len();
+        let mut i = self.input_cursor;
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        while i < len && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        self.input_cursor = i;
+    }
+
+    /// Move the cursor up one input line, keeping the same column where possible.
+    /// Returns false when already on the first line so the caller can fall back to
+    /// scrolling the chat (single-line input always returns false → chat scroll).
+    fn input_up(&mut self) -> bool {
+        self.clamp_cursor();
+        let cur = self.input_cursor;
+        let line_start = self.input[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if line_start == 0 {
+            return false; // already on the first line
+        }
+        let col = self.input[line_start..cur].chars().count();
+        let prev_end = line_start - 1; // the '\n' that ends the previous line
+        let prev_start = self.input[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        self.input_cursor = self.input[prev_start..prev_end]
+            .char_indices()
+            .nth(col)
+            .map(|(i, _)| prev_start + i)
+            .unwrap_or(prev_end); // column past line end → clamp to end of that line
+        true
+    }
+
+    /// Move the cursor down one input line, keeping the column. Returns false when
+    /// already on the last line so the caller can fall back to scrolling the chat.
+    fn input_down(&mut self) -> bool {
+        self.clamp_cursor();
+        let cur = self.input_cursor;
+        let line_start = self.input[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let col = self.input[line_start..cur].chars().count();
+        let line_end = match self.input[cur..].find('\n') {
+            Some(off) => cur + off,
+            None => return false, // already on the last line
+        };
+        let next_start = line_end + 1;
+        let next_end = match self.input[next_start..].find('\n') {
+            Some(off) => next_start + off,
+            None => self.input.len(),
+        };
+        self.input_cursor = self.input[next_start..next_end]
+            .char_indices()
+            .nth(col)
+            .map(|(i, _)| next_start + i)
+            .unwrap_or(next_end);
+        true
     }
 
     /// The full text rendered in the input box (prompt + current input, masked if secret).
@@ -1055,6 +1243,7 @@ impl App {
 
     fn handle_input(&mut self) {
         let input = std::mem::take(&mut self.input);
+        self.input_cursor = 0;
         self.showing_command_palette = false;
 
         // Wizard is active — treat Enter as "submit answer to current step".
@@ -1471,6 +1660,7 @@ impl App {
 
         if cmd == "/help" || cmd == "?" {
             self.push_system("Keys: Enter=chat (streams), Esc/Ctrl-C/q=quit, s=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
+            self.push_system("Editing: ←/→ move cursor (Ctrl+←/→ by word), ↑/↓ move between input lines (or scroll chat at the edges), Home/End start/end of line, Del forward-delete, Shift+Enter newline.");
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
             self.push_system("Memory: chat persists across restarts (append-only ledger). /compact summarizes into .anvil/working-memory.md (injected each turn). /memory inspects the layers; /clear-memory resets the session (ledger kept).");
@@ -2475,7 +2665,7 @@ impl App {
                     w.list_title.clear();
                 }
                 // Pre-fill input with the suggested connection name so user can just press Enter
-                self.input = suggested.to_string();
+                self.set_input(suggested.to_string());
 
                 let url_note = if url.is_empty() { "provider default".to_string() } else { url.to_string() };
                 self.push_system(&format!("Provider: {}  (type={}, url={})", selected, ptype, url_note));
@@ -2500,7 +2690,7 @@ impl App {
                     w.list_title.clear();
                 }
                 // Pre-fill the base URL so user can just press Enter to accept
-                self.input = current_url.clone();
+                self.set_input(current_url.clone());
 
                 self.push_system(&format!("Connection name: '{}'.", name));
                 if !current_url.is_empty() {
@@ -3435,6 +3625,8 @@ impl App {
             }
         }
 
+        // Park the edit cursor at the end of whatever the step pre-filled (0 if cleared).
+        self.input_cursor = self.input.len();
         self.push_system("(back)");
     }
 
@@ -3548,7 +3740,7 @@ fn run_app_loop<B: ratatui::backend::Backend>(
                 Event::Paste(text) => {
                     // Paste arrives as a single string — append directly without per-char processing.
                     // This avoids crashes from escape sequences inside bracketed paste streams.
-                    app.input.push_str(&text);
+                    app.input_insert_str(&text);
                     if !app.input.starts_with('/') || app.config_wizard.is_some() {
                         app.showing_command_palette = false;
                     }
@@ -3696,7 +3888,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         KeyCode::Enter => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 // Shift+Enter inserts a newline for multi-line input (the input box is several lines tall and auto-tails).
-                app.input.push('\n');
+                app.input_insert('\n');
                 // Keep palette closed unless this is starting a command (unlikely with shift).
                 if !app.input.starts_with('/') {
                     app.showing_command_palette = false;
@@ -3709,7 +3901,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             // instead of submitting, so the whole block accumulates and only the
             // trailing (real) Enter sends it. A lone human Enter has nothing queued.
             if event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
-                app.input.push('\n');
+                app.input_insert('\n');
                 if !app.input.starts_with('/') {
                     app.showing_command_palette = false;
                 }
@@ -3722,7 +3914,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         KeyCode::Char(ch) => {
             // Normal typing (ignore when modifiers are control etc for simplicity in skeleton)
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.input.push(ch);
+                app.input_insert(ch);
                 // Live palette: open/filter when input starts with / ; close otherwise.
                 if app.input.starts_with('/') {
                     app.showing_command_palette = true;
@@ -3744,7 +3936,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         }
 
         KeyCode::Backspace => {
-            app.input.pop();
+            app.input_backspace();
             if !app.input.starts_with('/') || app.input.is_empty() {
                 app.showing_command_palette = false;
             } else {
@@ -3758,12 +3950,51 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             return Ok(false);
         }
 
+        // Up/Down move between input lines when the input is multi-line; once at
+        // the top/bottom input line (or when single-line) they scroll the chat.
         KeyCode::Up => {
-            app.scroll_up(1);
+            if !app.input_up() {
+                app.scroll_up(1);
+            }
             return Ok(false);
         }
         KeyCode::Down => {
-            app.scroll_down(1);
+            if !app.input_down() {
+                app.scroll_down(1);
+            }
+            return Ok(false);
+        }
+
+        // Cursor navigation within the input. Ctrl jumps by word; plain by char.
+        KeyCode::Left => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.input_word_left();
+            } else {
+                app.input_left();
+            }
+            return Ok(false);
+        }
+        KeyCode::Right => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.input_word_right();
+            } else {
+                app.input_right();
+            }
+            return Ok(false);
+        }
+        KeyCode::Home => {
+            app.input_home();
+            return Ok(false);
+        }
+        KeyCode::End => {
+            app.input_end();
+            return Ok(false);
+        }
+        KeyCode::Delete => {
+            app.input_delete_forward();
+            if !app.input.starts_with('/') || app.input.is_empty() {
+                app.showing_command_palette = false;
+            }
             return Ok(false);
         }
 
@@ -4402,25 +4633,85 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Color::Rgb(60, 80, 100)
     };
 
-    // Forge cursor: a molten bar at the end of the input, pulsing between hot
-    // ember and cooled iron. Keep normal text steady so only the cursor blinks.
+    // Map the edit cursor (a byte offset into app.input) onto a (line, column) in
+    // the displayed text so we can draw it where the user is actually editing —
+    // not just at the end. The prompt prefix shifts every column right by its
+    // char width; secret-mode bullets are 1-per-char so the column still lines up.
+    let cursor_byte = {
+        let mut cb = app.input_cursor.min(app.input.len());
+        while cb > 0 && !app.input.is_char_boundary(cb) {
+            cb -= 1;
+        }
+        cb
+    };
+    let cursor_global_col =
+        app.input_prompt().chars().count() + app.input[..cursor_byte].chars().count();
+
+    let display_lines: Vec<&str> = full_text.split('\n').collect();
+    let (cur_line, cur_col) = {
+        let mut rem = cursor_global_col;
+        let mut found = (display_lines.len().saturating_sub(1), 0usize);
+        for (li, line) in display_lines.iter().enumerate() {
+            let len = line.chars().count();
+            if rem <= len {
+                found = (li, rem);
+                break;
+            }
+            rem -= len + 1; // +1 for the '\n' that split() consumed between lines
+        }
+        found
+    };
+
+    // Forge cursor: a molten highlight that pulses between hot ember and cooled
+    // iron. Mid-text it reverses onto the character under it (block cursor); at
+    // end-of-line it's a trailing bar. Only the cursor blinks; text stays steady.
     let cursor_on = (app.anim_tick / 7) % 2 == 0;
-    let cursor_style = if cursor_on {
+    let white = Style::default().fg(Color::White);
+    let bar_style = if cursor_on {
         Style::default()
             .fg(Color::Rgb(255, 140, 40))
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Rgb(90, 35, 20))
     };
-    let mut input_lines: Vec<Line<'static>> = full_text
-        .split('\n')
-        .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::White))))
+    let block_style = if cursor_on {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Rgb(255, 140, 40))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        white
+    };
+
+    let mut input_lines: Vec<Line<'static>> = display_lines
+        .iter()
+        .enumerate()
+        .map(|(li, line)| {
+            if li != cur_line {
+                return Line::from(Span::styled((*line).to_string(), white));
+            }
+            let chars: Vec<char> = line.chars().collect();
+            if cur_col >= chars.len() {
+                // Cursor past the last char of this line: text then a blinking bar.
+                Line::from(vec![
+                    Span::styled((*line).to_string(), white),
+                    Span::styled("▌", bar_style),
+                ])
+            } else {
+                // Cursor over a char: reverse-highlight just that one cell.
+                let before: String = chars[..cur_col].iter().collect();
+                let at: String = chars[cur_col..cur_col + 1].iter().collect();
+                let after: String = chars[cur_col + 1..].iter().collect();
+                Line::from(vec![
+                    Span::styled(before, white),
+                    Span::styled(at, block_style),
+                    Span::styled(after, white),
+                ])
+            }
+        })
         .collect();
     if input_lines.is_empty() {
-        input_lines.push(Line::from(Span::styled("".to_string(), Style::default().fg(Color::White))));
-    }
-    if let Some(last_line) = input_lines.last_mut() {
-        last_line.spans.push(Span::styled("▌", cursor_style));
+        input_lines.push(Line::from(Span::styled("▌".to_string(), bar_style)));
     }
     let input_text = Text::from(input_lines);
 

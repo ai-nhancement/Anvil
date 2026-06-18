@@ -279,7 +279,7 @@ fn append_working_memory(root: &Path, ts: &str, summary: &str) -> Result<()> {
 /// message or anything after it (the current task + its tool calls/results) — only
 /// older context is trimmed — and it caps any single huge tool result so one big
 /// file read can't dominate the budget or evict the task.
-fn window_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
+fn window_messages(history: &[ChatMessage], char_budget: usize) -> Vec<ChatMessage> {
     const MAX_TOOL_RESULT_IN_WINDOW: usize = 50_000;
     let trunc = |m: &ChatMessage| -> ChatMessage {
         if m.role == Role::Tool && m.text.len() > MAX_TOOL_RESULT_IN_WINDOW {
@@ -308,7 +308,7 @@ fn window_messages(history: &[ChatMessage]) -> Vec<ChatMessage> {
 
     // Fit as much older context (the prefix) as the remaining budget allows.
     let mut prefix: Vec<ChatMessage> = slice[..last_user].iter().map(&trunc).collect();
-    let prefix_budget = CONTEXT_CHAR_BUDGET.saturating_sub(task_chars);
+    let prefix_budget = char_budget.saturating_sub(task_chars);
     let mut prefix_chars: usize = prefix.iter().map(|m| m.text.len()).sum();
     while prefix_chars > prefix_budget && !prefix.is_empty() {
         let removed = prefix.remove(0);
@@ -498,6 +498,9 @@ pub struct Agent {
     /// can't trim the task out of context and leave the model flailing on
     /// "continue". Survives reloads (derived from history in `new`).
     current_task: Option<String>,
+    /// Recent-history char budget, sized from the model's real context window
+    /// (see `char_budget_for`). Drives window trimming + the auto-compact trigger.
+    char_budget: usize,
 }
 
 /// True when a user message is just "keep going" / an acknowledgment rather than
@@ -541,11 +544,32 @@ fn last_substantive_task(history: &[ChatMessage]) -> Option<String> {
         .map(|m| m.text.clone())
 }
 
-/// Recent messages sent to the model each turn (the long arc lives in working
-/// memory + the reality snapshot, not the raw transcript).
-const SEND_WINDOW: usize = 40;
-/// Soft char budget for the sent window (~4 chars/token, so ~60k tokens).
+/// Generous cap on how many recent messages the window even considers (the char
+/// budget does the real trimming). Also the message-count trigger for auto-compact.
+const SEND_WINDOW: usize = 200;
+/// Fallback char budget when the model's context window is unknown (~4 chars/
+/// token → ~60k tokens). Per-model budgets come from `char_budget_for` (#6).
 const CONTEXT_CHAR_BUDGET: usize = 240_000;
+
+/// History char budget derived from the model's real context window (models.dev),
+/// so a small local model gets a small window (no overflow) and a large model a
+/// large one. Falls back to CONTEXT_CHAR_BUDGET when the model is unknown.
+fn char_budget_for(model: &str) -> usize {
+    const CHARS_PER_TOKEN: usize = 4;
+    match crate::modelsdev::load()
+        .as_ref()
+        .and_then(|db| db.lookup(model))
+        .and_then(|i| i.context)
+    {
+        // Spend ~half the context window on recent history; the rest is for the
+        // system prompt, grounding, repo map, and the response. Clamp so tiny
+        // models keep *some* history and huge models don't blow cost/latency.
+        Some(ctx) => {
+            (((ctx as f64) * 0.5).round() as usize).clamp(2_000, 120_000) * CHARS_PER_TOKEN
+        }
+        None => CONTEXT_CHAR_BUDGET,
+    }
+}
 
 impl Agent {
     pub fn new(
@@ -562,6 +586,7 @@ impl Agent {
         // context assembly (run_turn), not in what we persist.
         let history = load_session(&root);
         let current_task = last_substantive_task(&history);
+        let char_budget = char_budget_for(&model);
         Self {
             client,
             conn,
@@ -573,6 +598,7 @@ impl Agent {
             confirm,
             max_steps: 25,
             current_task,
+            char_budget,
         }
     }
 
@@ -581,14 +607,14 @@ impl Agent {
     /// user turn. The full history stays in `self.history` (and on the ledger);
     /// the long arc is carried by working memory + the reality snapshot.
     fn context_window(&self) -> Vec<ChatMessage> {
-        window_messages(&self.history)
+        window_messages(&self.history, self.char_budget)
     }
 
-    /// True once the full history exceeds what we send each turn — the cue to
-    /// suggest `/compact`.
+    /// True once the full history exceeds what we send each turn — the auto-compact
+    /// trigger. Char budget is per-model; the message count is a coarse guard.
     fn over_send_window(&self) -> bool {
         self.history.len() > SEND_WINDOW
-            || self.history.iter().map(|m| m.text.len()).sum::<usize>() > CONTEXT_CHAR_BUDGET
+            || self.history.iter().map(|m| m.text.len()).sum::<usize>() > self.char_budget
     }
 
     /// Number of messages currently held in memory (for the /memory inspector).
@@ -1003,7 +1029,7 @@ mod tests {
             ),
             ChatMessage::tool_result("r", &big),
         ];
-        let window = window_messages(&history);
+        let window = window_messages(&history, CONTEXT_CHAR_BUDGET);
         // The task message must survive (not evicted by the giant read)...
         assert!(
             window

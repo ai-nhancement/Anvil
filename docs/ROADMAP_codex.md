@@ -188,11 +188,12 @@ must know rather than something Anvil detects.
 | 3 | **`apply_patch` edit format** (§3) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — context-located multi-file diffs, validated before write; preferred over `edit_file`. |
 | 4 | **Lightweight repo map** (Aider §7) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — `src/repomap.rs`: regex signatures + task/recency ranking + char budget, injected each turn. (Future: caching, JS arrow-const support.) |
 | 5 | **Model metadata from models.dev** (OpenCode §8) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — `src/modelsdev.rs`: fetch+cache (7d), `lookup`. Startup warns when the coder model lacks tool-calling; `/models` shows ctx/price/tool-call per role. (context window now available for #6.) |
-| 6 | Token-based context budget (§2) | ★★★ | Low-Med | **Next up** — use models.dev `limit.context` (#5) to size the send-window / auto-compact threshold per model, instead of the fixed 40-msg / 240k-char heuristic. |
+| 6 | Token-based context budget (§2) | ★★★ | Low-Med | ✅ **Landed (v0.1.9)** — `char_budget_for` sizes the send-window + auto-compact trigger from the model's real context window (~half of it), clamped; falls back to 240k chars when unknown. Small local models get a small window (no overflow), big models a big one. |
 | 7 | Configurable retry + reviewer-path retry (§4) | ★★ | Low | TODO — polish on what we shipped. |
 | 8 | Soft per-turn token budget surfaced to the model (§5) | ★★ | Low | Optional. |
 
-**Done in v0.1.9 (uncut):** #1 (auto-compact), #2 (prompt wording), #3 (apply_patch),
-plus this week's retries / loop-breaker / key-trim / diagnostics.
-**Next candidates (your pick):** Aider's lightweight repo map (#4, biggest coder-quality lever) or
-models.dev metadata (#5, unlocks token budgeting + model UX). They're independent.
+**Roadmap #1–#6 all landed in v0.1.9 (uncut):** task anchor + continuation wording (#1–#2),
+auto-compact (#1/§2), apply_patch (#3), lightweight repo map (#4), models.dev metadata (#5),
+token-based budgeting (#6) — on top of this week's retries / loop-breaker / key-trim / diagnostics.
+**Remaining are optional polish** (#7 configurable/reviewer-path retry, #8 surface a token budget to
+the model). The big borrows are done.

@@ -251,14 +251,9 @@ pub fn run_single_review(
         round, content
     );
 
-    println!(
-        "  Invoking {} ({} via {}) for {}...",
-        name.cyan(),
-        binding.model,
-        provider.r#type,
-        round
-    );
-
+    // No stdout here: this runs inside the TUI's alternate screen (would corrupt
+    // it). The TUI shows live "R1/R2 reviewing — <model>" status in the header;
+    // the CLI path (run_plan) prints its own round-level progress around this call.
     let findings =
         LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
 
@@ -313,14 +308,7 @@ pub fn run_critical_review_on_doc(
         round, extra_context, doc_content
     );
 
-    println!(
-        "  Invoking {} ({} via {}) critical review on coder-written {} doc...",
-        name.cyan(),
-        binding.model,
-        provider.r#type,
-        round
-    );
-
+    // No stdout (would corrupt the TUI alternate screen).
     let findings =
         LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
 

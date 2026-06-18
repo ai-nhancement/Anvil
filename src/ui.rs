@@ -3178,11 +3178,19 @@ impl App {
                 self.spawn_review(&flow.artifact, Round::R2);
             }
             GateStep::PausedAfterR2 => {
-                let prompt = "Both review rounds are done and you've applied fixes for each. \
-                     Summarize for the user, concisely: what this plan/phase delivers, the key \
-                     issues R1 and R2 raised, and the fixes you applied in each round. End by \
-                     telling them they can approve to proceed."
-                    .to_string();
+                // Give the coder the EXACT proceed command so its summary can't invent
+                // one (it had been saying /lock-plan instead of /accept-plan).
+                let accept = match &flow.artifact {
+                    GateArtifact::Plan => "/accept-plan".to_string(),
+                    GateArtifact::Phase(id) => format!("/ship-phase {}", id),
+                };
+                let prompt = format!(
+                    "Both review rounds are done and you've applied fixes for each. Summarize for \
+                     the user, concisely: what this plan/phase delivers, the key issues R1 and R2 \
+                     raised, and the fixes you applied in each round. If you mention how to proceed, \
+                     the exact command is `{}` — use it verbatim; do not suggest any other command.",
+                    accept
+                );
                 self.push_system("→ Coder summarizing the review rounds…");
                 self.set_gate_step(GateStep::Summarizing);
                 self.follow_bottom = true;
@@ -3243,6 +3251,31 @@ impl App {
             self.gate_flow.as_ref().map(|f| &f.step),
             Some(GateStep::PausedAfterR1) | Some(GateStep::PausedAfterR2)
         )
+    }
+
+    /// One-line status of the active review gate, shown in the header just right
+    /// of the phase progress. None when no gate is running (so it clears when the
+    /// gate finishes). For reviewing steps it names the reviewer's model.
+    fn gate_header_status(&self) -> Option<String> {
+        let flow = self.gate_flow.as_ref()?;
+        let model = |role: &str| -> String {
+            self.cfg
+                .as_ref()
+                .and_then(|c| c.resolve_role_or_binding(role).ok())
+                .map(|(_, b, _)| b.model.clone())
+                .unwrap_or_else(|| "?".to_string())
+        };
+        let s = match flow.step {
+            GateStep::R1Reviewing => format!("R1 reviewing — {}", model("reviewer_a")),
+            GateStep::R1Fixing => "coder applying R1 fixes".to_string(),
+            GateStep::PausedAfterR1 => "R1 done — /continue for R2".to_string(),
+            GateStep::R2Reviewing => format!("R2 reviewing — {}", model("reviewer_b")),
+            GateStep::R2Fixing => "coder applying R2 fixes".to_string(),
+            GateStep::PausedAfterR2 => "R2 done — /continue for summary".to_string(),
+            GateStep::Summarizing => "coder summarizing".to_string(),
+            GateStep::Done => return None,
+        };
+        Some(s)
     }
 
     /// Kick off a one-shot, non-blocking check for a newer release. Runs the
@@ -5379,6 +5412,27 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // Append the (possibly multi-span) phase progress
     let mut row2 = row2;
     row2.extend(phase_spans);
+
+    // Live review-gate status, just right of the phase progress. Clears itself
+    // when the gate finishes (gate_header_status returns None). A forge spinner
+    // animates while a step is active; a ⏸ shows while paused for the user.
+    if let Some(status) = app.gate_header_status() {
+        let style = Style::default()
+            .fg(Color::Rgb(255, 170, 60))
+            .add_modifier(Modifier::BOLD);
+        let glyph = if app.gate_paused() {
+            "⏸ ".to_string()
+        } else {
+            let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
+            format!("{} ", sp)
+        };
+        row2.push(Span::styled(
+            "    ".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        row2.push(Span::styled(glyph, style));
+        row2.push(Span::styled(status, style));
+    }
 
     // Draw bordered block then overlay rows inside it. The border glows along
     // the forge heat scale (cold steel when idle → amber while forging).

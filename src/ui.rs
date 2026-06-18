@@ -97,10 +97,10 @@ For LARGE files (hundreds of lines, e.g. src/ui.rs), do NOT read the whole file 
 Work like a real engineer: read what you need before editing (never ask the user to paste files — open them yourself), make the changes with write_file/edit_file, and verify with run_command. Keep prose short; let the tools do the work. Prefer small, precise edits over rewriting whole files. Stay on the user's current request; don't switch to a different task from background context.\n\
 \n\
 Anvil adds just enough structure to stop drift, at exactly TWO human gates:\n\
-1. PLAN: discuss the work with the user, then write the plan yourself to plan.md (phases ## P0 — Name, each with a goal, 3–8 actions, a deliverable, and 2–5 acceptance criteria). When the user is happy they run /lock-plan — two independent reviewers (different models) critique plan.md and their findings appear in chat; revise plan.md to address them. The user runs /accept-plan to approve.\n\
-2. PHASES: implement the current phase directly (write code + tests, run them). When it's done the user runs /accept-phase — the two reviewers critique the actual diff; fix what they raise. The user re-runs /accept-phase to ship it, then you move to the next phase.\n\
+1. PLAN: discuss the work with the user, then write the plan yourself to plan.md (phases ## P0 — Name, each with a goal, 3–8 actions, a deliverable, and 2–5 acceptance criteria). When the user is happy they run /lock-plan, which drives a SEQUENTIAL review loop: reviewer R1 critiques plan.md → you are asked to apply R1's fixes to plan.md → the user reviews and continues → reviewer R2 critiques the revised plan → you apply R2's fixes → you summarize → the user runs /accept-plan. When Anvil hands you a round's findings, edit plan.md to address the real issues and then STOP (don't summarize until asked).\n\
+2. PHASES: implement the current phase directly (write code + tests, run them). When it's done the user runs /accept-phase, which drives the same sequential loop on the git diff: R1 → you apply fixes to the code → (user continues) → R2 → you apply fixes → you summarize → the user runs /ship-phase. R2 deliberately re-reviews after your R1 fixes, so it can catch bugs those fixes introduced.\n\
 \n\
-Outside those two gates, just collaborate normally — answer questions, explore, refactor, debug — using your tools. Don't fake a gate or claim a review happened; only the /lock-plan and /accept-phase commands trigger the reviewers. Be precise, skeptical of scope creep, and surface risks early.\n\
+Outside those two gates, just collaborate normally — answer questions, explore, refactor, debug — using your tools. Don't fake a gate or claim a review happened; only the /lock-plan and /accept-phase commands trigger the reviewers. When asked to address a round's findings, fix the real ones and skip spurious ones — don't expand scope. Be precise, skeptical of scope creep, and surface risks early.\n\
 \n\
 PROJECT CONTEXT FILES you maintain with your write_file/edit_file tools (all plain, user-visible files — no hidden state):\n\
 - .anvil/decisions.md — durable preferences/conventions and verification commands that actually worked (e.g. how to test/lint/build). Append here when the user states a standing preference or you confirm a project convention.\n\
@@ -122,19 +122,56 @@ When implementing a phase, follow this checklist: read the relevant files first 
 enum WorkflowStage {
     #[default]
     Talk,
-    PlanReviewsComplete, // R1 + R2 review files present for the plan (after the sequential /lock + /approve-r1 gates)
+    PlanReviewsComplete, // R1 + R2 review files present for the plan (after the sequential /lock-plan gate)
     PlanAccepted,        // hash recorded after user approved the final post-R1/R2 plan
     Unconfigured,
+}
+
+/// What a review gate is critiquing: the plan, or a phase's git diff.
+#[derive(Clone)]
+enum GateArtifact {
+    Plan,
+    Phase(String), // phase id, e.g. "P0"
+}
+
+/// Which review round.
+#[derive(Clone, Copy, PartialEq)]
+enum Round {
+    R1,
+    R2,
+}
+
+/// The sequential review gate is a small state machine driven by async
+/// completions: a reviewer finishing (gate_rx disconnect) advances a *Reviewing
+/// step; a coder fix/summary turn finishing (llm_rx disconnect) advances a
+/// *Fixing / Summarizing step. The two Paused steps wait for the user (/continue
+/// or Enter on an empty line) so they can inspect each round before proceeding.
+#[derive(Clone, PartialEq)]
+enum GateStep {
+    R1Reviewing,
+    R1Fixing,
+    PausedAfterR1,
+    R2Reviewing,
+    R2Fixing,
+    PausedAfterR2,
+    Summarizing,
+    Done,
+}
+
+#[derive(Clone)]
+struct GateFlow {
+    artifact: GateArtifact,
+    step: GateStep,
 }
 
 /// Slash commands shown in the interactive palette (triggered by typing `/`).
 /// Descriptions appear in the popup to help users discover the flow.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/plan", "How to plan: discuss with the coder, then it writes plan.md itself"),
-    ("/lock-plan", "Run R1 + R2 reviewers on plan.md and show their findings (the plan gate)"),
+    ("/lock-plan", "Plan gate: R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/accept-plan", "Approve the reviewed plan (records the hash, unlocks phases)"),
     ("/phase-start <id>", "Set the current phase (e.g. P0). Optional — you can also just tell the coder to start"),
-    ("/accept-phase [id]", "Run R1 + R2 reviewers on the current git diff for the phase (the phase gate)"),
+    ("/accept-phase [id]", "Phase gate: R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/ship-phase [id]", "Mark the phase shipped after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Summarize the conversation into .anvil/working-memory.md and trim the live history"),
@@ -152,6 +189,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
     ("/unload [model]", "Force immediate unload (keep_alive=0) of one or all loaded models"),
     ("/help", "Show key bindings and available commands"),
+    ("/continue", "Resume a paused review gate (run the next round / summary)"),
     ("/update", "Update anvil to the latest release (when one is available)"),
     ("/quit", "Exit the TUI"),
     ("/view-plan", "Open the current plan.md in a focused review popup"),
@@ -706,6 +744,9 @@ struct App {
     // Workflow + plan gate (phase 3)
     stage: WorkflowStage,
     gate_rx: Option<mpsc::UnboundedReceiver<String>>, // signals from spawn_blocking plan gate
+    // Active sequential review gate (R1 → fix → pause → R2 → fix → pause → summary).
+    // None when no gate is running.
+    gate_flow: Option<GateFlow>,
 
     // Slash command palette (opened by pressing / ; supports arrows + live filter)
     showing_command_palette: bool,
@@ -800,6 +841,7 @@ impl App {
             update_in_progress: false,
             stage: WorkflowStage::Talk,
             gate_rx: None,
+            gate_flow: None,
             showing_command_palette: false,
             command_selected: 0,
             config_wizard: None,
@@ -1519,6 +1561,20 @@ impl App {
 
         let trimmed = input.trim();
         if trimmed.is_empty() {
+            // An empty Enter resumes a paused review gate.
+            if self.gate_paused() {
+                self.continue_gate();
+            }
+            return;
+        }
+
+        // While a review gate is actively running a step, hold back plain chat so
+        // it doesn't collide with the gate's own coder turns. Slash commands (and
+        // the y/n confirm) still work.
+        if self.gate_busy() && !trimmed.starts_with('/') {
+            self.push_system(
+                "A review gate is running — please wait (it will pause for you to review).",
+            );
             return;
         }
 
@@ -1642,11 +1698,17 @@ impl App {
             }
             self.push_system("=== PLANNING ===");
             self.push_system("Just talk with the coder about what you want to build. When the shape is clear, ask it to write the plan to plan.md (it writes the file itself — phases with id/name/goal/actions/criteria).");
-            self.push_system("When you're happy with plan.md, run /lock-plan — two independent reviewers critique it and their findings appear here. Have the coder revise plan.md, then /accept-plan to approve and start building.");
+            self.push_system("When you're happy with plan.md, run /lock-plan. It runs R1, the coder applies fixes, you review and /continue, then R2, the coder applies fixes, you /continue, and the coder summarizes — then /accept-plan to approve and start building.");
             return;
         }
 
         if cmd == "/lock-plan" {
+            if self.gate_flow.is_some() {
+                self.push_system(
+                    "A review gate is already running. Let it finish (or /continue when paused).",
+                );
+                return;
+            }
             if !self.is_configured() {
                 self.push_system("Reviewers not configured. Use /config.");
                 return;
@@ -1656,27 +1718,7 @@ impl App {
                 self.push_system("plan.md not found. Ask the coder to write the plan to plan.md first (it can create the file itself), then /lock-plan.");
                 return;
             }
-            self.push_system("Locking plan. Running R1 (reviewer-a) then R2 (reviewer-b) on plan.md — findings appear below as each completes.");
-            let (tx, rx) = mpsc::unbounded_channel::<String>();
-            self.gate_rx = Some(rx);
-            if let Some(rt) = &self.runtime {
-                let root = self.root.clone();
-                rt.spawn(async move {
-                    let root_r1 = root.clone();
-                    match tokio::task::spawn_blocking(move || crate::plan::run_plan_r1(&root_r1)).await {
-                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R1 (reviewer-a) on plan.md — REVIEW_plan_R1.md written:\n{}", f)); }
-                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
-                        Err(e) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
-                    }
-                    let root_r2 = root.clone();
-                    match tokio::task::spawn_blocking(move || crate::plan::run_plan_r2(&root_r2)).await {
-                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R2 (reviewer-b) on plan.md — REVIEW_plan_R2.md written:\n{}", f)); }
-                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
-                        Err(e) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
-                    }
-                    let _ = tx.send("Both reviews complete. Address the findings with the coder (it can edit plan.md directly), then /accept-plan to approve.".to_string());
-                });
-            }
+            self.start_gate_flow(GateArtifact::Plan);
             return;
         }
 
@@ -1724,6 +1766,12 @@ impl App {
         }
 
         if cmd.starts_with("/accept-phase") {
+            if self.gate_flow.is_some() {
+                self.push_system(
+                    "A review gate is already running. Let it finish (or /continue when paused).",
+                );
+                return;
+            }
             if !self.is_configured() {
                 self.push_system("Reviewers not configured. Use /config.");
                 return;
@@ -1741,31 +1789,7 @@ impl App {
                 );
                 return;
             }
-            self.push_system(&format!(
-                "Reviewing phase {} — R1 + R2 on the current git diff. Findings appear below.",
-                id
-            ));
-            let (tx, rx) = mpsc::unbounded_channel::<String>();
-            self.gate_rx = Some(rx);
-            if let Some(rt) = &self.runtime {
-                let root = self.root.clone();
-                let id_clone = id.clone();
-                rt.spawn(async move {
-                    let (root1, id1) = (root.clone(), id_clone.clone());
-                    match tokio::task::spawn_blocking(move || crate::phase::run_phase_r1_diff(&root1, &id1)).await {
-                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R1 (reviewer-a) on the {} diff — REVIEW_{}_R1.md written:\n{}", id_clone, id_clone, f)); }
-                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
-                        Err(e) => { let _ = tx.send(format!("[gate-error]R1: {}", e)); }
-                    }
-                    let (root2, id2) = (root.clone(), id_clone.clone());
-                    match tokio::task::spawn_blocking(move || crate::phase::run_phase_r2_diff(&root2, &id2)).await {
-                        Ok(Ok(f)) => { let _ = tx.send(format!("[findings]✓ R2 (reviewer-b) on the {} diff — REVIEW_{}_R2.md written:\n{}", id_clone, id_clone, f)); }
-                        Ok(Err(e)) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
-                        Err(e) => { let _ = tx.send(format!("[gate-error]R2: {}", e)); }
-                    }
-                    let _ = tx.send(format!("Both reviews complete. Fix what they raised with the coder, then /ship-phase {} to mark it done (or /accept-phase {} again to re-review).", id_clone, id_clone));
-                });
-            }
+            self.start_gate_flow(GateArtifact::Phase(id));
             return;
         }
 
@@ -1789,6 +1813,15 @@ impl App {
             }
             self.reconcile_stage_from_disk();
             self.update_status();
+            return;
+        }
+
+        if cmd == "/continue" {
+            if self.gate_flow.is_some() {
+                self.continue_gate();
+            } else {
+                self.push_system("Nothing to continue — no review gate is paused.");
+            }
             return;
         }
 
@@ -1846,6 +1879,12 @@ impl App {
         }
 
         if cmd == "/compact" || cmd == "/summarize" {
+            if self.gate_flow.is_some() {
+                self.push_system(
+                    "Can't compact during a review gate — finish or let it abort first.",
+                );
+                return;
+            }
             let agent = match &self.agent {
                 Some(a) => a.clone(),
                 None => {
@@ -2033,8 +2072,8 @@ impl App {
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
             self.push_system("Memory: chat persists across restarts (append-only ledger). /compact summarizes into .anvil/working-memory.md (injected each turn). /memory inspects the layers; /clear-memory resets the session (ledger kept).");
             self.push_system("Context files (coder-maintained, visible): /decisions (prefs + verify commands), /assumptions (unverified hypotheses) — both injected each turn · /scratch (disposable, never injected) · /architecture (code map, on demand).");
-            self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2 auto) → coder revises → /accept-plan.");
-            self.push_system("Phase gate: build the phase with the coder → /accept-phase (R1+R2 on the diff) → fix findings → /ship-phase.");
+            self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → coder fixes → (pause) /continue → R2 → coder fixes → (pause) /continue → summary → /accept-plan.");
+            self.push_system("Phase gate: build with the coder → /accept-phase → same R1 → fix → R2 → fix → summary loop on the git diff → /ship-phase. Each pause: /continue or Enter on an empty line.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");
             return;
         }
@@ -2700,6 +2739,7 @@ impl App {
         let binding = self.current_binding.clone();
         let model = self.current_model.clone();
 
+        let mut had_llm_error = false;
         for delta in deltas {
             // Special handling for errors injected by the streaming layer (so the user
             // sees *why* there was no reply, e.g. Ollama not running, model not pulled,
@@ -2728,6 +2768,7 @@ impl App {
                     &clean,
                 );
                 self.push_system(&format!("model error: {}", clean));
+                had_llm_error = true;
                 changed = true;
                 continue;
             }
@@ -2853,6 +2894,16 @@ impl App {
             self.current_role = None;
             self.current_binding = None;
             self.current_model = None;
+
+            // If this turn was a gate-driven coder fix/summary, advance the gate
+            // (or abort if the model errored mid-fix).
+            if self.gate_busy() {
+                if had_llm_error {
+                    self.abort_gate("the coder turn failed");
+                } else {
+                    self.gate_after_coder();
+                }
+            }
             changed = true;
         }
 
@@ -2860,8 +2911,8 @@ impl App {
     }
 
     /// Inspect on-disk artifacts (plan.md + REVIEW_plan_R*.md at root + accepted hash in state) and derive
-    /// the high-level WorkflowStage. The fine-grained sequential gates (/lock-plan, /approve-r1, /critical-r1 etc)
-    /// and per-phase coder-doc + critical passes are enforced by command handlers + chat + file presence.
+    /// the high-level WorkflowStage. The fine-grained sequential gate (/lock-plan and /accept-phase, each
+    /// running R1 → coder fix → R2 → coder fix → summary) is enforced by command handlers + chat + file presence.
     /// Source of truth remains the REVIEW_* and plan.md files at repo root.
     fn reconcile_stage_from_disk(&mut self) {
         if !self.is_configured() {
@@ -2911,6 +2962,7 @@ impl App {
             }
         }
 
+        let mut had_error = false;
         for msg in msgs {
             if let Some(findings) = msg.strip_prefix("[findings]") {
                 // "[findings]<header>\n<body>" — header on its own system line, body verbatim.
@@ -2921,6 +2973,7 @@ impl App {
                 }
             } else if let Some(err) = msg.strip_prefix("[gate-error]") {
                 self.push_system(&format!("Reviewer run failed: {}", err.trim()));
+                had_error = true;
             } else {
                 self.push_system(&msg);
             }
@@ -2929,11 +2982,267 @@ impl App {
 
         if finished {
             self.gate_rx = None;
-            self.reconcile_stage_from_disk();
-            self.update_status();
+            // If a sequential gate is waiting on this reviewer, advance it (or abort
+            // on error). Otherwise just reconcile the stage from disk as before.
+            let reviewing = matches!(
+                self.gate_flow.as_ref().map(|f| f.step.clone()),
+                Some(GateStep::R1Reviewing) | Some(GateStep::R2Reviewing)
+            );
+            if reviewing {
+                if had_error {
+                    self.abort_gate("the reviewer run failed");
+                } else {
+                    self.gate_after_review();
+                }
+            } else {
+                self.reconcile_stage_from_disk();
+                self.update_status();
+            }
             changed = true;
         }
         changed
+    }
+
+    // ─── Sequential review gate (R1 → fix → pause → R2 → fix → pause → summary) ───
+
+    /// Short human label for the artifact under review.
+    fn gate_artifact_label(artifact: &GateArtifact) -> String {
+        match artifact {
+            GateArtifact::Plan => "plan.md".to_string(),
+            GateArtifact::Phase(id) => format!("phase {} diff", id),
+        }
+    }
+
+    /// Path to the review file the reviewer just wrote, for a given round.
+    fn gate_review_path(&self, artifact: &GateArtifact, round: Round) -> PathBuf {
+        let r = if round == Round::R1 { "R1" } else { "R2" };
+        let stem = match artifact {
+            GateArtifact::Plan => "plan".to_string(),
+            GateArtifact::Phase(id) => id.clone(),
+        };
+        reviews_dir(&self.root).join(format!("REVIEW_{}_{}.md", stem, r))
+    }
+
+    /// Begin a sequential review gate: kick off R1.
+    fn start_gate_flow(&mut self, artifact: GateArtifact) {
+        let label = Self::gate_artifact_label(&artifact);
+        self.gate_flow = Some(GateFlow {
+            artifact: artifact.clone(),
+            step: GateStep::R1Reviewing,
+        });
+        self.push_system(&format!(
+            "── Review gate started on {} ──  R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary.",
+            label
+        ));
+        self.push_system("Running R1 (reviewer-a)…");
+        self.follow_bottom = true;
+        self.spawn_review(&artifact, Round::R1);
+    }
+
+    /// Spawn a single review round (writes REVIEW_*.md, streams findings over gate_rx).
+    fn spawn_review(&mut self, artifact: &GateArtifact, round: Round) {
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        self.gate_rx = Some(rx);
+        let round_lbl = if round == Round::R1 { "R1" } else { "R2" };
+        let reviewer = if round == Round::R1 {
+            "reviewer-a"
+        } else {
+            "reviewer-b"
+        };
+        let label = Self::gate_artifact_label(artifact);
+        let artifact = artifact.clone();
+        let root = self.root.clone();
+        if let Some(rt) = &self.runtime {
+            rt.spawn(async move {
+                let result: anyhow::Result<String> =
+                    tokio::task::spawn_blocking(move || match (artifact, round) {
+                        (GateArtifact::Plan, Round::R1) => crate::plan::run_plan_r1(&root),
+                        (GateArtifact::Plan, Round::R2) => crate::plan::run_plan_r2(&root),
+                        (GateArtifact::Phase(id), Round::R1) => {
+                            crate::phase::run_phase_r1_diff(&root, &id)
+                        }
+                        (GateArtifact::Phase(id), Round::R2) => {
+                            crate::phase::run_phase_r2_diff(&root, &id)
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("{}", e)));
+                match result {
+                    Ok(f) => {
+                        let _ = tx.send(format!(
+                            "[findings]✓ {} ({}) on {} — review written:\n{}",
+                            round_lbl, reviewer, label, f
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(format!("[gate-error]{}: {}", round_lbl, e));
+                    }
+                }
+            });
+        }
+    }
+
+    /// A reviewer round just finished: send the findings to the coder to apply
+    /// fixes (a real agent turn). Advances R1Reviewing→R1Fixing / R2Reviewing→R2Fixing.
+    fn gate_after_review(&mut self) {
+        let Some(flow) = self.gate_flow.clone() else {
+            return;
+        };
+        let round = match flow.step {
+            GateStep::R1Reviewing => Round::R1,
+            GateStep::R2Reviewing => Round::R2,
+            _ => return,
+        };
+        let findings = std::fs::read_to_string(self.gate_review_path(&flow.artifact, round))
+            .unwrap_or_else(|_| "(could not read the review file)".to_string());
+        let round_lbl = if round == Round::R1 { "R1" } else { "R2" };
+
+        let prompt = match &flow.artifact {
+            GateArtifact::Plan => format!(
+                "Review round {0} on plan.md returned the findings below. Edit plan.md directly \
+                 (use your tools) to address the real, actionable issues. Ignore anything spurious, \
+                 keep changes tight, and don't expand scope. When done, stop — do not summarize yet.\n\n\
+                 --- {0} FINDINGS ---\n{1}\n--- END FINDINGS ---",
+                round_lbl, findings
+            ),
+            GateArtifact::Phase(id) => format!(
+                "Review round {0} on the {1} phase diff returned the findings below. Apply fixes to \
+                 the code for the real issues they raised (edit files and run tests). Don't expand \
+                 scope. When done, stop — do not summarize yet.\n\n\
+                 --- {0} FINDINGS ---\n{2}\n--- END FINDINGS ---",
+                round_lbl, id, findings
+            ),
+        };
+
+        self.push_system(&format!("→ Coder addressing {} findings…", round_lbl));
+        self.set_gate_step(if round == Round::R1 {
+            GateStep::R1Fixing
+        } else {
+            GateStep::R2Fixing
+        });
+        self.gate_drive_coder(&prompt);
+    }
+
+    /// A coder fix/summary turn just finished: advance the gate. Called from
+    /// drain_llm_stream when a gate-driven turn completes.
+    fn gate_after_coder(&mut self) {
+        let Some(flow) = self.gate_flow.clone() else {
+            return;
+        };
+        match flow.step {
+            GateStep::R1Fixing => {
+                self.set_gate_step(GateStep::PausedAfterR1);
+                self.push_system(
+                    "⏸  R1 complete and fixes applied. Review the changes above, then /continue \
+                     (or press Enter on an empty line) to run R2.",
+                );
+                self.follow_bottom = true;
+            }
+            GateStep::R2Fixing => {
+                self.set_gate_step(GateStep::PausedAfterR2);
+                self.push_system(
+                    "⏸  R2 complete and fixes applied. Review the changes above, then /continue \
+                     (or press Enter on an empty line) for the coder's summary.",
+                );
+                self.follow_bottom = true;
+            }
+            GateStep::Summarizing => {
+                self.set_gate_step(GateStep::Done);
+                let accept = match &flow.artifact {
+                    GateArtifact::Plan => "/accept-plan".to_string(),
+                    GateArtifact::Phase(id) => format!("/ship-phase {}", id),
+                };
+                self.push_system(&format!(
+                    "✓ Review gate complete (R1 + R2, fixes applied both rounds). When you're happy, {} to proceed.",
+                    accept
+                ));
+                self.gate_flow = None; // gate done; the accept/ship command checks files as before
+                self.reconcile_stage_from_disk();
+                self.update_status();
+                self.follow_bottom = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// Resume a paused gate: run R2, or kick off the final summary.
+    fn continue_gate(&mut self) {
+        let Some(flow) = self.gate_flow.clone() else {
+            return;
+        };
+        match flow.step {
+            GateStep::PausedAfterR1 => {
+                self.push_system("Running R2 (reviewer-b)…");
+                self.set_gate_step(GateStep::R2Reviewing);
+                self.follow_bottom = true;
+                self.spawn_review(&flow.artifact, Round::R2);
+            }
+            GateStep::PausedAfterR2 => {
+                let prompt = "Both review rounds are done and you've applied fixes for each. \
+                     Summarize for the user, concisely: what this plan/phase delivers, the key \
+                     issues R1 and R2 raised, and the fixes you applied in each round. End by \
+                     telling them they can approve to proceed."
+                    .to_string();
+                self.push_system("→ Coder summarizing the review rounds…");
+                self.set_gate_step(GateStep::Summarizing);
+                self.follow_bottom = true;
+                self.gate_drive_coder(&prompt);
+            }
+            _ => {
+                self.push_system("The gate isn't paused right now — let the current step finish.");
+            }
+        }
+    }
+
+    /// Abort the active gate (reviewer or coder error mid-flow).
+    fn abort_gate(&mut self, why: &str) {
+        if self.gate_flow.take().is_some() {
+            self.push_system(&format!(
+                "Review gate stopped: {}. Fix the issue and re-run /lock-plan or /accept-phase.",
+                why
+            ));
+            self.reconcile_stage_from_disk();
+            self.update_status();
+        }
+    }
+
+    fn set_gate_step(&mut self, step: GateStep) {
+        if let Some(flow) = &mut self.gate_flow {
+            flow.step = step;
+        }
+    }
+
+    /// Start a gate-driven coder turn. If it can't start (e.g. no coder role /
+    /// bad credentials), `start_real_chat` leaves `llm_rx` unset — abort the gate
+    /// rather than hang forever waiting on a turn that never runs.
+    fn gate_drive_coder(&mut self, prompt: &str) {
+        self.start_real_chat(prompt);
+        if self.llm_rx.is_none() {
+            self.abort_gate(
+                "the coder turn could not start (check the coder role and credentials)",
+            );
+        }
+    }
+
+    /// True while the gate is actively running a step (not paused / not idle), so
+    /// plain chat input should be held back to avoid colliding with gate turns.
+    fn gate_busy(&self) -> bool {
+        matches!(
+            self.gate_flow.as_ref().map(|f| &f.step),
+            Some(GateStep::R1Reviewing)
+                | Some(GateStep::R1Fixing)
+                | Some(GateStep::R2Reviewing)
+                | Some(GateStep::R2Fixing)
+                | Some(GateStep::Summarizing)
+        )
+    }
+
+    /// True when the gate is paused waiting for the user to /continue.
+    fn gate_paused(&self) -> bool {
+        matches!(
+            self.gate_flow.as_ref().map(|f| &f.step),
+            Some(GateStep::PausedAfterR1) | Some(GateStep::PausedAfterR2)
+        )
     }
 
     /// Kick off a one-shot, non-blocking check for a newer release. Runs the
@@ -3103,7 +3412,7 @@ impl App {
         );
 
         if self.first_run {
-            self.push_system("Welcome! A 60-second setup gets you chatting with a real model and using the full Talk → /plan (coder writes) → /lock-plan (R1 auto) → coder fixes → /approve-r1 (R2 auto) → /accept-plan flow, plus per-phase coder-written review docs + critical reviewer passes with human approve gates.");
+            self.push_system("Welcome! A 60-second setup gets you chatting with a real model and using the full Talk → /plan (coder writes) → /lock-plan (R1 → coder fixes → /continue → R2 → coder fixes → /continue → summary) → /accept-plan flow, with the same sequential review loop per phase at /accept-phase → /ship-phase.");
             self.push_system("Tip: the top menu choice is the fastest on-ramp (local Ollama, zero secrets). Arrow to it and hit Enter.");
         }
 
@@ -3574,7 +3883,7 @@ impl App {
                         if was_first {
                             self.push_system("First-time setup complete!");
                             self.push_system("Just type to chat with the coder — it reads, edits, and runs the project directly.");
-                            self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2) → /accept-plan. Phase gate: build → /accept-phase (R1+R2 on the diff) → /ship-phase.");
+                            self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → fix → /continue → R2 → fix → /continue → summary → /accept-plan. Phase gate: build → /accept-phase (same loop on the diff) → /ship-phase.");
                             self.push_system("This is the lightweight structure that keeps vibe coding from drifting — valuable for beginners and hardcore users alike.");
                         }
                     }
@@ -4403,7 +4712,7 @@ impl App {
             self.first_run = false;
             if was_first {
                 self.push_system("Setup complete! Just type to chat with the coder — it reads, edits, and runs the project directly.");
-                self.push_system("Plan gate: discuss → coder writes plan.md → /lock-plan (R1+R2) → /accept-plan. Phase gate: build → /accept-phase → /ship-phase.");
+                self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → fix → /continue → R2 → fix → /continue → summary → /accept-plan. Phase gate: build → /accept-phase (same loop) → /ship-phase.");
                 self.push_system("The workflow is deliberately simple to start yet powerful enough for serious use: structure that prevents drift without killing velocity.");
             } else {
                 self.push_system("Configuration wizard finished. Changes saved to anvil.toml (and keyring where used).");

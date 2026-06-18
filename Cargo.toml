@@ -1,6 +1,6 @@
 [package]
 name = "anvil"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "Structure for vibe coding. Model-agnostic CLI with Talk → Plan (R1+R2) → phased build (R1+R2 per phase). Exactly two cross-provider reviews. No drift."

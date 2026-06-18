@@ -5,10 +5,10 @@
 //! (via tools), the same way Claude Code / Cursor / Aider work — no manual file inclusion.
 //!
 //! Structure is imposed at exactly two human gates:
-//!   - PLAN:  discuss → the coder writes plan.md itself → /lock-plan (R1+R2 reviewers, different
-//!            models, critique plan.md) → coder revises → /accept-plan.
-//!   - PHASE: build the phase directly → /accept-phase (R1+R2 reviewers critique the git diff)
-//!            → fix findings → /ship-phase.
+//! - PLAN:  discuss → the coder writes plan.md itself → /lock-plan (R1+R2 reviewers, different
+//!   models, critique plan.md) → coder revises → /accept-plan.
+//! - PHASE: build the phase directly → /accept-phase (R1+R2 reviewers critique the git diff)
+//!   → fix findings → /ship-phase.
 //!
 //! Hard rule: exactly two review rounds per gate, from different model families. Review files
 //! live at repo root. Designed explicitly to kill the drift that kills vibe coding projects.

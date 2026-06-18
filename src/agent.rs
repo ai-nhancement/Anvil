@@ -116,25 +116,23 @@ pub fn load_session(root: &Path) -> Vec<ChatMessage> {
     let mut msgs: Vec<ChatMessage> = vec![];
     if let Ok(f) = std::fs::File::open(&path) {
         let reader = std::io::BufReader::new(f);
-        for line in std::io::BufRead::lines(reader) {
-            if let Ok(line) = line {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
+        for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Support both legacy single-array and the new JSONL format.
+            if trimmed.starts_with('[') {
+                if let Ok(batch) = serde_json::from_str::<Vec<ChatMessage>>(trimmed) {
+                    msgs.extend(batch);
                 }
-                // Support both legacy single-array and the new JSONL format.
-                if trimmed.starts_with('[') {
-                    if let Ok(batch) = serde_json::from_str::<Vec<ChatMessage>>(trimmed) {
-                        msgs.extend(batch);
-                    }
-                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    // A reset marker (from /clear-memory) starts the reload fresh,
-                    // without destroying the ledger's permanent record.
-                    if val.get("reset").and_then(|r| r.as_bool()) == Some(true) {
-                        msgs.clear();
-                    } else if let Ok(m) = serde_json::from_value::<ChatMessage>(val) {
-                        msgs.push(m);
-                    }
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                // A reset marker (from /clear-memory) starts the reload fresh,
+                // without destroying the ledger's permanent record.
+                if val.get("reset").and_then(|r| r.as_bool()) == Some(true) {
+                    msgs.clear();
+                } else if let Ok(m) = serde_json::from_value::<ChatMessage>(val) {
+                    msgs.push(m);
                 }
             }
         }
@@ -368,7 +366,7 @@ fn sanitize_history(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
                     for t in &msgs[i + 1..j] {
                         if t.tool_call_id
                             .as_ref()
-                            .map_or(false, |id| kept.iter().any(|tc| &tc.id == id))
+                            .is_some_and(|id| kept.iter().any(|tc| &tc.id == id))
                         {
                             out.push(t.clone());
                         }

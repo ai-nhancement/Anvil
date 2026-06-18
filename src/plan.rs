@@ -281,7 +281,7 @@ pub fn run_single_review(
 /// Writes REVIEW_<artifact>_<round>.md (caller chooses artifact like "P0-R1-doc" to get REVIEW_P0-R1-doc_R1.md,
 /// or use "P0_R1_Findings" style). Uses a prompt that tells the reviewer it is critiquing the implementer's
 /// own R1/R2 briefing doc, not the raw code/plan.
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 pub fn run_critical_review_on_doc(
     client: &LlmClient,
     cfg: &crate::config::AnvilConfig,

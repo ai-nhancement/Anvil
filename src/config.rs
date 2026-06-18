@@ -270,12 +270,11 @@ pub fn load_local_env(root: &Path) {
             }
             let mut val = line[eq + 1..].trim().to_string();
             // Strip a single pair of matching outer quotes (common when people copy examples)
-            if (val.starts_with('"') && val.ends_with('"'))
-                || (val.starts_with('\'') && val.ends_with('\''))
+            if ((val.starts_with('"') && val.ends_with('"'))
+                || (val.starts_with('\'') && val.ends_with('\'')))
+                && val.len() >= 2
             {
-                if val.len() >= 2 {
-                    val = val[1..val.len() - 1].to_string();
-                }
+                val = val[1..val.len() - 1].to_string();
             }
             // Only set if the outer environment didn't already provide it
             if std::env::var(key).is_err() {

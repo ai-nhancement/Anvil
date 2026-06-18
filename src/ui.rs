@@ -366,7 +366,7 @@ fn suggest_env_var_name(conn_name: &str, base_url: Option<&str>) -> String {
     }
 
     // Generic fallback based on the connection name the user chose (e.g. "my-xai" -> MY_XAI_API_KEY)
-    let base = if let Some(u) = base_url { u } else { "" };
+    let base = base_url.unwrap_or_default();
     let mut stem = conn_name.to_uppercase();
     stem = stem.replace(|c: char| !c.is_alphanumeric(), "_");
     stem = stem.trim_matches('_').to_string();
@@ -830,9 +830,10 @@ impl App {
 
         // Best-effort load of existing config so we can do real chat immediately if roles are set.
         app.cfg = load_config(&app.root).ok();
-        let has_reviewers = app.cfg.as_ref().map_or(false, |c| {
-            c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some()
-        });
+        let has_reviewers = app
+            .cfg
+            .as_ref()
+            .is_some_and(|c| c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some());
 
         app.push_system("Welcome to Anvil TUI.");
         app.push_system("Type to chat with your coder. Real streaming to your configured model. /plan /phase-done /status /help /quit");
@@ -1316,6 +1317,7 @@ impl App {
     ///   and the structured review findings.
     /// - Crude but effective markdown-ish treatment for # headers and **bold** lines (common in plan/reviews).
     /// - Properly splits on embedded \n (so one big [review R1]\n<full md with its own code> becomes many clean Lines).
+    ///
     /// Used by both the main chat Paragraph and the document viewer popups.
     fn render_message_as_lines(m: &str) -> Vec<Line<'static>> {
         let (base_style, body) = if m.starts_with("[system]") {
@@ -2379,18 +2381,22 @@ impl App {
 
         // Snapshot providers + existing bindings first. This ends the &self.cfg borrow
         // before we do any live model fetches (which require &mut self).
-        let (provider_infos, binding_keys): (Vec<(String, String, Option<String>)>, Vec<String>) =
-            if let Some(cfg) = &self.cfg {
-                let provs = cfg
-                    .providers
-                    .iter()
-                    .map(|(name, conn)| (name.clone(), conn.r#type.clone(), conn.base_url.clone()))
-                    .collect();
-                let binds = cfg.model_bindings.keys().cloned().collect();
-                (provs, binds)
-            } else {
-                (vec![], vec![])
-            };
+        // local snapshot tuple; a named alias would obscure more than it helps
+        #[allow(clippy::type_complexity)]
+        let (provider_infos, binding_keys): (
+            Vec<(String, String, Option<String>)>,
+            Vec<String>,
+        ) = if let Some(cfg) = &self.cfg {
+            let provs = cfg
+                .providers
+                .iter()
+                .map(|(name, conn)| (name.clone(), conn.r#type.clone(), conn.base_url.clone()))
+                .collect();
+            let binds = cfg.model_bindings.keys().cloned().collect();
+            (provs, binds)
+        } else {
+            (vec![], vec![])
+        };
 
         if !provider_infos.is_empty() {
             // Collect models from every configured provider (live for Ollama-compatible,
@@ -2431,9 +2437,9 @@ impl App {
     }
 
     fn is_configured(&self) -> bool {
-        self.cfg.as_ref().map_or(false, |c| {
-            c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some()
-        })
+        self.cfg
+            .as_ref()
+            .is_some_and(|c| c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some())
     }
 
     /// Parse a choice string from the role assignment list (which may be a plain binding
@@ -3660,7 +3666,6 @@ impl App {
             )
         };
 
-        let cred = cred; // for use below
         let _auto_var = auto_var; // already explained in the messages above
 
         let normalized_type = if ptype.starts_with("openai_compat") {
@@ -3789,7 +3794,7 @@ impl App {
     fn start_add_binding(&mut self, preselected_provider: Option<String>) {
         // Use shared view for the emptiness test so we don't hold a long-lived &mut borrow on .cfg
         // (which would conflict with later &self calls to live_or_static or &mut wizard).
-        if self.cfg.as_ref().map_or(true, |c| c.providers.is_empty()) {
+        if self.cfg.as_ref().is_none_or(|c| c.providers.is_empty()) {
             // Match original side-effect: materialize a default cfg if there was none.
             let _ = self.cfg.get_or_insert_with(AnvilConfig::default);
             self.push_system("No providers configured yet. Add a provider first.");
@@ -4302,7 +4307,7 @@ fn run_app_loop<B: ratatui::backend::Backend>(
         app.anim_tick = app.anim_tick.wrapping_add(1);
 
         // Live GPU stats ~every 2 seconds (80ms * 25). Cheap and useful for local models.
-        if app.anim_tick % 25 == 0 {
+        if app.anim_tick.is_multiple_of(25) {
             app.refresh_gpu_stats();
         }
 
@@ -4312,6 +4317,9 @@ fn run_app_loop<B: ratatui::backend::Backend>(
         terminal.draw(|f| render_ui(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(80))? {
+            // handle_key() has side effects and uses `?`, so it can't fold into a
+            // match guard — keep the inner `if` despite clippy::collapsible_match.
+            #[allow(clippy::collapsible_match)]
             match event::read()? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
@@ -4743,7 +4751,7 @@ fn render_splash(f: &mut Frame, app: &App) {
     lines.push(Line::from(Span::raw("".to_string())));
 
     // Pulsing dismiss hint
-    let hint_color = if (app.anim_tick / 6) % 2 == 0 {
+    let hint_color = if (app.anim_tick / 6).is_multiple_of(2) {
         Color::DarkGray
     } else {
         Color::Gray
@@ -5333,7 +5341,7 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     // Forge cursor: a molten highlight that pulses between hot ember and cooled
     // iron. Mid-text it reverses onto the character under it (block cursor); at
     // end-of-line it's a trailing bar. Only the cursor blinks; text stays steady.
-    let cursor_on = (app.anim_tick / 7) % 2 == 0;
+    let cursor_on = (app.anim_tick / 7).is_multiple_of(2);
     let white = Style::default().fg(Color::White);
     let bar_style = if cursor_on {
         Style::default()
@@ -5586,7 +5594,7 @@ fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) 
         None => return,
     };
 
-    let h = (chat_area.height.saturating_sub(4)).max(8).min(30);
+    let h = (chat_area.height.saturating_sub(4)).clamp(8, 30);
     let popup = ratatui::layout::Rect {
         x: chat_area.x + 3,
         y: chat_area.y + 2,

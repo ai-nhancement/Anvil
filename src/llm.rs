@@ -1127,6 +1127,7 @@ impl LlmClient {
     /// - anthropic → Messages API `tool_use` / `tool_result`
     /// - google / gemini → text-only fallback (no tool calls); the agent loop
     ///   then simply treats the reply as a final answer.
+    #[allow(clippy::too_many_arguments)] // provider call: conn + model + history + tools + sinks
     pub async fn chat_turn_stream(
         &self,
         conn: &ProviderConnection,
@@ -1172,6 +1173,7 @@ impl LlmClient {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // provider call: conn + model + history + tools + sinks
     async fn openai_turn_stream(
         &self,
         conn: &ProviderConnection,
@@ -1341,6 +1343,7 @@ impl LlmClient {
         })
     }
 
+    #[allow(clippy::too_many_arguments)] // provider call: conn + model + history + tools + sinks
     async fn anthropic_turn_stream(
         &self,
         conn: &ProviderConnection,

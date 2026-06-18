@@ -1233,44 +1233,73 @@ impl LlmClient {
             body["keep_alive"] = json!(k);
         }
 
-        let mut request = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream");
-        if conn.r#type == "azure_openai" || base.contains("azure.com") {
-            request = request.header("api-key", api_key);
-        }
+        // Bounded retry on transient failures BEFORE any tokens stream (so there's
+        // no risk of duplicated output): network/connection errors, 408/429, 5xx,
+        // and the ambiguous 400 some busy providers (e.g. xAI) throw under load.
+        // Clear auth/not-found errors (401/403/404) fail fast — retrying won't help.
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut attempt: u32 = 0;
+        let resp = loop {
+            attempt += 1;
+            let mut request = self
+                .http
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream");
+            if conn.r#type == "azure_openai" || base.contains("azure.com") {
+                request = request.header("api-key", api_key);
+            }
 
-        let resp = match request.json(&body).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = token_tx.send(format!("\n[llm-error] {}", e));
-                return Err(e.into());
+            match request.json(&body).send().await {
+                Ok(r) if r.status().is_success() => break r,
+                Ok(r) => {
+                    let status = r.status();
+                    let retryable = status.is_server_error()
+                        || status.as_u16() == 400
+                        || status.as_u16() == 408
+                        || status.as_u16() == 429;
+                    if retryable && attempt < MAX_ATTEMPTS {
+                        let _ = token_tx.send(format!(
+                            "[note]{} returned {} — retrying ({}/{})…",
+                            conn.r#type, status, attempt, MAX_ATTEMPTS
+                        ));
+                        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64))
+                            .await;
+                        continue;
+                    }
+                    // Give up: capture the rejected request (→ .anvil/last-llm-error.json;
+                    // no secret — the key is an auth header, not in `body`) and surface it.
+                    let text = r.text().await.unwrap_or_default();
+                    let msg = format!("{} error ({}): {}", conn.r#type, status, text);
+                    let diag = json!({
+                        "url": url,
+                        "status": status.as_u16(),
+                        "response": text,
+                        "request": body,
+                    });
+                    let _ = token_tx.send(format!(
+                        "[error-request]{}",
+                        serde_json::to_string_pretty(&diag).unwrap_or_default()
+                    ));
+                    let _ = token_tx.send(format!("\n[llm-error] {}", msg));
+                    anyhow::bail!("{}", msg);
+                }
+                Err(e) => {
+                    if attempt < MAX_ATTEMPTS {
+                        let _ = token_tx.send(format!(
+                            "[note]request error ({}) — retrying ({}/{})…",
+                            e, attempt, MAX_ATTEMPTS
+                        ));
+                        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64))
+                            .await;
+                        continue;
+                    }
+                    let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                    return Err(e.into());
+                }
             }
         };
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            let msg = format!("{} error ({}): {}", conn.r#type, status, text);
-            // Capture the exact request that the provider rejected so 4xx issues
-            // (especially after several tool-call rounds) are diagnosable. The UI
-            // writes this to .anvil/last-llm-error.json. The API key lives in the
-            // Authorization header, not in `body`, so nothing secret is captured.
-            let diag = json!({
-                "url": url,
-                "status": status.as_u16(),
-                "response": text,
-                "request": body,
-            });
-            let _ = token_tx.send(format!(
-                "[error-request]{}",
-                serde_json::to_string_pretty(&diag).unwrap_or_default()
-            ));
-            let _ = token_tx.send(format!("\n[llm-error] {}", msg));
-            anyhow::bail!("{}", msg);
-        }
 
         self.handle_openai_tool_stream(resp, token_tx).await
     }

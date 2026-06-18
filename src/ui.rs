@@ -27,7 +27,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style, Stylize},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
@@ -3948,7 +3948,7 @@ fn render_main(f: &mut Frame, app: &mut App) {
     // Input box auto-grows with the number of (wrapped) input rows, up to a cap,
     // so multi-line input stays visible instead of dropping below a fixed box.
     let input_inner_w = area.width.saturating_sub(2).max(1);
-    let input_rows = Paragraph::new(app.input_full_text())
+    let input_rows = Paragraph::new(format!("{}▌", app.input_full_text()))
         .wrap(Wrap { trim: false })
         .line_count(input_inner_w)
         .clamp(1, 8) as u16;
@@ -4394,20 +4394,36 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Color::Rgb(60, 80, 100)
     };
 
-    // Cursor blink: bright when on, dim when off
+    // Forge cursor: a molten bar at the end of the input, pulsing between hot
+    // ember and cooled iron. Keep normal text steady so only the cursor blinks.
     let cursor_on = (app.anim_tick / 7) % 2 == 0;
-    let text_style = if cursor_on && app.config_wizard.is_none() {
-        Style::default().fg(Color::Cyan)
+    let cursor_style = if cursor_on {
+        Style::default()
+            .fg(Color::Rgb(255, 140, 40))
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(Color::Rgb(90, 35, 20))
     };
+    let mut input_lines: Vec<Line<'static>> = full_text
+        .split('\n')
+        .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::White))))
+        .collect();
+    if input_lines.is_empty() {
+        input_lines.push(Line::from(Span::styled("".to_string(), Style::default().fg(Color::White))));
+    }
+    if let Some(last_line) = input_lines.last_mut() {
+        last_line.spans.push(Span::styled("▌", cursor_style));
+    }
+    let input_text = Text::from(input_lines);
 
     // Scroll in WRAPPED rows so the cursor line (bottom) is always visible once
     // the input grows past the box cap — same wrapped-row math as the chat log.
     let inner_w = area.width.saturating_sub(2).max(1);
     let inner_h = area.height.saturating_sub(2).max(1);
-    let para = Paragraph::new(full_text).wrap(Wrap { trim: false });
-    let total_rows = para.line_count(inner_w) as u16;
+    let para = Paragraph::new(input_text).wrap(Wrap { trim: false });
+    let total_rows = Paragraph::new(format!("{}▌", full_text))
+        .wrap(Wrap { trim: false })
+        .line_count(inner_w) as u16;
     let scroll_y = total_rows.saturating_sub(inner_h);
 
     let input_widget = para
@@ -4417,7 +4433,6 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .border_style(Style::default().fg(border_color))
                 .title(Span::styled(title, Style::default().fg(Color::DarkGray))),
         )
-        .style(text_style)
         .scroll((scroll_y, 0));
     f.render_widget(input_widget, area);
 }

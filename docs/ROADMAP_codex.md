@@ -133,14 +133,16 @@ Real OS sandboxing is a large undertaking; revisit only if we want unattended ru
 
 ## Prioritized borrow-list
 
-| # | Borrow | Leverage | Effort | Notes |
-|---|--------|----------|--------|-------|
-| 1 | **Token-based context + tool-output truncation + auto-compact** (§2) | ★★★★★ | Med | The real fix for the amnesia loop; do truncation first (cheap), then token budget, then auto-compact. |
-| 2 | **Continuation/goal prompt wording** (§1) | ★★★★ | Low | Anti-narrowing + completion-audit + "blocked after 3" — fold into the v0.1.9 task-anchor. |
-| 3 | **`apply_patch` edit format** (§3) | ★★★★ | Med | Biggest coder-reliability win after context; needs a small parser. |
-| 4 | Repo-map context *selection* (Aider — separate study) | ★★★★ | Med | Complements #1: bound vs. select context. |
-| 5 | Configurable retry + reviewer-path retry (§4) | ★★ | Low | Polish on what we shipped. |
-| 6 | Soft per-turn token budget surfaced to the model (§5) | ★★ | Low | Optional. |
+| # | Borrow | Leverage | Effort | Status |
+|---|--------|----------|--------|--------|
+| 1 | **Auto-compact** (the headline context fix) (§2) | ★★★★★ | Med | ✅ **Landed (v0.1.9)** — `maybe_auto_compact` folds older turns into working memory at turn-end. Tool-output truncation was already present. Token-based budgeting still TODO (we use msg-count + char budget). |
+| 2 | **Continuation/goal prompt wording** (§1) | ★★★★ | Low | ✅ **Landed (v0.1.9)** — task-anchor wording: objective-as-data, persistence, anti-narrowing, verify-completion. |
+| 3 | **`apply_patch` edit format** (§3) | ★★★★ | Med | ✅ **Landed (v0.1.9)** — context-located multi-file diffs, validated before write; preferred over `edit_file`. |
+| 4 | Repo-map context *selection* (Aider — separate study) | ★★★★ | Med | TODO — complements #1: bound vs. select context. **Next up.** |
+| 5 | Token-based context budget (per §2) | ★★★ | Low-Med | TODO — replace the 40-message / 240k-char heuristic with a token estimate; Anvil doesn't track per-model context windows yet. |
+| 6 | Configurable retry + reviewer-path retry (§4) | ★★ | Low | TODO — polish on what we shipped. |
+| 7 | Soft per-turn token budget surfaced to the model (§5) | ★★ | Low | Optional. |
 
-**Suggested sequence:** (2) prompt wording now → (1) context management next (the headline fix) →
-(3) apply_patch → then Aider's repo map.
+**Done in v0.1.9 (uncut):** #1 (auto-compact), #2 (prompt wording), #3 (apply_patch),
+plus this week's retries / loop-breaker / key-trim / diagnostics.
+**Next:** Aider's repo map (#4) for context *selection*, then token-based budgeting (#5).

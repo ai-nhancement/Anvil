@@ -36,7 +36,7 @@ use std::path::PathBuf;
 #[command(
     name = "anvil",
     version,
-    about = "Structure for vibe coding — coder writes plan + phase review docs; sequential R1/R2 critical reviews (different models) with explicit human approve gates between"
+    about = "Forge the Workflow — structure for vibe coding. A real agent coder wrapped in a two-gate, cross-vendor (R1/R2) review workflow."
 )]
 #[command(
     long_about = "Anvil brings just enough structure to prevent drift in AI-assisted coding.\n\

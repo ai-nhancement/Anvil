@@ -2067,7 +2067,7 @@ impl App {
         }
 
         if cmd == "/help" || cmd == "?" {
-            self.push_system("Keys: Enter=chat (streams), Ctrl-C or /q=quit (Esc no longer quits), Ctrl-S=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
+            self.push_system("Keys: Enter=chat (streams), Ctrl-X or /q=quit (Esc no longer quits; Ctrl-C is free for copy), Ctrl-S=quick-setup, ↑/↓ scroll chat (or command list), / for palette (filter + arrows + Enter to pick), Backspace");
             self.push_system("Editing: ←/→ move cursor (Ctrl+←/→ by word), ↑/↓ move between input lines (or scroll chat at the edges), Home/End start/end of line, Del forward-delete, Shift+Enter newline.");
             self.push_system("The coder is a real agent: it reads, writes and edits files and runs commands itself (you confirm each command with /y or /n). No manual /include needed.");
             self.push_system("Grounding: the coder sees a live reality snapshot (stage, phase, plan slice, git) every turn, and can call its project_state tool. /refresh shows it to you.");
@@ -4928,11 +4928,12 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
     }
 
     match key.code {
-        // Ctrl+C still force-quits. ESC no longer quits — it only closes popups /
-        // steps back in the wizard (handled above this match). There is no bare
-        // single-letter quit either; use /q (or /quit) so a stray keystroke on an
-        // empty line can never eject you out of the program.
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        // Quit is Ctrl+X (or /q / :q). Ctrl+C is deliberately NOT bound — it's left
+        // free so the terminal can use it to copy selected text from the chat. ESC
+        // no longer quits either; it only closes popups / steps back in the wizard
+        // (handled above this match). No bare single-letter quit, so a stray
+        // keystroke on an empty line can never eject you.
+        KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.should_quit = true;
             return Ok(true);
         }

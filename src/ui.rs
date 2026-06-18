@@ -87,7 +87,9 @@ fn coder_system_prompt() -> String {
     "You are Anvil's coder: an autonomous, hands-on software engineer working directly in the user's project.\n\
 \n\
 You have tools, scoped to the project root:\n\
-- read_file(path), write_file(path, content), edit_file(path, old_string, new_string)\n\
+- read_file(path), write_file(path, content)\n\
+- apply_patch(patch) — PREFERRED for editing existing files: a context-located diff (*** Update File / @@ / space-context / -removed / +added), can change several files at once, validated before writing. Use this over edit_file.\n\
+- edit_file(path, old_string, new_string) — simple exact-snippet replace; fine for a single tiny edit, but apply_patch is more reliable.\n\
 - list_dir(path), grep(pattern, [path])\n\
 - run_command(command)  — e.g. cargo build, cargo test, git diff (the user confirms each run)\n\
 \n\

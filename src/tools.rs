@@ -93,6 +93,17 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "apply_patch".into(),
+            description: "PREFERRED way to edit existing files: apply a context-located patch to one or more files in a single call. More reliable than edit_file because it finds each change by its surrounding lines rather than an exact blob. Format:\n*** Begin Patch\n*** Update File: relative/path.rs\n@@ optional line to help locate the change\n unchanged context line (leading space)\n-removed line\n+added line\n*** Add File: relative/new.rs\n+first line of the new file\n+second line\n*** Delete File: relative/old.rs\n*** End Patch\nRules: include a few unchanged context lines (prefixed with a single space) around each change so it can be located; '-' removes, '+' adds. Context and removed lines must match the file EXACTLY, including indentation. You may edit multiple files in one patch. The whole patch is validated before anything is written.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string", "description": "The full patch text, from '*** Begin Patch' to '*** End Patch'"}
+                },
+                "required": ["patch"]
+            }),
+        },
+        ToolDef {
             name: "list_dir".into(),
             description: "List the entries of a directory (files and subdirectories), skipping build/VCS/vendored directories.".into(),
             input_schema: json!({
@@ -145,6 +156,18 @@ pub fn summarize_args(call: &ToolCall) -> String {
             arg_str(call, "path").unwrap_or_else(|_| ".".into())
         }
         "grep" => format!("\"{}\"", arg_str(call, "pattern").unwrap_or_default()),
+        "apply_patch" => {
+            let p = arg_str(call, "patch").unwrap_or_default();
+            let files = p
+                .lines()
+                .filter(|l| {
+                    l.starts_with("*** Update File:")
+                        || l.starts_with("*** Add File:")
+                        || l.starts_with("*** Delete File:")
+                })
+                .count();
+            format!("{} file(s)", files)
+        }
         "run_command" => arg_str(call, "command").unwrap_or_default(),
         _ => String::new(),
     }
@@ -242,6 +265,7 @@ fn run(call: &ToolCall, root: &Path) -> Result<String> {
             &arg_str(call, "old_string")?,
             &arg_str(call, "new_string")?,
         ),
+        "apply_patch" => apply_patch(root, &arg_str(call, "patch")?),
         "list_dir" => list_dir(root, &arg_str(call, "path").unwrap_or_else(|_| ".".into())),
         "grep" => grep(root, &arg_str(call, "pattern")?, arg_opt(call, "path")),
         "project_state" => Ok(crate::reality::snapshot(root)),
@@ -318,6 +342,257 @@ fn edit_file(root: &Path, rel: &str, old: &str, new: &str) -> Result<String> {
     let updated = content.replacen(old, new, 1);
     std::fs::write(&path, updated).map_err(|e| anyhow!("could not write {}: {}", rel, e))?;
     Ok(format!("edited {} (1 replacement)", rel))
+}
+
+// ── apply_patch: context-located multi-file diffs (Codex-style; ROADMAP #3) ────
+
+/// One change region inside an Update File: the lines to find (context + removed)
+/// and the lines to put in their place (context + added).
+struct Hunk {
+    old: Vec<String>,
+    new: Vec<String>,
+}
+
+enum PatchOp {
+    Add { path: String, content: String },
+    Delete { path: String },
+    Update { path: String, hunks: Vec<Hunk> },
+}
+
+fn flush_hunk(hunks: &mut Vec<Hunk>, old: &mut Vec<String>, new: &mut Vec<String>) {
+    if !old.is_empty() || !new.is_empty() {
+        hunks.push(Hunk {
+            old: std::mem::take(old),
+            new: std::mem::take(new),
+        });
+    }
+}
+
+/// Parse the `*** Begin Patch` … `*** End Patch` envelope into file operations.
+fn parse_patch(patch: &str) -> Result<Vec<PatchOp>> {
+    let mut lines = patch.lines().peekable();
+
+    // Skip leading blank lines, then require the Begin sentinel.
+    let mut started = false;
+    while let Some(l) = lines.peek() {
+        if l.trim().is_empty() {
+            lines.next();
+            continue;
+        }
+        if l.trim_start() == "*** Begin Patch" {
+            lines.next();
+            started = true;
+        }
+        break;
+    }
+    if !started {
+        bail!("patch must start with '*** Begin Patch'");
+    }
+
+    let mut ops: Vec<PatchOp> = Vec::new();
+    while let Some(line) = lines.next() {
+        if line.trim_start() == "*** End Patch" {
+            return Ok(ops);
+        }
+        if let Some(rel) = line.strip_prefix("*** Add File: ") {
+            let mut content: Vec<String> = Vec::new();
+            while let Some(peek) = lines.peek() {
+                if peek.starts_with("*** ") {
+                    break;
+                }
+                let l = lines.next().unwrap();
+                match l.strip_prefix('+') {
+                    Some(rest) => content.push(rest.to_string()),
+                    None if l.trim().is_empty() => content.push(String::new()),
+                    None => bail!("Add File {}: lines must be '+' prefixed", rel.trim()),
+                }
+            }
+            let body = if content.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", content.join("\n"))
+            };
+            ops.push(PatchOp::Add {
+                path: rel.trim().to_string(),
+                content: body,
+            });
+        } else if let Some(rel) = line.strip_prefix("*** Delete File: ") {
+            ops.push(PatchOp::Delete {
+                path: rel.trim().to_string(),
+            });
+        } else if let Some(rel) = line.strip_prefix("*** Update File: ") {
+            let mut hunks: Vec<Hunk> = Vec::new();
+            let mut old: Vec<String> = Vec::new();
+            let mut new: Vec<String> = Vec::new();
+            while let Some(peek) = lines.peek() {
+                if peek.starts_with("*** ") {
+                    break;
+                }
+                let l = lines.next().unwrap();
+                if l.starts_with("@@") {
+                    // A new locator section starts a fresh hunk.
+                    flush_hunk(&mut hunks, &mut old, &mut new);
+                    continue;
+                }
+                match l.chars().next() {
+                    Some(' ') => {
+                        old.push(l[1..].to_string());
+                        new.push(l[1..].to_string());
+                    }
+                    Some('-') => old.push(l[1..].to_string()),
+                    Some('+') => new.push(l[1..].to_string()),
+                    None => {
+                        // Bare empty line — treat as a blank context line.
+                        old.push(String::new());
+                        new.push(String::new());
+                    }
+                    Some(_) => bail!(
+                        "Update File {}: each change line must start with ' ', '-', '+', or '@@' (got: {})",
+                        rel.trim(),
+                        l
+                    ),
+                }
+            }
+            flush_hunk(&mut hunks, &mut old, &mut new);
+            if hunks.is_empty() {
+                bail!("Update File {}: no change lines", rel.trim());
+            }
+            ops.push(PatchOp::Update {
+                path: rel.trim().to_string(),
+                hunks,
+            });
+        } else if line.trim().is_empty() {
+            continue;
+        } else {
+            bail!(
+                "unexpected line in patch (want '*** Add/Update/Delete File:' or '*** End Patch'): {}",
+                line
+            );
+        }
+    }
+    bail!("patch is missing '*** End Patch'")
+}
+
+/// Find `block` as a contiguous run of lines in `lines`, at or after `from`.
+fn find_block(lines: &[String], block: &[String], from: usize) -> Option<usize> {
+    if block.is_empty() || block.len() > lines.len() {
+        return None;
+    }
+    (from..=lines.len() - block.len()).find(|&i| lines[i..i + block.len()] == block[..])
+}
+
+/// Apply an Update File's hunks to the original text, locating each by its
+/// context+removed lines. Preserves the file's dominant newline style.
+fn apply_hunks(original: &str, hunks: &[Hunk]) -> Result<String> {
+    let uses_crlf = original.contains("\r\n");
+    let had_trailing_nl = original.ends_with('\n');
+    // str::lines() strips both \n and \r\n terminators, so lines carry no \r —
+    // and the patch text was split the same way, so matching is newline-agnostic.
+    let mut lines: Vec<String> = original.lines().map(|s| s.to_string()).collect();
+
+    let mut search_from = 0usize;
+    for (i, hunk) in hunks.iter().enumerate() {
+        if hunk.old.is_empty() {
+            bail!(
+                "hunk {} has no context or removed lines, so the change can't be located — include a few surrounding ' ' lines",
+                i + 1
+            );
+        }
+        let pos = find_block(&lines, &hunk.old, search_from).ok_or_else(|| {
+            anyhow!(
+                "hunk {} did not match — its ' ' and '-' lines must equal the file exactly (check indentation/whitespace)",
+                i + 1
+            )
+        })?;
+        lines.splice(pos..pos + hunk.old.len(), hunk.new.iter().cloned());
+        search_from = pos + hunk.new.len();
+    }
+
+    let nl = if uses_crlf { "\r\n" } else { "\n" };
+    let mut result = lines.join(nl);
+    if had_trailing_nl {
+        result.push_str(nl);
+    }
+    Ok(result)
+}
+
+/// Apply a multi-file patch. Validates everything (resolves paths, locates all
+/// hunks, computes new contents) BEFORE writing, so a bad hunk can't half-apply.
+fn apply_patch(root: &Path, patch: &str) -> Result<String> {
+    let ops = parse_patch(patch)?;
+    if ops.is_empty() {
+        bail!("empty patch — no file operations found");
+    }
+
+    enum Planned {
+        Write(PathBuf, String, String),
+        Delete(PathBuf, String),
+    }
+    let mut planned: Vec<Planned> = Vec::new();
+
+    for op in &ops {
+        match op {
+            PatchOp::Add { path, content } => {
+                let p = resolve(root, path)?;
+                if p.exists() {
+                    bail!(
+                        "Add File {}: already exists (use Update File to modify it)",
+                        path
+                    );
+                }
+                planned.push(Planned::Write(
+                    p,
+                    content.clone(),
+                    format!("added {}", path),
+                ));
+            }
+            PatchOp::Delete { path } => {
+                let p = resolve(root, path)?;
+                if !p.exists() {
+                    bail!("Delete File {}: does not exist", path);
+                }
+                planned.push(Planned::Delete(p, format!("deleted {}", path)));
+            }
+            PatchOp::Update { path, hunks } => {
+                let p = resolve(root, path)?;
+                let orig = std::fs::read_to_string(&p)
+                    .map_err(|e| anyhow!("Update File {}: could not read: {}", path, e))?;
+                let updated = apply_hunks(&orig, hunks)
+                    .map_err(|e| anyhow!("Update File {}: {}", path, e))?;
+                let n = hunks.len();
+                planned.push(Planned::Write(
+                    p,
+                    updated,
+                    format!(
+                        "updated {} ({} hunk{})",
+                        path,
+                        n,
+                        if n == 1 { "" } else { "s" }
+                    ),
+                ));
+            }
+        }
+    }
+
+    let mut summaries: Vec<String> = Vec::new();
+    for pl in planned {
+        match pl {
+            Planned::Write(p, content, summary) => {
+                if let Some(parent) = p.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                std::fs::write(&p, content)
+                    .map_err(|e| anyhow!("could not write {}: {}", p.display(), e))?;
+                summaries.push(summary);
+            }
+            Planned::Delete(p, summary) => {
+                std::fs::remove_file(&p)
+                    .map_err(|e| anyhow!("could not delete {}: {}", p.display(), e))?;
+                summaries.push(summary);
+            }
+        }
+    }
+    Ok(format!("apply_patch ok — {}", summaries.join(", ")))
 }
 
 fn list_dir(root: &Path, rel: &str) -> Result<String> {
@@ -536,6 +811,51 @@ mod tests {
         assert!(w.starts_with("wrote"), "{}", w);
         let r = execute(&call("read_file", json!({"path": "a/b.txt"})), root);
         assert_eq!(r, "hello");
+    }
+
+    #[test]
+    fn apply_patch_updates_with_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("m.rs"), "fn main() {\n    println!(\"hi\");\n}\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: m.rs\n@@ fn main() {\n fn main() {\n-    println!(\"hi\");\n+    println!(\"hello\");\n }\n*** End Patch\n";
+        let r = execute(&call("apply_patch", json!({ "patch": patch })), root);
+        assert!(r.starts_with("apply_patch ok"), "{}", r);
+        assert_eq!(
+            std::fs::read_to_string(root.join("m.rs")).unwrap(),
+            "fn main() {\n    println!(\"hello\");\n}\n"
+        );
+    }
+
+    #[test]
+    fn apply_patch_adds_and_deletes_in_one_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("old.txt"), "bye\n").unwrap();
+        let patch = "*** Begin Patch\n*** Add File: new.txt\n+line one\n+line two\n*** Delete File: old.txt\n*** End Patch\n";
+        let r = execute(&call("apply_patch", json!({ "patch": patch })), root);
+        assert!(r.starts_with("apply_patch ok"), "{}", r);
+        assert_eq!(
+            std::fs::read_to_string(root.join("new.txt")).unwrap(),
+            "line one\nline two\n"
+        );
+        assert!(!root.join("old.txt").exists());
+    }
+
+    #[test]
+    fn apply_patch_mismatch_errors_and_leaves_file_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("m.rs"), "let x = 1;\n").unwrap();
+        // Context/removed lines that don't exist in the file → validation fails
+        // before any write, so the file must be untouched.
+        let patch = "*** Begin Patch\n*** Update File: m.rs\n let y = 2;\n-let z = 3;\n+let z = 4;\n*** End Patch\n";
+        let r = execute(&call("apply_patch", json!({ "patch": patch })), root);
+        assert!(r.starts_with("ERROR:"), "{}", r);
+        assert_eq!(
+            std::fs::read_to_string(root.join("m.rs")).unwrap(),
+            "let x = 1;\n"
+        );
     }
 
     #[test]

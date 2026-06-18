@@ -37,8 +37,8 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, ConfirmHandle};
 use crate::config::{
-    ensure_anvil_dir, load_config, load_local_env, save_config, set_local_env_var, AnvilConfig,
-    CredentialRef, ModelBinding, ProviderConnection,
+    ensure_anvil_dir, load_config, load_local_env, save_global_config, set_local_env_var,
+    AnvilConfig, CredentialRef, ModelBinding, ProviderConnection,
 };
 use crate::llm::{ChatMessage, LlmClient, Role};
 use crate::state::{load_state, reviews_dir, save_state};
@@ -2158,7 +2158,7 @@ impl App {
                 keep_alive: Some("30s".to_string()),
             },
         );
-        save_config(&self.root, &cfg)?;
+        save_global_config(&cfg)?;
         self.cfg = load_config(&self.root).ok();
         Ok(())
     }
@@ -4191,7 +4191,7 @@ impl App {
                     }
                 }
 
-                save_config(&self.root, self.cfg.as_ref().unwrap()).ok();
+                save_global_config(self.cfg.as_ref().unwrap()).ok();
                 self.reconcile_stage_from_disk();
                 self.update_status();
 
@@ -4989,9 +4989,11 @@ impl App {
     }
 
     fn save_current_config(&mut self) {
+        // Setup writes to the GLOBAL config so providers/models are shared across
+        // every repo (per-repo anvil.toml overrides remain a manual opt-in).
         if let Some(cfg) = &self.cfg {
-            if let Err(e) = save_config(&self.root, cfg) {
-                self.push_system(&format!("Warning: could not save config: {}", e));
+            if let Err(e) = save_global_config(cfg) {
+                self.push_system(&format!("Warning: could not save global config: {}", e));
             }
         }
     }

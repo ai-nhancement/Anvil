@@ -7,74 +7,79 @@ use colored::Colorize;
 use inquire::{Confirm, Select, Text};
 
 use crate::config::{
-    ensure_anvil_dir, load_config, save_config, AnvilConfig, CredentialRef, ModelBinding,
+    ensure_anvil_dir, load_config, save_global_config, AnvilConfig, CredentialRef, ModelBinding,
     ProviderConnection, Roles,
 };
 
 /// `anvil init`
 pub fn cmd_init(root: &Path) -> Result<()> {
-    let cfg_path = root.join("anvil.toml");
-    if cfg_path.exists() {
-        println!(
-            "{} already initialized at {}",
-            "anvil".green(),
-            root.display()
-        );
-        return cmd_config_show(root);
-    }
-
     ensure_anvil_dir(root)?;
 
-    let mut cfg = AnvilConfig::default();
-
-    // Seed a couple of example providers so the user sees the shape immediately.
-    cfg.providers.insert(
-        "local-ollama".to_string(),
-        ProviderConnection {
-            r#type: "openai_compat".to_string(),
-            base_url: Some("http://localhost:11434/v1".to_string()),
-            // No key required for stock Ollama. The client supplies a conventional placeholder.
-            credential: CredentialRef::None,
-            extra: Default::default(),
-            keep_alive: Some("30s".to_string()),
-        },
-    );
-
-    cfg.providers.insert(
-        "anthropic".to_string(),
-        ProviderConnection {
-            r#type: "anthropic".to_string(),
-            base_url: None,
-            credential: CredentialRef::Keyring,
-            extra: Default::default(),
-            keep_alive: None,
-        },
-    );
-
-    cfg.providers.insert(
-        "openai".to_string(),
-        ProviderConnection {
-            r#type: "openai_compat".to_string(),
-            base_url: Some("https://api.openai.com/v1".to_string()),
-            credential: CredentialRef::Keyring,
-            extra: Default::default(),
-            keep_alive: None,
-        },
-    );
-
-    save_config(root, &cfg)?;
+    // Provider/model/role setup lives in the GLOBAL config, shared across every
+    // repo. Seed it with a few example providers the first time so setup (and the
+    // wizard) starts from a recognizable shape; existing global config is left be.
+    let global = crate::config::global_config_path();
+    let has_global = global.as_ref().map(|p| p.exists()).unwrap_or(false);
+    if !has_global {
+        let mut cfg = AnvilConfig::default();
+        cfg.providers.insert(
+            "local-ollama".to_string(),
+            ProviderConnection {
+                r#type: "openai_compat".to_string(),
+                base_url: Some("http://localhost:11434/v1".to_string()),
+                credential: CredentialRef::None,
+                extra: Default::default(),
+                keep_alive: Some("30s".to_string()),
+            },
+        );
+        cfg.providers.insert(
+            "anthropic".to_string(),
+            ProviderConnection {
+                r#type: "anthropic".to_string(),
+                base_url: None,
+                credential: CredentialRef::Keyring,
+                extra: Default::default(),
+                keep_alive: None,
+            },
+        );
+        cfg.providers.insert(
+            "openai".to_string(),
+            ProviderConnection {
+                r#type: "openai_compat".to_string(),
+                base_url: Some("https://api.openai.com/v1".to_string()),
+                credential: CredentialRef::Keyring,
+                extra: Default::default(),
+                keep_alive: None,
+            },
+        );
+        save_global_config(&cfg)?;
+    }
 
     println!(
-        "{} Initialized Anvil project at {}",
+        "{} Initialized Anvil at {} ({}/ created).",
         "✓".green(),
-        root.display()
+        root.display(),
+        crate::config::ANVIL_DIR
     );
-    println!("  Created anvil.toml + .anvil/");
-    println!(
-        "  Run {} to configure providers + roles (coder + reviewer-a + reviewer-b).",
-        "`anvil setup`".cyan()
-    );
-    println!("  Then launch {} (TUI) — the coder reads/edits/runs the repo directly; structure at two gates (/lock-plan + /accept-plan, /accept-phase + /ship-phase).", "`anvil`".cyan());
+    match (&global, has_global) {
+        (Some(p), true) => {
+            println!("  Using your shared global config: {}", p.display());
+            println!(
+                "  Run {} to start — providers/models are already set up.",
+                "`anvil`".cyan()
+            );
+        }
+        (Some(p), false) => {
+            println!("  Seeded a shared global config: {}", p.display());
+            println!(
+                "  Run {} (or Ctrl+S in the TUI) to configure providers + roles once for every repo.",
+                "`anvil setup`".cyan()
+            );
+        }
+        (None, _) => {
+            println!("  (No OS config dir found — Anvil will fall back to a per-repo anvil.toml.)");
+        }
+    }
     Ok(())
 }
 
@@ -280,10 +285,13 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
         };
     }
 
-    save_config(root, &cfg)?;
+    save_global_config(&cfg)?;
     println!(
-        "\n{} Setup complete. Configuration saved to anvil.toml",
-        "✓".green()
+        "\n{} Setup complete. Saved to the shared global config ({}).",
+        "✓".green(),
+        crate::config::global_config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "global config".to_string())
     );
     println!("Next steps (TUI preferred — the coder works directly in the repo):");
     println!(

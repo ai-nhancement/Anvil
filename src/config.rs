@@ -146,19 +146,60 @@ pub fn state_path(root: &Path) -> PathBuf {
     anvil_dir(root).join(STATE_FILE)
 }
 
-pub fn load_config(root: &Path) -> Result<AnvilConfig, ConfigError> {
-    let path = config_path(root);
-    if !path.exists() {
-        return Err(ConfigError::NotInitialized(root.to_path_buf()));
-    }
-    let raw = std::fs::read_to_string(&path)?;
-    let cfg: AnvilConfig = toml::from_str(&raw)?;
-    Ok(cfg)
+/// Machine-wide config shared across every repo: `<OS config dir>/anvil/anvil.toml`
+/// (e.g. `%APPDATA%\anvil\anvil.toml` on Windows, `~/.config/anvil/anvil.toml` on
+/// Linux). This is the default home for provider/model/role setup so it doesn't
+/// have to be redone in each project. Credentials already live globally (keyring).
+pub fn global_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("anvil").join(CONFIG_FILE))
 }
 
-pub fn save_config(root: &Path, cfg: &AnvilConfig) -> Result<(), ConfigError> {
-    std::fs::create_dir_all(root)?;
-    let path = config_path(root);
+fn read_config_file(path: &Path) -> Option<AnvilConfig> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&raw).ok()
+}
+
+/// Overlay a project config onto the global base: providers + model_bindings
+/// extend (project keys win on collision); roles override per-field where the
+/// project sets them. The result is what the rest of Anvil sees.
+fn merge(mut base: AnvilConfig, overlay: AnvilConfig) -> AnvilConfig {
+    base.providers.extend(overlay.providers);
+    base.model_bindings.extend(overlay.model_bindings);
+    if overlay.roles.coder.is_some() {
+        base.roles.coder = overlay.roles.coder;
+    }
+    if overlay.roles.reviewer_a.is_some() {
+        base.roles.reviewer_a = overlay.roles.reviewer_a;
+    }
+    if overlay.roles.reviewer_b.is_some() {
+        base.roles.reviewer_b = overlay.roles.reviewer_b;
+    }
+    base
+}
+
+/// Load the effective config for `root`: the global config as a base, overlaid
+/// by the project's `anvil.toml` if present. Either alone is enough; if neither
+/// exists the project is not initialized.
+pub fn load_config(root: &Path) -> Result<AnvilConfig, ConfigError> {
+    let global = global_config_path().as_deref().and_then(read_config_file);
+    let project = read_config_file(&config_path(root));
+    match (global, project) {
+        (Some(g), Some(p)) => Ok(merge(g, p)),
+        (Some(g), None) => Ok(g),
+        (None, Some(p)) => Ok(p),
+        (None, None) => Err(ConfigError::NotInitialized(root.to_path_buf())),
+    }
+}
+
+/// Write the global, machine-wide config — the default target for setup so it's
+/// shared across all repos.
+pub fn save_global_config(cfg: &AnvilConfig) -> Result<(), ConfigError> {
+    let path = global_config_path().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no OS config directory")
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let serialized = toml::to_string_pretty(cfg)?;
     std::fs::write(path, serialized)?;
     Ok(())
@@ -267,11 +308,26 @@ fn local_env_path(root: &Path) -> PathBuf {
 /// future `anvil` runs in this directory just work" experience without requiring
 /// users to edit shell profiles on Windows, Linux, macOS, WSL, etc.
 pub fn load_local_env(root: &Path) {
-    let path = local_env_path(root);
+    // The repo-local .env first so it can override, then the GLOBAL .env (next to
+    // the global config) as the shared base. set_var-if-absent means the outer
+    // shell wins over both, and the local file wins over the global one.
+    load_env_file(&local_env_path(root));
+    if let Some(g) = global_env_path() {
+        load_env_file(&g);
+    }
+}
+
+/// The shared, machine-wide credential file: `<OS config dir>/anvil/.env`. Lets
+/// env-var keys (e.g. ANTHROPIC_API_KEY) be set once for every repo.
+pub fn global_env_path() -> Option<PathBuf> {
+    global_config_path().and_then(|p| p.parent().map(|d| d.join(".env")))
+}
+
+fn load_env_file(path: &Path) {
     if !path.exists() {
         return;
     }
-    let content = match std::fs::read_to_string(&path) {
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return,
     };

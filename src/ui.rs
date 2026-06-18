@@ -498,6 +498,9 @@ struct App {
     // True while we have an open "[coder] " line accumulating streamed text. A
     // tool/confirm line closes it so the next text delta starts a fresh line.
     assistant_open: bool,
+    // True while a tool is actually executing (between [tool-start] and [tool-end]).
+    // Drives the status label: "smithing…" when acting vs "forging…" when thinking.
+    tool_active: bool,
 
     // Workflow + plan gate (phase 3)
     stage: WorkflowStage,
@@ -588,6 +591,7 @@ impl App {
             confirm_tx: None,
             awaiting_confirm: None,
             assistant_open: false,
+            tool_active: false,
             stage: WorkflowStage::Talk,
             gate_rx: None,
             showing_command_palette: false,
@@ -2113,6 +2117,7 @@ impl App {
             // A tool is about to run: close the current assistant line and show it.
             if let Some(label) = delta.strip_prefix("[tool-start]") {
                 self.close_assistant_line();
+                self.tool_active = true;
                 self.log_chat_event("tool_start", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
                 self.push(format!("  🔨 {}", label.trim()));
                 changed = true;
@@ -2120,6 +2125,7 @@ impl App {
             }
             // A tool finished: show its short result summary.
             if let Some(label) = delta.strip_prefix("[tool-end]") {
+                self.tool_active = false;
                 self.log_chat_event("tool_end", turn.as_deref(), role.as_deref(), binding.as_deref(), model.as_deref(), label);
                 self.push(format!("    ↳ {}", label.trim()));
                 changed = true;
@@ -2166,6 +2172,7 @@ impl App {
         if stream_finished {
             // The agent turn ended. Clear the receiver so we don't poll a dead channel.
             self.llm_rx = None;
+            self.tool_active = false;
             // Drop a dangling empty "[coder] " line (turn ended on a tool call),
             // otherwise make sure the final line ends with a newline.
             self.close_assistant_line();
@@ -4069,7 +4076,7 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(heat_color(app.forge_heat)))
         .title(Span::styled(
-            format!(" ⚒ Anvil v{}  ·  forge: {} ", env!("CARGO_PKG_VERSION"), heat_name(app.forge_heat)),
+            format!("Anvil v{}  🔥  forge: {} ", env!("CARGO_PKG_VERSION"), heat_name(app.forge_heat)),
             Style::default().fg(FORGE_MOLTEN).add_modifier(Modifier::BOLD),
         ));
 
@@ -4286,7 +4293,7 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         WorkflowStage::PlanAccepted =>
             " Plan accepted — /phase-start Px ; coder writes review docs on phase done (↑↓ / cmds) ",
         _ =>
-            " Chat log (↑↓ scroll, Enter=send, Shift+Enter=newline, / for commands) ",
+            "Chat Log (↑↓ scroll)",
     };
 
     let border_color = if app.first_run || app.stage == WorkflowStage::Unconfigured {
@@ -4300,25 +4307,26 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     };
 
     // Live forge status pinned to the bottom-left of the chat box border, in the
-    // current heat color — "forging…" (pulsing ember) while the agent works,
-    // "ready" (dim) when idle. This is the at-a-glance "is it doing something?"
-    // signal, right where the user's attention is.
+    // current heat color — "smithing…" while a tool is actually running (action),
+    // "forging…" while the agent is thinking, "ready" (dim) when idle. This is the
+    // at-a-glance "is it doing something?" signal, right where the user looks.
     let is_streaming = app.llm_rx.is_some() || app.gate_rx.is_some();
     let status_line: Line = if is_streaming {
         let ember = heat_color(app.forge_heat);
         let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
+        let verb = if app.tool_active { "smithing… " } else { "forging… " };
         Line::from(vec![
             Span::styled(format!(" {} ", sp), Style::default().fg(ember).add_modifier(Modifier::BOLD)),
-            Span::styled("forging… ", Style::default().fg(ember).add_modifier(Modifier::BOLD)),
+            Span::styled(verb, Style::default().fg(ember).add_modifier(Modifier::BOLD)),
         ])
     } else {
-        Line::from(Span::styled(" ready ", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled("Ready.", Style::default().fg(FORGE_MOLTEN).add_modifier(Modifier::BOLD)))
     };
 
     let chat_block = Block::default()
         .title(Span::styled(chat_title, Style::default().fg(Color::DarkGray)))
         .title_bottom(status_line.left_aligned())
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(border_color));
 
     let chat = if app.messages.is_empty() {
@@ -4342,8 +4350,8 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         // Scroll must be measured in WRAPPED rows, not logical lines: long messages
         // wrap, and Paragraph::scroll skips wrapped rows. Counting logical lines made
         // follow-bottom under-scroll, hiding the newest (live) line below the viewport.
-        let inner_w = area.width.saturating_sub(2).max(1); // minus borders
-        let h = area.height.saturating_sub(2).max(1);      // visible rows inside borders
+        let inner_w = area.width.max(1);                   // full width — no left/right borders
+        let h = area.height.saturating_sub(2).max(1);      // visible rows inside top/bottom borders
         let para = Paragraph::new(all_lines).wrap(Wrap { trim: false });
         let total_rows = para.line_count(inner_w) as u16;
         let max_scroll = total_rows.saturating_sub(h);
@@ -4381,7 +4389,7 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         };
         (p, t)
     } else {
-        ("> ", " Input (Enter=send, Shift+Enter=newline, /=commands, Esc/q=quit) ".to_string())
+        ("> ", "Input (Enter=send, Shift+Enter=newline, /=commands, Esc/q=quit)".to_string())
     };
 
     let _ = prompt; // prompt is now part of input_full_text(); title is still used below
@@ -4418,7 +4426,7 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
     // Scroll in WRAPPED rows so the cursor line (bottom) is always visible once
     // the input grows past the box cap — same wrapped-row math as the chat log.
-    let inner_w = area.width.saturating_sub(2).max(1);
+    let inner_w = area.width.max(1);                 // full width — no left/right borders
     let inner_h = area.height.saturating_sub(2).max(1);
     let para = Paragraph::new(input_text).wrap(Wrap { trim: false });
     let total_rows = Paragraph::new(format!("{}▌", full_text))
@@ -4429,7 +4437,7 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let input_widget = para
         .block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::default().fg(border_color))
                 .title(Span::styled(title, Style::default().fg(Color::DarkGray))),
         )

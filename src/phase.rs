@@ -341,9 +341,109 @@ pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
         state.shipped_phases.push(id.to_string());
     }
     state.current_phase = None; // ready for next
+                                // Audit trail: annotate plan.md with this phase's closure, using the phase's
+                                // base commit (read before we advance it for the next phase). The latched
+                                // "accepted" stage means editing plan.md here won't re-trigger the plan gate.
+    annotate_phase_closed(root, id, state.phase_base.as_deref());
     state.phase_base = git_head_sha(root); // the next phase's work starts from here
     save_state(root, &state)?;
     Ok(())
+}
+
+/// Append a closure record for `id` into its `plan.md` section: date, that it
+/// passed R1+R2, the files changed this phase, and links to the review docs.
+/// Deterministic and idempotent (skips if already recorded). Best-effort.
+fn annotate_phase_closed(root: &Path, id: &str, base: Option<&str>) {
+    let plan_path = root.join("plan.md");
+    let Ok(plan) = fs::read_to_string(&plan_path) else {
+        return;
+    };
+    let marker = format!("{id} passed R1 + R2");
+    if plan.contains(&marker) {
+        return; // already recorded (re-shipped) — don't duplicate
+    }
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut block =
+        format!("\n> **CLOSED {date} — {id} passed R1 + R2 review and was accepted.**\n");
+    let stat = phase_diff_stat(root, base);
+    if !stat.is_empty() {
+        block.push_str(">\n> Files changed this phase:\n");
+        for line in stat.lines() {
+            block.push_str(&format!("> - {line}\n"));
+        }
+    }
+    block.push_str(&format!(
+        "> Reviews: REVIEW_{id}_R1.md, REVIEW_{id}_R2.md\n"
+    ));
+    let updated = insert_in_phase_section(&plan, id, &block);
+    let _ = fs::write(&plan_path, updated);
+}
+
+/// `git diff --stat` for the phase's change set (per-file lines only), from the
+/// phase base if known, else the most recent commit. Best-effort, capped.
+fn phase_diff_stat(root: &Path, base: Option<&str>) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let out = match base {
+        Some(b) => git(&["diff", "--stat", b]),
+        None => git(&["diff", "--stat", "HEAD~1", "HEAD"]),
+    }
+    .unwrap_or_default();
+    out.lines()
+        .filter(|l| l.contains('|')) // per-file rows, not the "N files changed" summary
+        .take(25)
+        .map(|l| l.trim().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Insert `block` at the end of `id`'s section in the plan (just before the next
+/// phase header / risks section), or append it if the section isn't found.
+fn insert_in_phase_section(plan: &str, id: &str, block: &str) -> String {
+    let want = normalize_phase_id(id);
+    let lines: Vec<&str> = plan.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| phase_id_from_header(l).as_deref() == Some(want.as_str()));
+    let Some(start) = start else {
+        let mut out = plan.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(block);
+        return out;
+    };
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, l)| {
+            let low = l.to_lowercase();
+            phase_id_from_header(l).is_some()
+                || low.contains("risk")
+                || low.contains("open question")
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(lines.len());
+    let mut out = String::new();
+    for line in &lines[..end] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(block);
+    out.push('\n');
+    for line in &lines[end..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Current HEAD commit sha (short), or None outside a git repo / with no commits.
@@ -574,6 +674,21 @@ mod tests {
         assert!(sec.contains("Phase 0 — Bootstrap"), "{sec}");
         assert!(sec.contains("do a thing"), "{sec}");
         assert!(!sec.contains("Phase 1"), "{sec}");
+    }
+
+    #[test]
+    fn insert_in_phase_section_places_block_inside_the_right_phase() {
+        let plan =
+            "# Plan\n\n## P0 — Bootstrap\ngoal: x\n\n## P1 — Next\ngoal: y\n\n## Risks\n- a risk\n";
+        let out = insert_in_phase_section(plan, "P0", "> CLOSED P0 note\n");
+        // Block lands in the P0 section, before P1.
+        let p0 = out.find("P0 — Bootstrap").unwrap();
+        let note = out.find("CLOSED P0 note").unwrap();
+        let p1 = out.find("P1 — Next").unwrap();
+        assert!(p0 < note && note < p1, "{out}");
+        // P1 and Risks remain intact and after the note.
+        assert!(out.contains("## P1 — Next"));
+        assert!(out.contains("## Risks"));
     }
 
     #[test]

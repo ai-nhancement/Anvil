@@ -8,11 +8,11 @@ Your AI coding agent lies about its homework.
 
 It edits a dozen files, then swears it updated the tests. Sometimes it didn't.
 
-So I built Anvil: the coder no longer grades its own work. Two rival models review every gate and check the real files.
+So I built Anvil: the coder no longer grades its own work. Two rival models review every gate and check the real files. One of them is @grok.
 
-One of those reviewers? @grok.
+Move over, @Grok Build. (Don't worry, Grok still reviews my code.)
 
-Move over, Claude Code. cc @elonmusk
+cc @elonmusk
 
 ---
 
@@ -24,7 +24,7 @@ So I built Anvil. The coder writes. Two OTHER models from two OTHER vendors inve
 
 My setup: a cloud model codes, @grok reviews. The expensive model writes, Grok keeps it honest.
 
-Move over, Claude Code. @elonmusk @xai
+Move over, @Grok Build. The model's a great reviewer. The workflow is mine. @elonmusk @xai
 
 ---
 
@@ -42,6 +42,6 @@ So I built Anvil. The coder no longer certifies itself.
 
 Two rival models from two different vendors review every gate, open the real files, and check the diff. Do not trust the coder. Go check.
 
-In my setup @grok is one of the reviewers keeping it honest. cc @elonmusk @xai
+In my setup @grok is one of the reviewers keeping it honest. So move over, @Grok Build. Your model can stay. cc @elonmusk @xai
 
 Open source, public beta: anvil.codes

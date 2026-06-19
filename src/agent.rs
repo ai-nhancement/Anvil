@@ -547,6 +547,12 @@ fn last_substantive_task(history: &[ChatMessage]) -> Option<String> {
         .map(|m| m.text.clone())
 }
 
+/// Safety cap on tool-call iterations within a single user turn. High enough that
+/// a major coding task (read many files, edit several, build, fix, re-run) can run
+/// to completion without tripping it; it's a runaway backstop, not a budget. When
+/// hit, the turn stops with a note and the user can say "continue" to resume.
+const MAX_TOOL_STEPS_PER_TURN: usize = 150;
+
 /// Generous cap on how many recent messages the window even considers (the char
 /// budget does the real trimming). Also the message-count trigger for auto-compact.
 const SEND_WINDOW: usize = 200;
@@ -602,7 +608,7 @@ impl Agent {
             cfg,
             history,
             confirm,
-            max_steps: 25,
+            max_steps: MAX_TOOL_STEPS_PER_TURN,
             current_task,
             char_budget,
         }

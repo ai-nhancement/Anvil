@@ -169,6 +169,23 @@ struct GateFlow {
     step: GateStep,
 }
 
+/// One row in the `/approvals` checklist: a command prefix and whether it's
+/// currently approved (auto-runs without a prompt).
+#[derive(Clone)]
+struct ApprovalItem {
+    prefix: String,
+    approved: bool,
+}
+
+/// The `/approvals` editor: a scrollable checklist of command prefixes the user
+/// toggles to set which commands auto-run vs prompt. Built from their current list
+/// (checked) unioned with a suggested catalog (unchecked). Saved to global config.
+#[derive(Clone)]
+struct ApprovalsEditor {
+    items: Vec<ApprovalItem>,
+    selected: usize,
+}
+
 /// Slash commands shown in the interactive palette (triggered by typing `/`).
 /// Descriptions appear in the popup to help users discover the flow.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -192,6 +209,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
     ("/setup", "Alias for /config — providers, models, keys"),
     ("/swap", "Hot-swap one role's model (coder, R1, or R2): pick the role, then pick or type the model id"),
+    ("/approvals", "Edit which shell commands auto-run without a y/n prompt (checklist; Space toggles, Esc saves)"),
     ("/status", "Show roles, config state, and current gate progress"),
     ("/models", "Show each role's model facts (context window, tool-call, price) via models.dev"),
     ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
@@ -804,6 +822,8 @@ struct App {
     // Programs (first command token) the user allowed for the rest of the session,
     // so the same kind of command isn't re-confirmed over and over.
     approved_programs: std::collections::HashSet<String>,
+    // The /approvals checklist editor (Some => render + capture keys for it).
+    approvals_editor: Option<ApprovalsEditor>,
     // True while we have an open "[coder] " line accumulating streamed text. A
     // tool/confirm line closes it so the next text delta starts a fresh line.
     assistant_open: bool,
@@ -917,6 +937,7 @@ impl App {
             agent_task: None,
             confirm_tx: None,
             awaiting_confirm: None,
+            approvals_editor: None,
             confirm_selected: 0,
             approved_programs: std::collections::HashSet::new(),
             assistant_open: false,
@@ -2177,6 +2198,11 @@ impl App {
             return;
         }
 
+        if cmd == "/approvals" || cmd == "/commands" || cmd == "/approve-list" {
+            self.open_approvals_editor();
+            return;
+        }
+
         if cmd == "/new-plan" || cmd.starts_with("/new-plan ") {
             let name = cmd
                 .strip_prefix("/new-plan")
@@ -3052,6 +3078,17 @@ impl App {
                     model.as_deref(),
                     &cmd,
                 );
+                // Auto-approve commands the user's approval list covers (defaults to the
+                // safe read-only set: `git status`/`git diff`/`cd`/`ls`/… — edit via
+                // /approvals). These skip the prompt; the gate stays on everything else.
+                if crate::tools::command_matches_prefixes(&cmd, &self.effective_auto_approve()) {
+                    self.push_system(&format!("↳ auto-approved (in your /approvals list):  $ {}", cmd));
+                    if let Some(tx) = &self.confirm_tx {
+                        let _ = tx.send(true);
+                    }
+                    changed = true;
+                    continue;
+                }
                 // Auto-approve if this program was already allowed this session.
                 let prog = program_of(&cmd);
                 if !prog.is_empty() && self.approved_programs.contains(&prog) {
@@ -3651,6 +3688,110 @@ impl App {
         if let Some(tx) = &self.confirm_tx {
             let _ = tx.send(allow);
         }
+        self.follow_bottom = true;
+    }
+
+    /// The command prefixes that currently auto-approve: the user's configured list
+    /// if they've set one, otherwise the built-in safe read-only defaults.
+    fn effective_auto_approve(&self) -> Vec<String> {
+        self.cfg
+            .as_ref()
+            .and_then(|c| c.approvals.auto_approve.clone())
+            .unwrap_or_else(crate::tools::default_safe_prefixes)
+    }
+
+    /// `/approvals` — open the command-approval checklist. Rows = the user's current
+    /// approved prefixes (checked) unioned with a suggested catalog (unchecked).
+    fn open_approvals_editor(&mut self) {
+        if self.cfg.is_none() {
+            self.cfg = load_config(&self.root).ok();
+        }
+        let approved = self.effective_auto_approve();
+        let mut items: Vec<ApprovalItem> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Approved entries first (checked), preserving the user's order.
+        for p in &approved {
+            if seen.insert(p.clone()) {
+                items.push(ApprovalItem {
+                    prefix: p.clone(),
+                    approved: true,
+                });
+            }
+        }
+        // Then suggestions not already present (unchecked, opt-in).
+        for p in crate::tools::suggested_command_catalog() {
+            if seen.insert(p.clone()) {
+                items.push(ApprovalItem {
+                    prefix: p,
+                    approved: false,
+                });
+            }
+        }
+
+        self.approvals_editor = Some(ApprovalsEditor { items, selected: 0 });
+        self.push_system("=== COMMAND APPROVALS ===");
+        self.push_system("Checked commands run WITHOUT a prompt. ↑/↓ move · Space toggles · type a prefix then Enter to add a custom one · Esc saves & closes.");
+        self.follow_bottom = true;
+    }
+
+    /// Toggle the highlighted row in the approvals editor.
+    fn approvals_toggle_selected(&mut self) {
+        if let Some(ed) = &mut self.approvals_editor {
+            if let Some(item) = ed.items.get_mut(ed.selected) {
+                item.approved = !item.approved;
+            }
+        }
+    }
+
+    /// Add a typed custom prefix to the approvals editor (approved), if not present.
+    fn approvals_add_custom(&mut self, raw: &str) {
+        let prefix = raw.trim().to_string();
+        if prefix.is_empty() {
+            return;
+        }
+        if let Some(ed) = &mut self.approvals_editor {
+            if let Some(pos) = ed.items.iter().position(|i| i.prefix == prefix) {
+                // Already listed — just approve + highlight it.
+                ed.items[pos].approved = true;
+                ed.selected = pos;
+            } else {
+                ed.items.insert(
+                    0,
+                    ApprovalItem {
+                        prefix: prefix.clone(),
+                        approved: true,
+                    },
+                );
+                ed.selected = 0;
+            }
+            self.push_system(&format!("+ added \"{}\" to approvals", prefix));
+        }
+    }
+
+    /// Save the approvals editor's checked rows to the GLOBAL config and close it.
+    fn approvals_save_and_close(&mut self) {
+        let Some(ed) = self.approvals_editor.take() else {
+            return;
+        };
+        let approved: Vec<String> = ed
+            .items
+            .iter()
+            .filter(|i| i.approved)
+            .map(|i| i.prefix.clone())
+            .collect();
+        let count = approved.len();
+        let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
+        cfg.approvals.auto_approve = Some(approved);
+        match save_global_config(cfg) {
+            Ok(()) => self.push_system(&format!(
+                "✓ Saved {} approved command prefix(es) to your global config. They apply in every repo.",
+                count
+            )),
+            Err(e) => self.push_system(&format!("Could not save approvals: {}", e)),
+        }
+        // Reload so the merged in-memory view matches what's on disk.
+        self.cfg = load_config(&self.root).ok();
         self.follow_bottom = true;
     }
 
@@ -5617,6 +5758,56 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
         }
     }
 
+    // /approvals checklist editor: a modal popup. ↑/↓ move; Space toggles the
+    // highlighted row (when not mid-typing); typing builds a custom prefix and
+    // Enter adds it (Enter with empty input toggles instead); Esc saves & closes.
+    // All keys are consumed while it's open.
+    if app.approvals_editor.is_some() {
+        match key.code {
+            KeyCode::Esc => {
+                app.input.clear();
+                app.approvals_save_and_close();
+                return Ok(false);
+            }
+            KeyCode::Up => {
+                if let Some(ed) = &mut app.approvals_editor {
+                    ed.selected = ed.selected.saturating_sub(1);
+                }
+                return Ok(false);
+            }
+            KeyCode::Down => {
+                if let Some(ed) = &mut app.approvals_editor {
+                    let n = ed.items.len();
+                    ed.selected = (ed.selected + 1).min(n.saturating_sub(1));
+                }
+                return Ok(false);
+            }
+            KeyCode::Enter => {
+                if app.input.trim().is_empty() {
+                    app.approvals_toggle_selected();
+                } else {
+                    let v = app.input.clone();
+                    app.approvals_add_custom(&v);
+                    app.input.clear();
+                }
+                return Ok(false);
+            }
+            KeyCode::Char(' ') if app.input.is_empty() => {
+                app.approvals_toggle_selected();
+                return Ok(false);
+            }
+            KeyCode::Char(c) => {
+                app.input.push(c);
+                return Ok(false);
+            }
+            KeyCode::Backspace => {
+                app.input.pop();
+                return Ok(false);
+            }
+            _ => return Ok(false),
+        }
+    }
+
     // Wizard navigation (when /config or /setup is active).
     // Esc always goes back one step / exits the config menu (never quits the whole TUI while wizard is open).
     // For list steps (main menu, provider/cred choices, bindings, roles) arrows + Enter also work.
@@ -6065,6 +6256,7 @@ fn render_main(f: &mut Frame, app: &mut App) {
     render_confirm_popup(f, app, chunks[1]);
     render_wizard_popup(f, app, chunks[1]);
     render_doc_popup(f, app, chunks[1]);
+    render_approvals_popup(f, app, chunks[1]);
 }
 
 // ─── Header (5-row info panel, top-right column used for per-GPU status) ──────
@@ -6965,4 +7157,69 @@ fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) 
         )
         .wrap(Wrap { trim: false });
     f.render_widget(viewer, popup);
+}
+
+fn render_approvals_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+    let Some(ed) = &app.approvals_editor else {
+        return;
+    };
+
+    let available = chat_area.height.saturating_sub(4).max(6);
+    let needed = (ed.items.len() as u16).saturating_add(3);
+    let h = needed.min(available);
+    let popup = ratatui::layout::Rect {
+        x: chat_area.x + 2,
+        y: chat_area.y + chat_area.height.saturating_sub(h),
+        width: chat_area.width.saturating_sub(4),
+        height: h,
+    };
+    f.render_widget(Clear, popup);
+
+    let items: Vec<ListItem> = ed
+        .items
+        .iter()
+        .map(|it| {
+            let (mark, mark_col) = if it.approved {
+                ("[x] ", Color::Green)
+            } else {
+                ("[ ] ", Color::DarkGray)
+            };
+            ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(mark, Style::default().fg(mark_col)),
+                Span::raw(format!("{}  ", it.prefix)),
+            ]))
+        })
+        .collect();
+
+    // Show any in-progress custom entry in the title so the user sees what they're typing.
+    let title = if app.input.trim().is_empty() {
+        " Command approvals — Space toggle · type prefix + Enter to add · Esc save ".to_string()
+    } else {
+        format!(" Add prefix: \"{}\"  (Enter to add · Esc save) ", app.input)
+    };
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(" ▶ ");
+
+    let mut state = ListState::default();
+    state.select(Some(ed.selected));
+    f.render_stateful_widget(list, popup, &mut state);
 }

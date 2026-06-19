@@ -30,6 +30,10 @@ pub struct AnvilConfig {
     /// Web-search backend for evidence-gathering specialists (v0.4.0).
     #[serde(default)]
     pub web_search: WebSearchSettings,
+
+    /// Command-approval policy (which shell commands skip the y/n prompt).
+    #[serde(default)]
+    pub approvals: ApprovalSettings,
 }
 
 /// `[web_search]` block: which backend the `researcher` specialist uses. The API
@@ -40,6 +44,18 @@ pub struct WebSearchSettings {
     /// "tavily" (default) or "brave". `None` → the built-in default at call time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+}
+
+/// `[approvals]` block: the user's command-approval policy. Commands whose line
+/// matches one of these prefixes run without a confirmation prompt; everything
+/// else still asks. `None` means "never configured" → the built-in safe read-only
+/// default set applies. `Some(list)` (even empty) is taken as the user's explicit
+/// choice. Edited via the `/approvals` checklist. Stored globally by default.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ApprovalSettings {
+    /// Command-line prefixes that auto-approve (e.g. "git diff", "cargo build").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_approve: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -190,6 +206,11 @@ fn merge(mut base: AnvilConfig, overlay: AnvilConfig) -> AnvilConfig {
     }
     if overlay.web_search.provider.is_some() {
         base.web_search.provider = overlay.web_search.provider;
+    }
+    // A project that sets its own approval list overrides the global one (a risky
+    // repo can tighten what the permissive global list allows).
+    if overlay.approvals.auto_approve.is_some() {
+        base.approvals.auto_approve = overlay.approvals.auto_approve;
     }
     base
 }

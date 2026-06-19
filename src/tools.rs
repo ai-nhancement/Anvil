@@ -175,6 +175,133 @@ pub fn requires_confirmation(name: &str) -> bool {
     name == "run_command"
 }
 
+/// The built-in default auto-approve prefixes: read-only inspection + navigation
+/// that cannot modify the repo, the filesystem, or anything outside it. Used when
+/// the user has never configured an approval list (`approvals.auto_approve == None`).
+/// Once they edit the `/approvals` checklist, their explicit list replaces this.
+pub fn default_safe_prefixes() -> Vec<String> {
+    [
+        // read-only git
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git blame",
+        "git grep",
+        "git ls-files",
+        "git rev-parse",
+        "git describe",
+        "git shortlog",
+        // navigation / inspection
+        "cd",
+        "ls",
+        "pwd",
+        "cat",
+        "head",
+        "tail",
+        "echo",
+        "wc",
+        "which",
+        "where",
+        "tree",
+        "dir",
+        "type",
+        "stat",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Extra common commands offered (unchecked) in the `/approvals` checklist so the
+/// user can opt into them. These can change state or run arbitrary code, so they
+/// are NOT auto-approved by default — they're suggestions, not defaults.
+pub fn suggested_command_catalog() -> Vec<String> {
+    [
+        "cargo build",
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "cargo fmt",
+        "cargo run",
+        "npm install",
+        "npm test",
+        "npm run build",
+        "pnpm build",
+        "yarn build",
+        "node",
+        "python",
+        "python3",
+        "pytest",
+        "make",
+        "git add",
+        "git commit",
+        "git push",
+        "git pull",
+        "git fetch",
+        "git checkout",
+        "git stash",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Whether `command` auto-runs without a confirmation prompt, given the user's
+/// approved `prefixes`. A command matches when EVERY segment of any pipe/chain
+/// matches one of the prefixes (token-aware: prefix "git diff" matches
+/// "git diff --stat", "cd" matches "cd src" but not "cdfoo"). Commands containing
+/// output redirection, command substitution, or an `--output` flag NEVER auto-run,
+/// regardless of the list — those can write files or execute arbitrary code.
+pub fn command_matches_prefixes(command: &str, prefixes: &[String]) -> bool {
+    let cmd = command.trim();
+    if cmd.is_empty() || prefixes.is_empty() {
+        return false;
+    }
+    if cmd.contains('>') || cmd.contains('`') || cmd.contains("$(") || cmd.contains("--output") {
+        return false;
+    }
+    cmd.split(['|', ';', '&'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .all(|seg| prefixes.iter().any(|p| segment_matches_prefix(seg, p)))
+}
+
+/// One command segment (split out of any pipe/chain) starts with `prefix`, matched
+/// token-by-token. The program token (index 0) is normalized — lowercased, with any
+/// leading path and a `.exe` suffix stripped — so `C:\Program Files\git.exe status`
+/// still matches the prefix `git status`.
+fn segment_matches_prefix(seg: &str, prefix: &str) -> bool {
+    let ptoks: Vec<String> = prefix
+        .split_whitespace()
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    if ptoks.is_empty() {
+        return false;
+    }
+    let stoks: Vec<&str> = seg.split_whitespace().collect();
+    if ptoks.len() > stoks.len() {
+        return false;
+    }
+    for (i, pt) in ptoks.iter().enumerate() {
+        let st = if i == 0 {
+            let base = stoks[0]
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(stoks[0])
+                .to_ascii_lowercase();
+            base.strip_suffix(".exe").unwrap_or(&base).to_string()
+        } else {
+            stoks[i].to_ascii_lowercase()
+        };
+        if &st != pt {
+            return false;
+        }
+    }
+    true
+}
+
+
 /// Short human label for the tool call, shown in the transcript (`[tool] ...`).
 pub fn summarize_args(call: &ToolCall) -> String {
     match call.name.as_str() {
@@ -869,6 +996,67 @@ mod tests {
         // Path = a directory still recurses and finds it.
         let r2 = execute(&call("grep", json!({"pattern": "waveDelay"})), root);
         assert!(r2.contains("src/game.js:2:"), "{r2}");
+    }
+
+    #[test]
+    fn default_safe_set_auto_approves_readonly_not_mutating() {
+        let safe = default_safe_prefixes();
+        // Read-only inspection + navigation — no prompt under the defaults.
+        for ok in [
+            "git status",
+            "git diff --stat HEAD~1",
+            "git log --oneline -5",
+            "git show HEAD",
+            "cd src",
+            "ls -la",
+            "pwd",
+            "cat Cargo.toml",
+            "git status && git diff", // chain of safe segments
+            "git log | cat",
+        ] {
+            assert!(command_matches_prefixes(ok, &safe), "should be safe: {ok}");
+        }
+        // Mutating / arbitrary-code / unknown — still prompt under the defaults.
+        for danger in [
+            "cargo build",        // executes arbitrary build/test code
+            "git push",
+            "git reset --hard",
+            "git clean -fd",
+            "git commit -m x",
+            "git branch -D feat", // mutating git subcommand
+            "rm -rf target",
+            "echo hi > file.txt", // redirection writes a file
+            "cat $(whoami)",      // command substitution
+            "git diff && rm x",   // one unsafe segment poisons the chain
+            "",
+        ] {
+            assert!(
+                !command_matches_prefixes(danger, &safe),
+                "should require approval: {danger}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_prefix_matching_is_token_aware() {
+        let prefixes = vec!["git diff".to_string(), "cargo build".to_string(), "cd".to_string()];
+        // Prefix matches when leading tokens match.
+        assert!(command_matches_prefixes("git diff --stat HEAD~1", &prefixes));
+        assert!(command_matches_prefixes("cargo build --release", &prefixes));
+        assert!(command_matches_prefixes("cd src/llm", &prefixes));
+        // Not a prefix of an approved entry.
+        assert!(!command_matches_prefixes("git push", &prefixes));
+        assert!(!command_matches_prefixes("cargo test", &prefixes));
+        // Token-aware: "cd" must not match "cdfoo".
+        assert!(!command_matches_prefixes("cdfoo", &prefixes));
+        // Chain: every segment must match an approved prefix.
+        assert!(command_matches_prefixes("cd src && git diff", &prefixes));
+        assert!(!command_matches_prefixes("git diff && rm x", &prefixes));
+        // Redirection / substitution never auto-run.
+        assert!(!command_matches_prefixes("git diff > out.txt", &prefixes));
+        assert!(!command_matches_prefixes("git diff --output=x", &prefixes));
+        // Empty list never matches.
+        assert!(!command_matches_prefixes("git diff", &[]));
     }
 
     #[test]

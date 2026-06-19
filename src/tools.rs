@@ -301,7 +301,6 @@ fn segment_matches_prefix(seg: &str, prefix: &str) -> bool {
     true
 }
 
-
 /// Short human label for the tool call, shown in the transcript (`[tool] ...`).
 pub fn summarize_args(call: &ToolCall) -> String {
     match call.name.as_str() {
@@ -1018,7 +1017,7 @@ mod tests {
         }
         // Mutating / arbitrary-code / unknown — still prompt under the defaults.
         for danger in [
-            "cargo build",        // executes arbitrary build/test code
+            "cargo build", // executes arbitrary build/test code
             "git push",
             "git reset --hard",
             "git clean -fd",
@@ -1039,9 +1038,16 @@ mod tests {
 
     #[test]
     fn command_prefix_matching_is_token_aware() {
-        let prefixes = vec!["git diff".to_string(), "cargo build".to_string(), "cd".to_string()];
+        let prefixes = vec![
+            "git diff".to_string(),
+            "cargo build".to_string(),
+            "cd".to_string(),
+        ];
         // Prefix matches when leading tokens match.
-        assert!(command_matches_prefixes("git diff --stat HEAD~1", &prefixes));
+        assert!(command_matches_prefixes(
+            "git diff --stat HEAD~1",
+            &prefixes
+        ));
         assert!(command_matches_prefixes("cargo build --release", &prefixes));
         assert!(command_matches_prefixes("cd src/llm", &prefixes));
         // Not a prefix of an approved entry.

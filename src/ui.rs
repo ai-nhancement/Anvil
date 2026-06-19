@@ -3082,7 +3082,10 @@ impl App {
                 // safe read-only set: `git status`/`git diff`/`cd`/`ls`/… — edit via
                 // /approvals). These skip the prompt; the gate stays on everything else.
                 if crate::tools::command_matches_prefixes(&cmd, &self.effective_auto_approve()) {
-                    self.push_system(&format!("↳ auto-approved (in your /approvals list):  $ {}", cmd));
+                    self.push_system(&format!(
+                        "↳ auto-approved (in your /approvals list):  $ {}",
+                        cmd
+                    ));
                     if let Some(tx) = &self.confirm_tx {
                         let _ = tx.send(true);
                     }

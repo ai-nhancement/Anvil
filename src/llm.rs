@@ -407,6 +407,27 @@ impl LlmClient {
     // OpenAI-compatible (Chat Completions) — the workhorse for Ollama + 80% of others
     // ──────────────────────────────────────────────────────────────────────────
 
+    /// Resolve the base URL for an OpenAI-compatible provider.
+    ///
+    /// We deliberately do NOT default to OpenAI. A missing base_url on a non-OpenAI
+    /// gateway (Gradient, Groq, local, ...) used to silently send the user's key to
+    /// api.openai.com — a confusing 401 and a credential leak. Now it errors clearly.
+    fn openai_compat_base(conn: &ProviderConnection) -> Result<String> {
+        match conn
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(b) => Ok(b.trim_end_matches('/').to_string()),
+            None => Err(anyhow!(
+                "provider has no base_url set. OpenAI-compatible providers need an explicit base URL \
+                 (e.g. https://inference.do-ai.run/v1 for Gradient, https://api.x.ai/v1 for xAI, \
+                 https://api.openai.com/v1 for OpenAI). Run /config and set this provider's base URL."
+            )),
+        }
+    }
+
     async fn chat_openai_compat(
         &self,
         conn: &ProviderConnection,
@@ -416,11 +437,7 @@ impl LlmClient {
         user: &str,
         stream: bool,
     ) -> Result<String> {
-        let base = conn
-            .base_url
-            .as_deref()
-            .unwrap_or("https://api.openai.com/v1")
-            .trim_end_matches('/');
+        let base = Self::openai_compat_base(conn)?;
 
         let url = format!("{}/chat/completions", base);
 
@@ -586,11 +603,7 @@ impl LlmClient {
         user: &str,
         token_tx: UnboundedSender<String>,
     ) -> Result<String> {
-        let base = conn
-            .base_url
-            .as_deref()
-            .unwrap_or("https://api.openai.com/v1")
-            .trim_end_matches('/');
+        let base = Self::openai_compat_base(conn)?;
 
         let url = format!("{}/chat/completions", base);
 
@@ -1187,11 +1200,7 @@ impl LlmClient {
         tools: &[ToolDef],
         token_tx: UnboundedSender<String>,
     ) -> Result<AssistantTurn> {
-        let base = conn
-            .base_url
-            .as_deref()
-            .unwrap_or("https://api.openai.com/v1")
-            .trim_end_matches('/');
+        let base = Self::openai_compat_base(conn)?;
         let url = format!("{}/chat/completions", base);
 
         // Build the messages array (system + history) in OpenAI wire form.

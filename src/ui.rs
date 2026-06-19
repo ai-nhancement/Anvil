@@ -341,7 +341,13 @@ const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
     ("Azure", "azure", "azure_openai", "", true),
     ("AWS", "aws", "openai_compat", "", true),
     ("Vertex AI", "vertex", "openai_compat", "", true),
-    ("Gradient", "gradient", "openai_compat", "", true),
+    (
+        "Gradient",
+        "gradient",
+        "openai_compat",
+        "https://inference.do-ai.run/v1",
+        true,
+    ),
     (
         "Ollama (local)",
         "ollama",

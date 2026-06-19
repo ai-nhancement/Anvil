@@ -175,6 +175,12 @@ pub fn run_phase_start(root: &Path, id: &str) -> Result<Option<String>> {
     load_local_env(root);
     let id = normalize_phase_id(id);
     let mut state = load_state(root);
+    // Mark where this phase's work begins (so the review can diff base..worktree
+    // and see committed work). Preserve it if you re-start the same phase mid-work.
+    let changing = state.current_phase.as_deref() != Some(id.as_str());
+    if changing || state.phase_base.is_none() {
+        state.phase_base = git_head_sha(root);
+    }
     state.current_phase = Some(id.clone());
     save_state(root, &state)?;
 
@@ -335,22 +341,68 @@ pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
         state.shipped_phases.push(id.to_string());
     }
     state.current_phase = None; // ready for next
+    state.phase_base = git_head_sha(root); // the next phase's work starts from here
     save_state(root, &state)?;
     Ok(())
 }
 
-/// Capture the working-tree diff against HEAD (staged + unstaged), plus the
-/// names of any untracked files, so reviewers critique the *actual* change.
-fn capture_git_diff(root: &Path) -> String {
-    use std::process::Command;
-    let mut diff = match Command::new("git")
-        .args(["diff", "HEAD"])
+/// Current HEAD commit sha (short), or None outside a git repo / with no commits.
+pub(crate) fn git_head_sha(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
         .current_dir(root)
         .output()
-    {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Err(e) => return format!("(could not run `git diff`: {})", e),
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+/// Capture the phase's change set for review. Diffs from the recorded phase base
+/// (`base..worktree`, so *committed* work since the phase started is included),
+/// falling back to `git diff HEAD` (uncommitted) and then the most recent commit
+/// when no base is recorded — plus the names of any untracked files.
+fn capture_git_diff(root: &Path) -> String {
+    use std::process::Command;
+    let git = |args: &[&str]| -> Option<String> {
+        Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
     };
+
+    let base = load_state(root).phase_base;
+    let mut diff = String::new();
+    // 1) Everything since the phase base (commits + uncommitted), if we have one.
+    if let Some(b) = base.as_deref() {
+        if let Some(d) = git(&["diff", b]) {
+            diff = d;
+        }
+    }
+    // 2) Otherwise (or if the base diff is empty) the uncommitted working tree.
+    if diff.trim().is_empty() {
+        diff = git(&["diff", "HEAD"]).unwrap_or_default();
+    }
+    // 3) Last resort: the most recent commit, so a single committed phase with no
+    //    recorded base is still reviewable (labelled so the reviewer knows).
+    if diff.trim().is_empty() {
+        if let Some(d) = git(&["diff", "HEAD~1", "HEAD"]) {
+            if !d.trim().is_empty() {
+                diff = format!(
+                    "(no base recorded and no uncommitted changes — showing the most recent commit)\n{d}"
+                );
+            }
+        }
+    }
     if let Ok(o) = Command::new("git")
         .args(["ls-files", "--others", "--exclude-standard"])
         .current_dir(root)
@@ -363,7 +415,7 @@ fn capture_git_diff(root: &Path) -> String {
         }
     }
     if diff.trim().is_empty() {
-        return "(no changes vs HEAD — nothing to review for this phase yet)".to_string();
+        return "(no changes since the phase started — nothing to review yet; the coder may not have implemented this phase)".to_string();
     }
     if diff.len() > 120_000 {
         diff.truncate(120_000);
@@ -522,6 +574,49 @@ mod tests {
         assert!(sec.contains("Phase 0 — Bootstrap"), "{sec}");
         assert!(sec.contains("do a thing"), "{sec}");
         assert!(!sec.contains("Phase 1"), "{sec}");
+    }
+
+    #[test]
+    fn phase_diff_captures_committed_work_since_base() {
+        // Skip gracefully where git isn't available (the rest of the suite is git-free).
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let base = git_head_sha(root).expect("head sha");
+
+        // Phase work, then committed — a plain `git diff HEAD` would now be empty.
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "phase work"]);
+        assert!(git(&["diff", "HEAD"]).stdout.is_empty());
+
+        // With the phase base recorded, the review still sees the committed change.
+        let mut st = load_state(root);
+        st.phase_base = Some(base);
+        save_state(root, &st).unwrap();
+        let diff = capture_git_diff(root);
+        assert!(diff.contains("b.txt"), "{diff}");
     }
 
     #[test]

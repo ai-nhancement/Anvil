@@ -18,6 +18,13 @@ pub struct ProjectState {
     #[serde(default)]
     pub shipped_phases: Vec<String>,
 
+    /// Git commit (HEAD sha) marking where the current phase's work begins, so the
+    /// phase review can diff `base..worktree` and capture changes even if the coder
+    /// committed them (a plain `git diff HEAD` would miss committed work). Recorded
+    /// when a phase starts and when one ships (base for the next phase).
+    #[serde(default)]
+    pub phase_base: Option<String>,
+
     /// Has the user explicitly accepted "Work in this Repo" (auto context seeding of key files
     /// at TUI boot for the coder chat). This delivers the low-friction "open the folder" experience
     /// without requiring manual /include for basic grounding on every launch.

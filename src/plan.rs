@@ -164,6 +164,8 @@ pub fn accept_plan(root: &Path) -> Result<()> {
     }
 
     state.accepted_plan_hash = Some(hash.clone());
+    // Boundary before P0 so the first phase's review diffs from here.
+    state.phase_base = crate::phase::git_head_sha(root);
     save_state(root, &state)?;
 
     println!(

@@ -1762,6 +1762,9 @@ impl App {
                 let hash = crate::plan::simple_hash(&plan_txt);
                 let mut st = load_state(&self.root);
                 st.accepted_plan_hash = Some(hash);
+                // Mark the boundary before P0 so the first phase's review diffs
+                // from here regardless of when work was built.
+                st.phase_base = crate::phase::git_head_sha(&self.root);
                 if let Err(e) = save_state(&self.root, &st) {
                     self.push_system(&format!("Warning: could not persist accept hash: {}", e));
                 }

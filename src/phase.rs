@@ -175,10 +175,11 @@ pub fn run_phase_start(root: &Path, id: &str) -> Result<Option<String>> {
     load_local_env(root);
     let id = normalize_phase_id(id);
     let mut state = load_state(root);
-    // Mark where this phase's work begins (so the review can diff base..worktree
-    // and see committed work). Preserve it if you re-start the same phase mid-work.
-    let changing = state.current_phase.as_deref() != Some(id.as_str());
-    if changing || state.phase_base.is_none() {
+    // Record the phase base only if we don't already have one. The boundary of the
+    // previous milestone (plan accept / last ship) is the correct start — re-recording
+    // HEAD here would skip work the coder already did *before* /phase-start was run
+    // (e.g. building P3 then running /phase-start P3 made the review diff empty).
+    if state.phase_base.is_none() {
         state.phase_base = git_head_sha(root);
     }
     state.current_phase = Some(id.clone());
@@ -503,15 +504,36 @@ fn capture_git_diff(root: &Path) -> String {
             }
         }
     }
-    if let Ok(o) = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(root)
-        .output()
-    {
-        let untracked = String::from_utf8_lossy(&o.stdout);
-        if !untracked.trim().is_empty() {
-            diff.push_str("\n\n--- Untracked files (names only) ---\n");
-            diff.push_str(&untracked);
+    // New (untracked) files never appear in `git diff` — but a phase is often
+    // implemented as brand-new files, so include their *content* (not just names),
+    // or the reviewer would think nothing was done.
+    if let Some(list) = git(&["ls-files", "--others", "--exclude-standard"]) {
+        for name in list.lines().filter(|l| !l.trim().is_empty()).take(40) {
+            let is_binary = Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|ext| {
+                    crate::tools::SKIP_EXTS
+                        .iter()
+                        .any(|x| x.eq_ignore_ascii_case(ext))
+                })
+                .unwrap_or(false);
+            if is_binary {
+                diff.push_str(&format!("\n--- New file (binary, not shown): {name} ---\n"));
+                continue;
+            }
+            match fs::read_to_string(root.join(name)) {
+                Ok(content) => {
+                    diff.push_str(&format!("\n--- New file: {name} ---\n"));
+                    let capped: String = content.chars().take(20_000).collect();
+                    diff.push_str(&capped);
+                    if content.len() > capped.len() {
+                        diff.push_str("\n… [new file truncated]");
+                    }
+                    diff.push('\n');
+                }
+                Err(_) => diff.push_str(&format!("\n--- New file (unreadable): {name} ---\n")),
+            }
         }
     }
     if diff.trim().is_empty() {
@@ -732,6 +754,14 @@ mod tests {
         save_state(root, &st).unwrap();
         let diff = capture_git_diff(root);
         assert!(diff.contains("b.txt"), "{diff}");
+
+        // A brand-new untracked file (a phase built as new files) must show its
+        // CONTENT, not just its name — git diff never includes untracked files.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/p3.js"), "function p3() { return 42; }\n").unwrap();
+        let diff2 = capture_git_diff(root);
+        assert!(diff2.contains("New file: src/p3.js"), "{diff2}");
+        assert!(diff2.contains("function p3"), "{diff2}");
     }
 
     #[test]

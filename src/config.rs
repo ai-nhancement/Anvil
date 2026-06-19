@@ -216,6 +216,34 @@ pub fn ensure_anvil_dir(root: &Path) -> Result<PathBuf, ConfigError> {
     Ok(dir)
 }
 
+/// Best-effort: ensure the repo's `.gitignore` excludes `.anvil/` so per-session
+/// state and logs aren't committed. Idempotent (won't duplicate an existing
+/// entry) and a no-op outside a git repo (so we don't litter a `.gitignore`
+/// where there's no git). Failures are swallowed — this is housekeeping.
+pub fn ensure_anvil_gitignored(root: &Path) {
+    // `.git` is a dir in a normal repo, a file in worktrees/submodules — both `exists()`.
+    if !root.join(".git").exists() {
+        return;
+    }
+    let path = root.join(".gitignore");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let already = existing
+        .lines()
+        .any(|l| matches!(l.trim(), ".anvil" | ".anvil/" | "/.anvil" | "/.anvil/"));
+    if already {
+        return;
+    }
+    let mut out = existing;
+    if !out.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n'); // blank line separating our block from prior content
+    }
+    out.push_str("# Anvil session state (local; safe to delete)\n.anvil/\n");
+    let _ = std::fs::write(&path, out);
+}
+
 impl AnvilConfig {
     pub fn get_binding(&self, name: &str) -> Result<&ModelBinding, ConfigError> {
         self.model_bindings
@@ -427,6 +455,29 @@ pub fn set_local_env_var(root: &Path, key: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gitignore_added_then_idempotent_and_skipped_without_git() {
+        // No .git → no .gitignore written.
+        let no_git = tempfile::tempdir().unwrap();
+        ensure_anvil_gitignored(no_git.path());
+        assert!(!no_git.path().join(".gitignore").exists());
+
+        // With .git → entry appended once, preserving existing content.
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+        ensure_anvil_gitignored(repo.path());
+        let gi = std::fs::read_to_string(repo.path().join(".gitignore")).unwrap();
+        assert!(gi.contains("target/"), "{gi}");
+        assert!(gi.contains(".anvil/"), "{gi}");
+
+        // Second call is a no-op (no duplicate).
+        ensure_anvil_gitignored(repo.path());
+        let gi2 = std::fs::read_to_string(repo.path().join(".gitignore")).unwrap();
+        assert_eq!(gi, gi2);
+        assert_eq!(gi2.matches(".anvil/").count(), 1, "{gi2}");
+    }
 
     /// Mirrors the config the role-assignment wizard produces: the role stores the
     /// binding name, and a model_binding + provider exist under that name.

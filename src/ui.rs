@@ -37,8 +37,8 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, ConfirmHandle};
 use crate::config::{
-    ensure_anvil_dir, load_config, load_local_env, save_global_config, set_local_env_var,
-    AnvilConfig, CredentialRef, ModelBinding, ProviderConnection,
+    ensure_anvil_dir, ensure_anvil_gitignored, load_config, load_local_env, save_global_config,
+    set_local_env_var, AnvilConfig, CredentialRef, ModelBinding, ProviderConnection,
 };
 use crate::llm::{ChatMessage, LlmClient, Role};
 use crate::state::{load_state, reviews_dir, save_state};
@@ -887,6 +887,11 @@ impl App {
         // Establish the per-session chat log file *immediately*, before any push_system (which will now write into it).
         // One file per TUI launch: .anvil/chat-YYYY-MM-DD-HH-MM-SS-mmm.jsonl
         // This makes it trivial to look at exactly one session or rm old ones you don't care about.
+        // Keep the local session state out of git (no-op outside a git repo / if
+        // already ignored). Now that keys live globally, .anvil/ is just logs +
+        // working memory — housekeeping, not secrets.
+        ensure_anvil_gitignored(&app.root);
+
         if let Ok(dir) = ensure_anvil_dir(&app.root) {
             let now = Utc::now();
             // Use milliseconds and replace '.' so the filename is clean on all filesystems.

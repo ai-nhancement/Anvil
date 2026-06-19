@@ -687,14 +687,12 @@ pub fn run_ui(root: &Path) -> Result<()> {
 }
 
 fn is_unconfigured(root: &Path) -> bool {
-    if !root.join("anvil.toml").exists() {
-        return true;
-    }
+    // Use the *merged* config (global base + optional per-repo override), not the
+    // presence of a project anvil.toml — a fresh repo has no local file yet is
+    // fully configured by the global config. load_config errors only when neither
+    // exists; otherwise we're configured once both reviewers resolve.
     match load_config(root) {
-        Ok(cfg) => {
-            // Consider unconfigured unless the two critical reviewers are both set.
-            cfg.roles.reviewer_a.is_none() || cfg.roles.reviewer_b.is_none()
-        }
+        Ok(cfg) => cfg.roles.reviewer_a.is_none() || cfg.roles.reviewer_b.is_none(),
         Err(_) => true,
     }
 }

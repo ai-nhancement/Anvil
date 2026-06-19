@@ -144,6 +144,17 @@ pub fn tool_defs() -> Vec<ToolDef> {
     ]
 }
 
+/// The read-only subset of tools — safe for an investigating *reviewer*: no
+/// writes, no edits, no command execution. Lets a reviewer verify the coder's
+/// claims against the actual files instead of trusting the handoff/diff.
+pub fn read_only_tool_defs() -> Vec<ToolDef> {
+    const READ_ONLY: &[&str] = &["read_file", "list_dir", "grep", "project_state"];
+    tool_defs()
+        .into_iter()
+        .filter(|d| READ_ONLY.contains(&d.name.as_str()))
+        .collect()
+}
+
 /// Whether a tool must be confirmed by the user before it runs.
 pub fn requires_confirmation(name: &str) -> bool {
     name == "run_command"
@@ -797,6 +808,17 @@ mod tests {
             id: "t".into(),
             name: name.into(),
             arguments: args,
+        }
+    }
+
+    #[test]
+    fn read_only_tool_defs_excludes_mutating_tools() {
+        let names: Vec<String> = read_only_tool_defs().into_iter().map(|d| d.name).collect();
+        for safe in ["read_file", "list_dir", "grep", "project_state"] {
+            assert!(names.iter().any(|n| n == safe), "missing {safe}");
+        }
+        for danger in ["write_file", "edit_file", "apply_patch", "run_command"] {
+            assert!(!names.iter().any(|n| n == danger), "leaked {danger}");
         }
     }
 

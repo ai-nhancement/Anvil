@@ -465,7 +465,7 @@ pub fn run_phase_r1_diff(root: &Path, id: &str) -> Result<String> {
         .reviewer_a
         .as_deref()
         .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
-    crate::plan::run_single_review(&client, &cfg, reviewer_a, &content, "R1", &reviews, &id)
+    crate::plan::run_single_review(&client, &cfg, reviewer_a, &content, "R1", root, &id)
 }
 
 /// R2 of a phase: reviewer-b critiques the current diff. Writes REVIEW_<id>_R2.md.
@@ -482,7 +482,7 @@ pub fn run_phase_r2_diff(root: &Path, id: &str) -> Result<String> {
         .reviewer_b
         .as_deref()
         .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
-    crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", &reviews, &id)
+    crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", root, &id)
 }
 
 pub(crate) fn extract_phase(plan: &str, id: &str) -> Option<String> {

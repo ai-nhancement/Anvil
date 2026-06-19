@@ -18,8 +18,12 @@ use anyhow::{anyhow, Result};
 use colored::Colorize;
 
 use crate::config::{load_config, load_local_env};
-use crate::llm::LlmClient;
+use crate::llm::{ChatMessage, LlmClient};
 use crate::state::{load_state, reviews_dir, save_state};
+
+/// Max investigation steps a reviewer may take (tool calls) before it must write
+/// up its findings — bounds cost on a cross-vendor review.
+const REVIEWER_MAX_STEPS: usize = 14;
 
 const PLAN_SYSTEM: &str = "\
 You are an excellent technical planner. Given the user's project intent, produce a realistic phased plan.
@@ -104,27 +108,11 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
     );
 
     // R1
-    let _r1 = run_single_review(
-        &client,
-        &cfg,
-        reviewer_a,
-        &plan_content,
-        "R1",
-        &reviews,
-        "plan",
-    )?;
+    let _r1 = run_single_review(&client, &cfg, reviewer_a, &plan_content, "R1", root, "plan")?;
     println!("{} R1 complete — findings saved", "✓".green());
 
     // R2 — always happens, even if R1 was brutal.
-    let _r2 = run_single_review(
-        &client,
-        &cfg,
-        reviewer_b,
-        &plan_content,
-        "R2",
-        &reviews,
-        "plan",
-    )?;
+    let _r2 = run_single_review(&client, &cfg, reviewer_b, &plan_content, "R2", root, "plan")?;
     println!("{} R2 complete — findings saved", "✓".green());
 
     println!("\n{}", "Both review rounds finished.".bold());
@@ -229,7 +217,7 @@ pub fn run_single_review(
     reviewer_role: &str,
     content: &str,
     round: &str,
-    reviews_dir: &Path,
+    root: &Path,
     artifact: &str,
 ) -> Result<String> {
     // Accepts either a role keyword ("reviewer_a"/"reviewer_b") or the bound
@@ -240,24 +228,78 @@ pub fn run_single_review(
 
     let api_key = client.get_credential(&binding.provider, provider)?;
 
-    // Default system is for direct plan review (used by legacy one-shot and TUI /lock-plan).
+    // The reviewer is an *investigator*, not a rubber stamp. The hard-won lesson:
+    // every frontier coder (Claude/GPT/Grok) will at times claim work it did not
+    // do — so the reviewer must confirm against the real files, never the handoff.
     let system = "You are a skeptical, experienced engineer from a *different* model family than the coder/implementer. \
-                  Your job is to find real problems, scope issues, hidden risks, weak acceptance criteria, and things the implementer missed. \
-                  Do not be nice. Be specific. Cite exact sections, file names or phase ids. \
-                  Output a short structured review with sections: ## Summary, ## High, ## Medium, ## Low, ## Questions.";
+                  Your job is to find real problems: work the implementer claims but did NOT actually do, scope drift, hidden risks, missing or broken tests, and weak acceptance criteria. \
+                  CRITICAL: do NOT trust the summary or diff you are given — coders frequently report work as done when it is not. \
+                  You have READ-ONLY tools (read_file, list_dir, grep, project_state). USE THEM to verify against the actual files on disk: open the files the change claims to touch, confirm the code really exists and does what is claimed, check that tests exist and cover it, and confirm earlier phases' acceptance criteria still hold. \
+                  Base every finding on what you actually read; cite exact file paths and line numbers. Do not be nice. Be specific. \
+                  When you have investigated enough, output a structured review with sections: ## Summary, ## High, ## Medium, ## Low, ## Questions. \
+                  In ## Summary, state explicitly what you independently verified in the code versus what you could not confirm.";
 
     let user = format!(
-        "Review the following artifact ({}).\n\n--- CONTENT ---\n{}\n--- END CONTENT ---\n\nProduce the structured review now.",
-        round, content
+        "Review the following artifact ({round}). The content below is the implementer's CLAIM, not ground truth — verify it against the real files with your tools before trusting any of it.\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---\n\nInvestigate with your read-only tools, then produce the structured review.",
     );
 
-    // No stdout here: this runs inside the TUI's alternate screen (would corrupt
-    // it). The TUI shows live "R1/R2 reviewing — <model>" status in the header;
-    // the CLI path (run_plan) prints its own round-level progress around this call.
-    let findings =
-        LlmClient::block_on(client.chat(provider, &binding.model, &api_key, system, &user))?;
+    // Agentic read-only loop: the reviewer may read/grep/list the repo to confirm
+    // claims, then writes its findings. Runs inside the TUI alternate screen, so no
+    // stdout here; the header shows live "R1/R2 reviewing — <model>" status.
+    let tools = crate::tools::read_only_tool_defs();
+    let findings = LlmClient::block_on(async {
+        // Sink for streamed deltas — kept in scope so sends don't fail; the gate
+        // surfaces progress via the header, not this stream.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut history = vec![ChatMessage::user(user)];
+        let mut final_text = String::new();
+        for _ in 0..REVIEWER_MAX_STEPS {
+            let turn = client
+                .chat_turn_stream(
+                    provider,
+                    &binding.model,
+                    &api_key,
+                    system,
+                    &history,
+                    &tools,
+                    tx.clone(),
+                )
+                .await?;
+            history.push(ChatMessage::assistant(
+                turn.text.clone(),
+                turn.tool_calls.clone(),
+            ));
+            if turn.tool_calls.is_empty() {
+                final_text = turn.text;
+                break;
+            }
+            for call in &turn.tool_calls {
+                let result = crate::tools::execute(call, root);
+                history.push(ChatMessage::tool_result(call.id.clone(), result));
+            }
+        }
+        // Hit the step cap mid-investigation — force the writeup with no tools.
+        if final_text.trim().is_empty() {
+            history.push(ChatMessage::user(
+                "Stop investigating now and output the structured review based on what you have verified so far.".to_string(),
+            ));
+            let turn = client
+                .chat_turn_stream(
+                    provider,
+                    &binding.model,
+                    &api_key,
+                    system,
+                    &history,
+                    &[],
+                    tx.clone(),
+                )
+                .await?;
+            final_text = turn.text;
+        }
+        Ok::<String, anyhow::Error>(final_text)
+    })?;
 
-    let out_path = reviews_dir.join(format!("REVIEW_{}_{}.md", artifact, round));
+    let out_path = reviews_dir(root).join(format!("REVIEW_{}_{}.md", artifact, round));
     let header = format!(
         "# {} — {} Review ({})\n\n**Reviewer:** {} ({} via {})\n**Date:** {}\n\n",
         artifact,
@@ -350,15 +392,7 @@ pub fn run_plan_r1(root: &Path) -> Result<String> {
         .as_deref()
         .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
 
-    let findings = run_single_review(
-        &client,
-        &cfg,
-        reviewer_a,
-        &plan_content,
-        "R1",
-        &reviews,
-        "plan",
-    )?;
+    let findings = run_single_review(&client, &cfg, reviewer_a, &plan_content, "R1", root, "plan")?;
     Ok(findings)
 }
 
@@ -368,8 +402,6 @@ pub fn run_plan_r2(root: &Path) -> Result<String> {
     load_local_env(root);
     let cfg = load_config(root)?;
     let client = LlmClient::new();
-    let reviews = reviews_dir(root);
-    // no need to mkdir again
 
     let plan_path = root.join("plan.md");
     if !plan_path.exists() {
@@ -383,15 +415,7 @@ pub fn run_plan_r2(root: &Path) -> Result<String> {
         .as_deref()
         .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
 
-    let findings = run_single_review(
-        &client,
-        &cfg,
-        reviewer_b,
-        &plan_content,
-        "R2",
-        &reviews,
-        "plan",
-    )?;
+    let findings = run_single_review(&client, &cfg, reviewer_b, &plan_content, "R2", root, "plan")?;
     Ok(findings)
 }
 

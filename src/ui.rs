@@ -549,6 +549,12 @@ const SPLASH_ANVIL: &[&str] = &[
 /// Logo PNG bundled at compile time — decoded at runtime into half-block pixels.
 static LOGO_BYTES: &[u8] = include_bytes!("../anvil_logo.png");
 
+/// Sentinel list entry (one per configured provider) shown in role assignment so a
+/// provider whose `/models` endpoint returns nothing (Gradient, locked-down gateways,
+/// some self-hosted vLLM) can still have a role assigned by typing the exact model id.
+/// Encoded as "<label>  [provider]" so the existing provider parsing/coloring applies.
+const MANUAL_ENTRY_LABEL: &str = "+ Enter a model ID manually";
+
 /// Steps in the in-TUI configuration wizard (launched via /config or /setup).
 #[derive(Clone, Debug, PartialEq)]
 enum WizardStep {
@@ -568,6 +574,12 @@ enum WizardStep {
     // Role assignment
     RoleAssignment {
         role: String,
+    },
+    // Free-text model-id entry for a role, reached from the "+ Enter a model ID
+    // manually" sentinel when a provider doesn't publish a usable /models list.
+    RoleManualModel {
+        role: String,
+        provider: String,
     },
     // Special first-run quick Ollama path: after auto-adding the local provider,
     // user scrolls the *live* fetched model list and picks (no more hardcoded defaults).
@@ -1028,6 +1040,7 @@ impl App {
                 WizardStep::EnvVarName => "env var name> ",
                 WizardStep::ApiKeySecret => "api key (hidden)> ",
                 WizardStep::ModelName => "model id> ",
+                WizardStep::RoleManualModel { .. } => "model id> ",
                 WizardStep::BindingNote => "note (optional)> ",
                 _ => "config> ",
             }
@@ -2543,6 +2556,19 @@ impl App {
             if !already {
                 choices.push(bname);
             }
+        }
+
+        // Always offer a manual model-id entry per configured provider. Providers whose
+        // /models endpoint returns nothing (Gradient, locked-down gateways) surface zero
+        // models above; without this the role flow would dead-end with no way to type the
+        // model id by hand. Encoded "<label>  [provider]" like the live entries.
+        let prov_names: Vec<String> = if let Some(cfg) = &self.cfg {
+            cfg.providers.keys().cloned().collect()
+        } else {
+            vec![]
+        };
+        for prov in prov_names {
+            choices.push(format!("{}  [{}]", MANUAL_ENTRY_LABEL, prov));
         }
 
         choices
@@ -4066,98 +4092,54 @@ impl App {
             }
 
             Some(WizardStep::RoleAssignment { role }) => {
-                let picked = effective.trim();
+                let picked = effective.trim().to_string();
                 if picked.is_empty() {
                     return;
                 }
 
-                let (binding_name, prov, model) = self.parse_role_choice(picked);
-
-                let mut did_auto_register = false;
-                if let Some(cfg) = &mut self.cfg {
-                    if !cfg.model_bindings.contains_key(&binding_name) {
-                        // Auto-create a binding for a model chosen directly from a provider's
-                        // available list (now supports all providers, not just local-ollama).
-                        // The choice string may encode "model [prov]" so we use the parsed prov.
-                        // (Also keeps the old local-ollama auto-register path working for plain picks.)
-                        if !cfg.providers.contains_key(&prov) {
-                            // As a safety net, ensure a plausible local-ollama entry exists
-                            // (mirrors prior behavior for the very first quick-ollama case).
-                            if prov == "local-ollama" || !cfg.providers.contains_key("local-ollama")
-                            {
-                                cfg.providers.insert(
-                                    "local-ollama".to_string(),
-                                    ProviderConnection {
-                                        r#type: "openai_compat".to_string(),
-                                        base_url: Some("http://localhost:11434/v1".to_string()),
-                                        credential: CredentialRef::None,
-                                        extra: Default::default(),
-                                        keep_alive: Some("30s".to_string()),
-                                    },
-                                );
-                            }
-                        }
-                        cfg.model_bindings.insert(
-                            binding_name.clone(),
-                            ModelBinding {
-                                provider: prov.clone(),
-                                model: model.clone(),
-                                note: Some(
-                                    "from role assignment (provider models list)".to_string(),
-                                ),
-                            },
-                        );
-                        did_auto_register = true;
+                // Manual-entry sentinel: the provider's model list was empty (or the user
+                // wants a model id not shown). Route to a free-text model-id prompt bound to
+                // the provider encoded in the sentinel.
+                if picked.contains(MANUAL_ENTRY_LABEL) {
+                    let prov = self.extract_provider_for_choice(&picked);
+                    let display_role = match role.as_str() {
+                        "coder" => "coder",
+                        "reviewer_a" => "reviewer-R1",
+                        "reviewer_b" => "reviewer-R2",
+                        other => other,
+                    };
+                    if let Some(w) = &mut self.config_wizard {
+                        w.list_items.clear();
+                        w.list_title.clear();
+                        w.step = WizardStep::RoleManualModel {
+                            role: role.clone(),
+                            provider: prov.clone(),
+                        };
                     }
-
-                    match role.as_str() {
-                        "coder" => cfg.roles.coder = Some(binding_name.clone()),
-                        "reviewer_a" => cfg.roles.reviewer_a = Some(binding_name.clone()),
-                        "reviewer_b" => cfg.roles.reviewer_b = Some(binding_name.clone()),
-                        _ => {}
-                    }
-                }
-
-                // Borrows on cfg have ended; safe to call other &mut self methods now.
-                self.save_current_config();
-                if did_auto_register {
+                    self.input.clear();
                     self.push_system(&format!(
-                        "✓ Auto-registered model binding '{}' via {}.",
-                        binding_name, prov
+                        "Type the exact model ID for {} (provider '{}') — the slug exactly as your provider names it:",
+                        display_role, prov
                     ));
+                    return;
                 }
-                let display_role = match role.as_str() {
-                    "coder" => "coder",
-                    "reviewer_a" => "reviewer-R1",
-                    "reviewer_b" => "reviewer-R2",
-                    _ => role,
-                };
-                self.push_system(&format!("Set {} → {}", display_role, binding_name));
 
-                let next_role = match role.as_str() {
-                    "coder" => Some("reviewer_a".to_string()),
-                    "reviewer_a" => Some("reviewer_b".to_string()),
-                    "reviewer_b" => None,
-                    _ => None,
-                };
+                let (binding_name, prov, model) = self.parse_role_choice(&picked);
+                self.assign_role_and_advance(role, binding_name, prov, model);
+            }
 
-                if let Some(next) = next_role {
-                    self.start_role_list(&next);
-                } else {
-                    self.save_current_config();
-                    self.push_system("All roles assigned and saved.");
-                    if self.is_configured() {
-                        let was_first = self.first_run;
-                        self.first_run = false;
-                        if was_first {
-                            self.push_system("First-time setup complete!");
-                            self.push_system("Just type to chat with the coder — it reads, edits, and runs the project directly.");
-                            self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → fix → /continue → R2 → fix → /continue → summary → /accept-plan. Phase gate: build → /accept-phase (same loop on the diff) → /ship-phase.");
-                            self.push_system("This is the lightweight structure that keeps vibe coding from drifting — valuable for beginners and hardcore users alike.");
-                        }
-                    }
-                    self.populate_main_menu();
+            Some(WizardStep::RoleManualModel { role, provider }) => {
+                let model = effective.trim().to_string();
+                if model.is_empty() {
+                    return;
                 }
+                if let Some(w) = &mut self.config_wizard {
+                    w.list_items.clear();
+                    w.list_title.clear();
+                }
+                self.push_system(&format!("Model: {}  (provider '{}')", model, provider));
+                // Use the model id as the binding key (consistent with the list-pick path).
+                self.assign_role_and_advance(role, model.clone(), provider.clone(), model);
             }
 
             Some(WizardStep::QuickOllamaModelPick { role }) => {
@@ -4640,7 +4622,9 @@ impl App {
         let binding_names = self.build_available_bindings_for_roles();
 
         if binding_names.is_empty() {
-            self.push_system("No models available from configured providers yet — add a provider via Config / 'Assign roles', or use Quick local Ollama setup first.");
+            // build_available_bindings_for_roles always appends a manual-entry sentinel
+            // per provider, so an empty list means no providers are configured at all.
+            self.push_system("No providers configured yet — add one via Config / 'Add / update a provider connection', or use Quick local Ollama setup first.");
             self.populate_main_menu();
             return;
         }
@@ -4667,7 +4651,97 @@ impl App {
             other        => other,
         };
         self.push_system(&format!("Assigning role: {}", role_desc));
-        self.push_system("Select a binding or live Ollama tag from the list (↑↓ then Enter):");
+        self.push_system("Pick a model from the list, or choose '+ Enter a model ID manually' to type it (↑↓ then Enter):");
+    }
+
+    /// Auto-register a model binding if it doesn't exist, assign it to `role`, persist,
+    /// and advance to the next role (or finish setup). Shared by the role-list pick path
+    /// and the manual model-id entry path so both behave identically.
+    fn assign_role_and_advance(
+        &mut self,
+        role: &str,
+        binding_name: String,
+        prov: String,
+        model: String,
+    ) {
+        let mut did_auto_register = false;
+        if let Some(cfg) = &mut self.cfg {
+            if !cfg.model_bindings.contains_key(&binding_name) {
+                if !cfg.providers.contains_key(&prov) {
+                    // Safety net mirroring prior behavior: ensure a plausible local-ollama
+                    // entry exists for the very first quick-ollama case.
+                    if prov == "local-ollama" || !cfg.providers.contains_key("local-ollama") {
+                        cfg.providers.insert(
+                            "local-ollama".to_string(),
+                            ProviderConnection {
+                                r#type: "openai_compat".to_string(),
+                                base_url: Some("http://localhost:11434/v1".to_string()),
+                                credential: CredentialRef::None,
+                                extra: Default::default(),
+                                keep_alive: Some("30s".to_string()),
+                            },
+                        );
+                    }
+                }
+                cfg.model_bindings.insert(
+                    binding_name.clone(),
+                    ModelBinding {
+                        provider: prov.clone(),
+                        model: model.clone(),
+                        note: Some("from role assignment".to_string()),
+                    },
+                );
+                did_auto_register = true;
+            }
+
+            match role {
+                "coder" => cfg.roles.coder = Some(binding_name.clone()),
+                "reviewer_a" => cfg.roles.reviewer_a = Some(binding_name.clone()),
+                "reviewer_b" => cfg.roles.reviewer_b = Some(binding_name.clone()),
+                _ => {}
+            }
+        }
+
+        // Borrows on cfg have ended; safe to call other &mut self methods now.
+        self.save_current_config();
+        if did_auto_register {
+            self.push_system(&format!(
+                "✓ Auto-registered model binding '{}' via {}.",
+                binding_name, prov
+            ));
+        }
+        let display_role = match role {
+            "coder" => "coder",
+            "reviewer_a" => "reviewer-R1",
+            "reviewer_b" => "reviewer-R2",
+            _ => role,
+        };
+        self.push_system(&format!("Set {} → {}", display_role, binding_name));
+
+        let next_role = match role {
+            "coder" => Some("reviewer_a".to_string()),
+            "reviewer_a" => Some("reviewer_b".to_string()),
+            "reviewer_b" => None,
+            _ => None,
+        };
+
+        if let Some(next) = next_role {
+            self.start_role_list(&next);
+        } else {
+            self.save_current_config();
+            self.push_system("All roles assigned and saved.");
+            if self.is_configured() {
+                let was_first = self.first_run;
+                self.first_run = false;
+                if was_first {
+                    self.push_system("First-time setup complete!");
+                    self.push_system("Just type to chat with the coder — it reads, edits, and runs the project directly.");
+                    self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → fix → /continue → R2 → fix → /continue → summary → /accept-plan. Phase gate: build → /accept-phase (same loop on the diff) → /ship-phase.");
+                    self.push_system("This is the lightweight structure that keeps vibe coding from drifting — valuable for beginners and hardcore users alike.");
+                }
+            }
+            self.populate_main_menu();
+        }
     }
 
     fn go_back_in_wizard(&mut self) {
@@ -4693,6 +4767,9 @@ impl App {
             WizardStep::EnvVarName | WizardStep::ApiKeySecret => WizardStep::CredentialKind,
             WizardStep::ModelName => WizardStep::BindingProvider,
             WizardStep::BindingNote => WizardStep::ModelName,
+            WizardStep::RoleManualModel { role, .. } => {
+                WizardStep::RoleAssignment { role: role.clone() }
+            }
             WizardStep::RoleAssignment { role } => {
                 match role.as_str() {
                     "reviewer_a" => WizardStep::RoleAssignment {

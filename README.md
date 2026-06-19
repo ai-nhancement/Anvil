@@ -54,6 +54,21 @@ curl -fsSL https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.
 irm https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.ps1 | iex
 ```
 
+**If `anvil` isn't found right after installing** (Linux/macOS), the install dir `~/.local/bin`
+isn't on your `PATH` in the current shell yet. Add it, then it's permanent for new shells too:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"                       # this shell, right now
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc   # persist (use ~/.zshrc on zsh)
+```
+
+Then confirm and configure:
+
+```sh
+anvil --version    # should print a version
+anvil setup        # wire up your providers, models, and roles
+```
+
 <details>
 <summary>Other ways to install</summary>
 

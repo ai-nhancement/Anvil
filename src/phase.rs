@@ -393,8 +393,8 @@ fn phase_diff_stat(root: &Path, base: Option<&str>) -> String {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
     };
     let out = match base {
-        Some(b) => git(&["diff", "--stat", b]),
-        None => git(&["diff", "--stat", "HEAD~1", "HEAD"]),
+        Some(b) => git(&diff_args(&["diff", "--stat", b])),
+        None => git(&diff_args(&["diff", "--stat", "HEAD~1", "HEAD"])),
     }
     .unwrap_or_default();
     out.lines()
@@ -465,10 +465,44 @@ pub(crate) fn git_head_sha(root: &Path) -> Option<String> {
     }
 }
 
+/// Pathspecs that keep review/session noise out of the diff the reviewer sees:
+/// the coder's own REVIEW_*.md briefings (written at the repo root) and the
+/// `.anvil` session/state dir. Without these, each round's diff is dominated by
+/// the *previous* round's review transcript instead of the actual code change —
+/// which makes reviewers (correctly) complain the artifact isn't a real patch.
+const DIFF_EXCLUDES: &[&str] = &[
+    ":(exclude).anvil",
+    ":(exclude).anvil/**",
+    ":(exclude)REVIEW_*.md",
+    ":(exclude)**/REVIEW_*.md",
+];
+
+/// Build `git diff` args with the noise exclusions appended (e.g.
+/// `diff <base> -- . :(exclude).anvil …`).
+fn diff_args<'a>(spec: &[&'a str]) -> Vec<&'a str> {
+    let mut v = spec.to_vec();
+    v.push("--");
+    v.push(".");
+    v.extend_from_slice(DIFF_EXCLUDES);
+    v
+}
+
+/// True if an untracked path is review/session noise that must not be dumped into
+/// the review diff (it isn't part of the phase's actual code change).
+fn is_review_noise(name: &str) -> bool {
+    let norm = name.replace('\\', "/");
+    if norm == ".anvil" || norm.starts_with(".anvil/") {
+        return true;
+    }
+    let base = norm.rsplit('/').next().unwrap_or(&norm);
+    base.starts_with("REVIEW_") && base.ends_with(".md")
+}
+
 /// Capture the phase's change set for review. Diffs from the recorded phase base
 /// (`base..worktree`, so *committed* work since the phase started is included),
 /// falling back to `git diff HEAD` (uncommitted) and then the most recent commit
-/// when no base is recorded — plus the names of any untracked files.
+/// when no base is recorded — plus the names of any untracked files. Review/session
+/// artifacts (REVIEW_*.md, .anvil/) are excluded so the reviewer sees only code.
 fn capture_git_diff(root: &Path) -> String {
     use std::process::Command;
     let git = |args: &[&str]| -> Option<String> {
@@ -485,18 +519,18 @@ fn capture_git_diff(root: &Path) -> String {
     let mut diff = String::new();
     // 1) Everything since the phase base (commits + uncommitted), if we have one.
     if let Some(b) = base.as_deref() {
-        if let Some(d) = git(&["diff", b]) {
+        if let Some(d) = git(&diff_args(&["diff", b])) {
             diff = d;
         }
     }
     // 2) Otherwise (or if the base diff is empty) the uncommitted working tree.
     if diff.trim().is_empty() {
-        diff = git(&["diff", "HEAD"]).unwrap_or_default();
+        diff = git(&diff_args(&["diff", "HEAD"])).unwrap_or_default();
     }
     // 3) Last resort: the most recent commit, so a single committed phase with no
     //    recorded base is still reviewable (labelled so the reviewer knows).
     if diff.trim().is_empty() {
-        if let Some(d) = git(&["diff", "HEAD~1", "HEAD"]) {
+        if let Some(d) = git(&diff_args(&["diff", "HEAD~1", "HEAD"])) {
             if !d.trim().is_empty() {
                 diff = format!(
                     "(no base recorded and no uncommitted changes — showing the most recent commit)\n{d}"
@@ -506,9 +540,13 @@ fn capture_git_diff(root: &Path) -> String {
     }
     // New (untracked) files never appear in `git diff` — but a phase is often
     // implemented as brand-new files, so include their *content* (not just names),
-    // or the reviewer would think nothing was done.
+    // or the reviewer would think nothing was done. Skip review/session artifacts.
     if let Some(list) = git(&["ls-files", "--others", "--exclude-standard"]) {
-        for name in list.lines().filter(|l| !l.trim().is_empty()).take(40) {
+        for name in list
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !is_review_noise(l.trim()))
+            .take(40)
+        {
             let is_binary = Path::new(name)
                 .extension()
                 .and_then(|e| e.to_str())
@@ -762,6 +800,32 @@ mod tests {
         let diff2 = capture_git_diff(root);
         assert!(diff2.contains("New file: src/p3.js"), "{diff2}");
         assert!(diff2.contains("function p3"), "{diff2}");
+
+        // Regression: review-loop artifacts must NOT pollute the diff. A REVIEW_*.md
+        // at root (and anything under .anvil/) is review/session noise — without the
+        // exclusion its full content got dumped in, swamping the real code change and
+        // making reviewers say "this isn't a real patch".
+        std::fs::write(
+            root.join("REVIEW_P2_R1.md"),
+            "## Summary\nprior review transcript that must not appear\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".anvil")).unwrap();
+        std::fs::write(root.join(".anvil/session.json"), "{\"secret\":\"noise\"}\n").unwrap();
+        let diff3 = capture_git_diff(root);
+        assert!(
+            diff3.contains("src/p3.js"),
+            "real code still present: {diff3}"
+        );
+        assert!(
+            !diff3.contains("prior review transcript"),
+            "REVIEW_*.md leaked into diff: {diff3}"
+        );
+        assert!(
+            !diff3.contains("REVIEW_P2_R1.md"),
+            "REVIEW_*.md name leaked into diff: {diff3}"
+        );
+        assert!(!diff3.contains("session.json"), ".anvil leaked: {diff3}");
     }
 
     #[test]

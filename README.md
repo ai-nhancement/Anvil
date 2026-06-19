@@ -18,6 +18,13 @@ cross-vendor second opinion keeps it honest.
 
 One Rust binary. Model-agnostic. Installs in one line and updates itself.
 
+> **Status: Public Beta.** Anvil is feature-complete for its core workflow and installs/updates
+> cleanly — but it's early. It's been field-tested mostly on **Windows** (macOS/Linux build in CI
+> but haven't been run in anger yet); several big pieces landed recently; and the review-gate flow
+> is verified by hand rather than an automated suite. Expect rough edges, and please
+> [file issues](https://github.com/ai-nhancement/Anvil/issues) — that feedback is exactly what the
+> beta is for. For the best experience, use a capable **tool-calling** model for the coder role.
+
 ---
 
 ## Highlights
@@ -52,7 +59,7 @@ irm https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.ps1 | i
 
 ```sh
 # Pin a specific version
-ANVIL_VERSION=v0.1.11 curl -fsSL https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.sh | sh
+ANVIL_VERSION=v0.2.0 curl -fsSL https://raw.githubusercontent.com/ai-nhancement/Anvil/master/install.sh | sh
 
 # From source (requires the Rust toolchain)
 cargo install --path .

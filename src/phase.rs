@@ -127,34 +127,30 @@ fn parse_plan_phases(plan: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn run_phase_start(root: &Path, id: &str) -> Result<()> {
+/// Set the current phase (state only — no stdout, so this is safe to call from
+/// the TUI). Returns the relevant slice of `plan.md` for that phase, if found,
+/// for the caller to display however it likes.
+pub fn run_phase_start(root: &Path, id: &str) -> Result<Option<String>> {
     load_local_env(root);
     let mut state = load_state(root);
     state.current_phase = Some(id.to_string());
     save_state(root, &state)?;
 
-    println!("{} Current phase set to {}.", "✓".green(), id.cyan());
-
-    // Try to give the user the relevant slice of the plan
     let plan_path = root.join("plan.md");
     if plan_path.exists() {
         if let Ok(plan) = fs::read_to_string(&plan_path) {
-            // Very crude extraction of the phase section
+            // Crude extraction of the phase's section header through the next 40 lines.
             if let Some(start) = plan.find(&format!("## {}", id)) {
                 let slice: String = plan[start..]
                     .lines()
                     .take(40)
                     .collect::<Vec<_>>()
                     .join("\n");
-                println!("\nRelevant plan excerpt:\n{}", slice);
+                return Ok(Some(slice));
             }
         }
     }
-
-    println!("\nNow go implement the phase in your editor (or use `anvil talk --model coder` for assistance).");
-    println!("When you are ready for the mandatory two reviews, run:");
-    println!("  {} {}", "`anvil phase review`".cyan(), id);
-    Ok(())
+    Ok(None)
 }
 
 pub fn run_phase_review(root: &Path, id: &str) -> Result<()> {
@@ -261,7 +257,9 @@ fn run_phase_review_one(
     Ok(findings)
 }
 
-pub fn run_phase_accept(root: &Path, id: &str, note: Option<&str>) -> Result<()> {
+/// Accept (ship) a phase after its R1+R2 reviews exist (state only — no stdout,
+/// so it's safe from the TUI). Errors if both review files aren't present.
+pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
     load_local_env(root);
     let reviews = reviews_dir(root);
 
@@ -289,18 +287,6 @@ pub fn run_phase_accept(root: &Path, id: &str, note: Option<&str>) -> Result<()>
     }
     state.current_phase = None; // ready for next
     save_state(root, &state)?;
-
-    println!(
-        "{} Phase {} accepted after its full review cycle (R1 doc by coder + critical R1 + R2 doc by coder + critical R2).",
-        "✓".green().bold(),
-        id
-    );
-    if let Some(n) = note {
-        println!("  Note recorded: {}", n);
-    }
-
-    println!("\nMove to the next phase with `anvil phase start <next-id>`.");
-    println!("When all phases that deliver value are done, you can ship (simple for v0: just commit and tag).");
     Ok(())
 }
 

@@ -181,10 +181,24 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Commands::Phase(sub) => match sub {
-            PhaseCmd::Start { id } => phase::run_phase_start(&cli.project, &id),
+            PhaseCmd::Start { id } => {
+                let excerpt = phase::run_phase_start(&cli.project, &id)?;
+                println!("Current phase set to {id}.");
+                if let Some(slice) = excerpt {
+                    println!("\nRelevant plan excerpt:\n{slice}");
+                }
+                println!("\nBuild it with the coder — run `anvil` (the agent reads/edits/runs the repo directly). When the phase is done, run the two reviews.");
+                Ok(())
+            }
             PhaseCmd::Review { id } => phase::run_phase_review(&cli.project, &id),
             PhaseCmd::Accept { id, note } => {
-                phase::run_phase_accept(&cli.project, &id, note.as_deref())
+                phase::run_phase_accept(&cli.project, &id)?;
+                println!("Phase {id} accepted (R1 + R2 reviewed).");
+                if let Some(n) = note {
+                    println!("  Note recorded: {n}");
+                }
+                println!("\nMove to the next phase with `anvil phase start <next-id>`.");
+                Ok(())
             }
             PhaseCmd::List => phase::run_phase_list(&cli.project),
         },

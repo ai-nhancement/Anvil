@@ -1782,7 +1782,12 @@ impl App {
                 return;
             }
             match crate::phase::run_phase_start(&self.root, id) {
-                Ok(()) => self.push_system(&format!("Current phase set to {}. Build it with the coder (it reads/edits files and runs tests directly). When done, run /accept-phase.", id)),
+                Ok(excerpt) => {
+                    self.push_system(&format!("Current phase set to {}. Build it with the coder (it reads/edits files and runs tests directly) — or just tell it to start. When done, run /accept-phase.", id));
+                    if let Some(slice) = excerpt {
+                        self.push_system(&format!("Plan excerpt for {}:\n{}", id, slice));
+                    }
+                }
                 Err(e) => self.push_system(&format!("phase start failed: {}", e)),
             }
             self.reconcile_stage_from_disk();
@@ -1832,7 +1837,7 @@ impl App {
                 );
                 return;
             }
-            match crate::phase::run_phase_accept(&self.root, &id, None) {
+            match crate::phase::run_phase_accept(&self.root, &id) {
                 Ok(()) => self.push_system(&format!("✓ Quenched — phase {} shipped (R1 + R2 reviewed and accepted). Start the next phase with /phase-start, or just tell the coder to continue.", id)),
                 Err(e) => self.push_system(&format!("ship phase: {} (run /accept-phase {} first to produce the reviews)", e, id)),
             }

@@ -1,6 +1,6 @@
 [package]
 name = "anvil"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 license = "Apache-2.0"
 description = "Forge the Workflow — structure for vibe coding. A self-contained AI coding agent wrapped in a two-gate, cross-vendor review workflow. Model-agnostic; one binary."

@@ -1851,9 +1851,16 @@ impl App {
                 self.push_system("Reviewers not configured. Use /config.");
                 return;
             }
+            // Pick up a coder-named <feature>_plan.md right here, in case the coder just
+            // wrote it this turn and no stage reconcile has run yet (otherwise we'd look
+            // for the default plan.md and miss it).
+            self.adopt_coder_named_plan_if_needed();
             let plan_path = self.plan_path();
             if !plan_path.exists() {
-                self.push_system("plan.md not found. Ask the coder to write the plan to plan.md first (it can create the file itself), then /lock-plan.");
+                self.push_system(&format!(
+                    "No plan file found ({}). Ask the coder to write the plan first — any name works (e.g. trusteazy_plan.md, or plain plan.md) and it creates the file itself — then /lock-plan.",
+                    active_plan_name(&self.root)
+                ));
                 return;
             }
             self.start_gate_flow(GateArtifact::Plan);
@@ -1861,6 +1868,7 @@ impl App {
         }
 
         if cmd == "/accept-plan" || cmd == "/accept plan" {
+            self.adopt_coder_named_plan_if_needed();
             let plan_path = self.plan_path();
             let rev_dir = reviews_dir(&self.root);
             let r1 = rev_dir.join("REVIEW_plan_R1.md");

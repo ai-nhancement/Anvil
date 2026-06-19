@@ -115,12 +115,12 @@ pub fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "grep".into(),
-            description: "Search the project tree for a literal substring. Returns matching lines as `path:line: text`. Optionally restrict to a subdirectory.".into(),
+            description: "Search the project tree for a literal substring. Returns matching lines as `path:line: text`. Optionally restrict to a subdirectory or a single file.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Literal substring to search for"},
-                    "path": {"type": "string", "description": "Optional subdirectory to limit the search (relative to root)"}
+                    "path": {"type": "string", "description": "Optional path to limit the search (relative to root) — a subdirectory OR a single file"}
                 },
                 "required": ["pattern"]
             }),
@@ -637,11 +637,46 @@ fn grep(root: &Path, pattern: &str, sub: Option<String>) -> Result<String> {
     };
     let mut out: Vec<String> = vec![];
     let mut hits = 0usize;
-    collect_matches(root, &base, pattern, &mut out, &mut hits);
+    // `path` may be a single file (search it directly) or a directory (recurse).
+    // Without this, grepping an explicit file path read_dir'd it, failed, and
+    // wrongly returned "no matches".
+    if base.is_file() {
+        search_file(root, &base, pattern, &mut out, &mut hits);
+    } else {
+        collect_matches(root, &base, pattern, &mut out, &mut hits);
+    }
     if out.is_empty() {
         Ok(format!("no matches for '{}'", pattern))
     } else {
         Ok(out.join("\n"))
+    }
+}
+
+const MAX_GREP_HITS: usize = 200;
+
+/// Search a single file's lines for `pattern`, appending `rel:line: text` hits.
+fn search_file(root: &Path, path: &Path, pattern: &str, out: &mut Vec<String>, hits: &mut usize) {
+    if *hits >= MAX_GREP_HITS {
+        return;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    for (i, line) in content.lines().enumerate() {
+        if line.contains(pattern) {
+            out.push(format!("{}:{}: {}", rel, i + 1, line.trim()));
+            *hits += 1;
+            if *hits >= MAX_GREP_HITS {
+                out.push("... [more matches truncated]".into());
+                return;
+            }
+        }
     }
 }
 
@@ -652,8 +687,7 @@ fn collect_matches(
     out: &mut Vec<String>,
     hits: &mut usize,
 ) {
-    const MAX_HITS: usize = 200;
-    if *hits >= MAX_HITS {
+    if *hits >= MAX_GREP_HITS {
         return;
     }
     let read = match std::fs::read_dir(dir) {
@@ -663,7 +697,7 @@ fn collect_matches(
     let mut paths: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
     paths.sort();
     for path in paths {
-        if *hits >= MAX_HITS {
+        if *hits >= MAX_GREP_HITS {
             return;
         }
         let name = path
@@ -681,24 +715,7 @@ fn collect_matches(
                     continue;
                 }
             }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let rel = path
-                    .strip_prefix(root)
-                    .unwrap_or(&path)
-                    .display()
-                    .to_string()
-                    .replace('\\', "/");
-                for (i, line) in content.lines().enumerate() {
-                    if line.contains(pattern) {
-                        out.push(format!("{}:{}: {}", rel, i + 1, line.trim()));
-                        *hits += 1;
-                        if *hits >= MAX_HITS {
-                            out.push("... [more matches truncated]".into());
-                            return;
-                        }
-                    }
-                }
-            }
+            search_file(root, &path, pattern, out, hits);
         }
     }
 }
@@ -809,6 +826,33 @@ mod tests {
             name: name.into(),
             arguments: args,
         }
+    }
+
+    #[test]
+    fn grep_searches_an_explicit_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/game.js"),
+            "const GAME_STATE = {};\nlet waveDelay = 0;\n",
+        )
+        .unwrap();
+
+        // Path = a FILE (the case that used to read_dir() and return nothing).
+        let r = execute(
+            &call(
+                "grep",
+                json!({"pattern": "GAME_STATE", "path": "src/game.js"}),
+            ),
+            root,
+        );
+        assert!(r.contains("src/game.js:1:"), "{r}");
+        assert!(r.contains("GAME_STATE"), "{r}");
+
+        // Path = a directory still recurses and finds it.
+        let r2 = execute(&call("grep", json!({"pattern": "waveDelay"})), root);
+        assert!(r2.contains("src/game.js:2:"), "{r2}");
     }
 
     #[test]

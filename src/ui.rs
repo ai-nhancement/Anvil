@@ -845,6 +845,11 @@ struct App {
     // When true the input characters are masked in the UI (for API keys)
     input_secret: bool,
 
+    // Large clipboard pastes are collapsed to a "[Pasted Content N chars]" placeholder in
+    // the input box; the full text is stored here (placeholder -> full) and expanded back
+    // when the message is submitted. Keeps a 5,000-line paste from flooding the composer.
+    pending_pastes: Vec<(String, String)>,
+
     // Cached result of the Ollama probe (localhost:11434). Decides whether the
     // "Quick local Ollama setup" option is offered on first boot / in the wizard.
     // None = not yet probed. Populated lazily by is_ollama_available().
@@ -929,6 +934,7 @@ impl App {
             anim_tick: 0,
             forge_heat: 0.0,
             input_secret: false,
+            pending_pastes: Vec::new(),
             ollama_available_cached: None,
             viewing_doc: None,
             gpu_stats: vec![],
@@ -1631,8 +1637,59 @@ impl App {
         out
     }
 
+    /// Threshold (chars) above which a clipboard paste is collapsed into a placeholder
+    /// instead of being inserted inline. Mirrors the Codex composer's behavior.
+    const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+
+    /// Handle a bracketed-paste event. Small pastes are inserted inline; large ones are
+    /// collapsed to a "[Pasted Content N chars]" placeholder, with the full text stored in
+    /// pending_pastes and expanded back when the message is submitted.
+    fn handle_paste(&mut self, text: String) {
+        let char_count = text.chars().count();
+        // Keep masked fields (API keys) and modest pastes inline.
+        if self.input_secret || char_count <= Self::LARGE_PASTE_CHAR_THRESHOLD {
+            self.input_insert_str(&text);
+            return;
+        }
+        let placeholder = self.make_paste_placeholder(char_count);
+        self.pending_pastes.push((placeholder.clone(), text));
+        self.input_insert_str(&placeholder);
+        self.push_system(&format!(
+            "Collapsed a {char_count}-char paste into {placeholder}. It expands to the full text when you send; backspace over the placeholder to drop it."
+        ));
+    }
+
+    /// Build a unique placeholder label for a paste of the given size.
+    fn make_paste_placeholder(&self, char_count: usize) -> String {
+        let base = format!("[Pasted Content {char_count} chars]");
+        if !self.pending_pastes.iter().any(|(p, _)| p == &base) {
+            return base;
+        }
+        let mut k = 2;
+        loop {
+            let cand = format!("[Pasted Content {char_count} chars #{k}]");
+            if !self.pending_pastes.iter().any(|(p, _)| p == &cand) {
+                return cand;
+            }
+            k += 1;
+        }
+    }
+
+    /// Replace any paste placeholders still present in `input` with their full stored text.
+    /// Placeholders the user deleted simply aren't found and are dropped on the next clear.
+    fn expand_pasted_input(&self, mut input: String) -> String {
+        for (placeholder, full) in &self.pending_pastes {
+            if input.contains(placeholder.as_str()) {
+                input = input.replace(placeholder.as_str(), full);
+            }
+        }
+        input
+    }
+
     fn handle_input(&mut self) {
-        let input = std::mem::take(&mut self.input);
+        let taken = std::mem::take(&mut self.input);
+        let input = self.expand_pasted_input(taken);
+        self.pending_pastes.clear();
         self.input_cursor = 0;
         self.showing_command_palette = false;
 
@@ -3080,6 +3137,8 @@ impl App {
             return;
         }
 
+        self.adopt_coder_named_plan_if_needed();
+
         let plan_path = self.plan_path();
         let rev_dir = reviews_dir(&self.root);
         let r1 = rev_dir.join("REVIEW_plan_R1.md");
@@ -3097,6 +3156,56 @@ impl App {
             self.stage = WorkflowStage::PlanReviewsComplete;
         } else {
             self.stage = WorkflowStage::Talk;
+        }
+    }
+
+    /// If the user told the coder to write a plan and it created a feature-named
+    /// `<name>_plan.md` rather than the literal active plan file, adopt the newest such
+    /// file as the active plan. Only fires pre-accept and only when the current active
+    /// plan file is absent, so it never overrides an explicit /new-plan choice.
+    fn adopt_coder_named_plan_if_needed(&mut self) {
+        let st = load_state(&self.root);
+        if st.accepted_plan_hash.is_some() {
+            return;
+        }
+        let active = active_plan_name(&self.root);
+        if self.root.join(&active).exists() {
+            return;
+        }
+        // Active plan file is missing — look for a coder-written plan at the repo root.
+        let mut newest: Option<(std::time::SystemTime, String)> = None;
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let is_plan = name == "plan.md"
+                    || (name.ends_with("_plan.md") && name.len() > "_plan.md".len());
+                if !is_plan {
+                    continue;
+                }
+                let mtime = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+                    newest = Some((mtime, name.to_string()));
+                }
+            }
+        }
+        if let Some((_, name)) = newest {
+            if name != active {
+                let mut st2 = load_state(&self.root);
+                st2.active_plan = Some(name.clone());
+                let _ = save_state(&self.root, &st2);
+                self.push_system(&format!(
+                    "Adopted '{name}' as the active plan (the coder named it). /lock-plan when ready."
+                ));
+            }
         }
     }
 
@@ -5433,9 +5542,10 @@ fn run_app_loop<B: ratatui::backend::Backend>(
                     }
                 }
                 Event::Paste(text) => {
-                    // Paste arrives as a single string — append directly without per-char processing.
-                    // This avoids crashes from escape sequences inside bracketed paste streams.
-                    app.input_insert_str(&text);
+                    // Paste arrives as a single string. Small pastes go in inline; large ones are
+                    // collapsed to a placeholder (handle_paste). Either way no per-char processing,
+                    // which avoids crashes from escape sequences inside bracketed paste streams.
+                    app.handle_paste(text);
                     if !app.input.starts_with('/') || app.config_wizard.is_some() {
                         app.showing_command_palette = false;
                     }

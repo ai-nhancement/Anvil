@@ -30,11 +30,20 @@ pub fn snapshot(root: &Path) -> String {
     s.push_str(&format!("Stage: {}\n", stage_label(root)));
 
     let plan_name = active_plan_name(root);
-    s.push_str(&format!(
-        "Plan file: {plan_name} (write and read the plan here; its reviews and phases use this file)\n"
-    ));
-
     let state = load_state(root);
+    if root.join(&plan_name).exists() || state.active_plan.is_some() {
+        s.push_str(&format!(
+            "Plan file: {plan_name} (write and read the plan here; its reviews and phases use this file)\n"
+        ));
+    } else {
+        s.push_str(
+            "Plan file: not chosen yet. When the user asks you to write the plan, pick a short \
+             descriptive name like <feature>_plan.md (e.g. trusteazy_plan.md) and write the full \
+             plan there. Anvil adopts that file as the active plan automatically. Use the generic \
+             plan.md only for a tiny throwaway project.\n",
+        );
+    }
+
     if let Some(phase) = &state.current_phase {
         s.push_str(&format!("Current phase: {}\n", phase));
     }

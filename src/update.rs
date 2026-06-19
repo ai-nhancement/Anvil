@@ -18,7 +18,9 @@ const REPO_NAME: &str = "Anvil";
 const BIN: &str = "anvil";
 
 /// How long a successful check is trusted before we hit the network again.
-const CACHE_TTL_SECS: i64 = 24 * 60 * 60;
+/// Kept short during the rapid-release phase (we've shipped several versions in
+/// a day) so users see new releases promptly; lengthen once releases stabilize.
+const CACHE_TTL_SECS: i64 = 30 * 60;
 
 /// The version compiled into this binary (from Cargo.toml). Must be bumped to
 /// match each release tag for the check to be meaningful.
@@ -97,8 +99,9 @@ fn write_cache(root: &Path, latest: &str) {
 }
 
 /// Blocking: returns `Some(version)` if a newer release is available. Uses a
-/// 24h on-disk cache to avoid hitting the GitHub API on every launch, and is a
-/// no-op (returns None) when `ANVIL_NO_UPDATE_CHECK` is set. Network/parse
+/// short on-disk cache (see `CACHE_TTL_SECS`) to avoid hitting the GitHub API on
+/// every launch, and is a no-op (returns None) when `ANVIL_NO_UPDATE_CHECK` is
+/// set. Network/parse
 /// failures are swallowed (returns None) — an update check must never break boot.
 pub fn check_with_cache_blocking(root: &Path) -> Option<String> {
     if std::env::var_os("ANVIL_NO_UPDATE_CHECK").is_some() {

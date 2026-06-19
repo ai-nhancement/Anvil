@@ -132,25 +132,32 @@ fn parse_plan_phases(plan: &str) -> Vec<(String, String)> {
 /// for the caller to display however it likes.
 pub fn run_phase_start(root: &Path, id: &str) -> Result<Option<String>> {
     load_local_env(root);
+    let id = normalize_phase_id(id);
     let mut state = load_state(root);
-    state.current_phase = Some(id.to_string());
+    state.current_phase = Some(id.clone());
     save_state(root, &state)?;
 
     let plan_path = root.join("plan.md");
     if plan_path.exists() {
         if let Ok(plan) = fs::read_to_string(&plan_path) {
-            // Crude extraction of the phase's section header through the next 40 lines.
-            if let Some(start) = plan.find(&format!("## {}", id)) {
-                let slice: String = plan[start..]
-                    .lines()
-                    .take(40)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Ok(Some(slice));
-            }
+            return Ok(extract_phase(&plan, &id));
         }
     }
     Ok(None)
+}
+
+/// Canonicalize a phase id so it matches the `## P0` headers in plan.md and stays
+/// consistent across state, review filenames, and excerpt lookup. Accepts `p0`,
+/// `P0`, ` P0 ` → `P0`; leaves anything non-`Pn` untouched. Idempotent.
+pub(crate) fn normalize_phase_id(id: &str) -> String {
+    let t = id.trim();
+    if let Some(rest) = t.to_ascii_lowercase().strip_prefix('p') {
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return format!("P{digits}");
+        }
+    }
+    t.to_string()
 }
 
 pub fn run_phase_review(root: &Path, id: &str) -> Result<()> {
@@ -261,6 +268,7 @@ fn run_phase_review_one(
 /// so it's safe from the TUI). Errors if both review files aren't present.
 pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
     load_local_env(root);
+    let id = &normalize_phase_id(id);
     let reviews = reviews_dir(root);
 
     // Support both the preferred new TUI flow naming (REVIEW_Px_R1.md written by /save-r1 etc.)
@@ -326,8 +334,20 @@ fn capture_git_diff(root: &Path) -> String {
 /// Compose the reviewer input for a phase: the plan excerpt + the real diff.
 fn build_phase_diff_content(root: &Path, id: &str) -> String {
     let plan = fs::read_to_string(root.join("plan.md")).unwrap_or_default();
-    let excerpt = extract_phase(&plan, id)
-        .unwrap_or_else(|| "(no plan excerpt found for this phase)".to_string());
+    // Prefer the focused phase section; if it can't be located, fall back to the
+    // whole plan so the reviewer always has the plan to check drift against.
+    let excerpt = extract_phase(&plan, id).unwrap_or_else(|| {
+        if plan.trim().is_empty() {
+            "(plan.md not found or empty — ask the user for the plan)".to_string()
+        } else {
+            let mut p = plan.clone();
+            if p.len() > 16_000 {
+                p.truncate(16_000);
+                p.push_str("\n… [plan truncated]");
+            }
+            format!("(phase section '{id}' not found — full plan below)\n{p}")
+        }
+    });
     let diff = capture_git_diff(root);
     format!(
         "Phase {} — critically review the implementation against the plan.\n\n\
@@ -341,33 +361,35 @@ fn build_phase_diff_content(root: &Path, id: &str) -> String {
 /// Used by the TUI `/accept-phase` gate.
 pub fn run_phase_r1_diff(root: &Path, id: &str) -> Result<String> {
     load_local_env(root);
+    let id = normalize_phase_id(id);
     let cfg = load_config(root)?;
     let client = LlmClient::new();
     let reviews = reviews_dir(root);
     fs::create_dir_all(&reviews)?;
-    let content = build_phase_diff_content(root, id);
+    let content = build_phase_diff_content(root, &id);
     let reviewer_a = cfg
         .roles
         .reviewer_a
         .as_deref()
         .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
-    crate::plan::run_single_review(&client, &cfg, reviewer_a, &content, "R1", &reviews, id)
+    crate::plan::run_single_review(&client, &cfg, reviewer_a, &content, "R1", &reviews, &id)
 }
 
 /// R2 of a phase: reviewer-b critiques the current diff. Writes REVIEW_<id>_R2.md.
 pub fn run_phase_r2_diff(root: &Path, id: &str) -> Result<String> {
     load_local_env(root);
+    let id = normalize_phase_id(id);
     let cfg = load_config(root)?;
     let client = LlmClient::new();
     let reviews = reviews_dir(root);
     fs::create_dir_all(&reviews)?;
-    let content = build_phase_diff_content(root, id);
+    let content = build_phase_diff_content(root, &id);
     let reviewer_b = cfg
         .roles
         .reviewer_b
         .as_deref()
         .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
-    crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", &reviews, id)
+    crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", &reviews, &id)
 }
 
 pub(crate) fn extract_phase(plan: &str, id: &str) -> Option<String> {
@@ -389,5 +411,45 @@ pub(crate) fn extract_phase(plan: &str, id: &str) -> Option<String> {
         Some(out.join("\n"))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_phase_id_canonicalizes() {
+        assert_eq!(normalize_phase_id("p0"), "P0");
+        assert_eq!(normalize_phase_id("P0"), "P0");
+        assert_eq!(normalize_phase_id("  p12 "), "P12");
+        // Idempotent, and non-Pn input is left alone.
+        assert_eq!(normalize_phase_id(&normalize_phase_id("p3")), "P3");
+        assert_eq!(normalize_phase_id("setup"), "setup");
+    }
+
+    #[test]
+    fn extract_phase_finds_section_after_normalization() {
+        let plan = "# Plan\n\n## P0 — Bootstrap\ngoal: x\n- do a thing\n\n## P1 — Next\ngoal: y\n";
+        // The user typed "p0"; normalizing lets extract_phase locate "## P0".
+        let id = normalize_phase_id("p0");
+        let sec = extract_phase(plan, &id).expect("section found");
+        assert!(sec.contains("P0 — Bootstrap"), "{sec}");
+        assert!(sec.contains("do a thing"), "{sec}");
+        assert!(!sec.contains("P1 — Next"), "{sec}");
+    }
+
+    #[test]
+    fn build_phase_diff_falls_back_to_full_plan_when_section_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plan.md"),
+            "# Plan\n\n## P0 — Only phase\ngoal: ship it\n",
+        )
+        .unwrap();
+        // A phase id with no matching section → reviewer still gets the full plan.
+        let content = build_phase_diff_content(dir.path(), "P9");
+        assert!(content.contains("full plan below"), "{content}");
+        assert!(content.contains("ship it"), "{content}");
     }
 }

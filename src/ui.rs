@@ -1776,12 +1776,13 @@ impl App {
         }
 
         if cmd.starts_with("/phase-start ") || cmd.starts_with("/start ") {
-            let id = cmd.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
-            if id.is_empty() {
+            let raw = cmd.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
+            if raw.is_empty() {
                 self.push_system("Usage: /phase-start P0   (or /start P0)");
                 return;
             }
-            match crate::phase::run_phase_start(&self.root, id) {
+            let id = crate::phase::normalize_phase_id(raw);
+            match crate::phase::run_phase_start(&self.root, &id) {
                 Ok(excerpt) => {
                     self.push_system(&format!("Current phase set to {}. Build it with the coder (it reads/edits files and runs tests directly) — or just tell it to start. When done, run /accept-phase.", id));
                     if let Some(slice) = excerpt {

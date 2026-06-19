@@ -190,6 +190,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/n", "Deny a pending run_command"),
     ("/config", "Configure providers, model bindings, roles & API keys (full setup)"),
     ("/setup", "Alias for /config — providers, models, keys"),
+    ("/swap", "Hot-swap one role's model (coder, R1, or R2): pick the role, then pick or type the model id"),
     ("/status", "Show roles, config state, and current gate progress"),
     ("/models", "Show each role's model facts (context window, tool-call, price) via models.dev"),
     ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
@@ -555,6 +556,17 @@ static LOGO_BYTES: &[u8] = include_bytes!("../anvil_logo.png");
 /// Encoded as "<label>  [provider]" so the existing provider parsing/coloring applies.
 const MANUAL_ENTRY_LABEL: &str = "+ Enter a model ID manually";
 
+/// Heuristic: is the OS keyring unusable on this host? On Linux the keyring needs a
+/// running Secret Service (gnome-keyring/KWallet) reachable over D-Bus. Headless
+/// servers (SSH sessions, containers) have none, so keyring reads/writes fail silently.
+/// When this is true the setup wizard steers credentials to environment variables.
+fn keyring_likely_unavailable() -> bool {
+    cfg!(target_os = "linux")
+        && std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
+        && std::env::var_os("DISPLAY").is_none()
+        && std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
 /// Steps in the in-TUI configuration wizard (launched via /config or /setup).
 #[derive(Clone, Debug, PartialEq)]
 enum WizardStep {
@@ -581,6 +593,8 @@ enum WizardStep {
         role: String,
         provider: String,
     },
+    // /swap: pick which role (coder / R1 / R2) to re-point before choosing a model.
+    SwapRolePick,
     // Special first-run quick Ollama path: after auto-adding the local provider,
     // user scrolls the *live* fetched model list and picks (no more hardcoded defaults).
     QuickOllamaModelPick {
@@ -617,6 +631,10 @@ struct ConfigWizard {
     // Populated only for the Quick Ollama model picker flow so we can present
     // the real models the user has `ollama pull`'ed (no baked-in llama3.2 etc).
     ollama_model_list: Vec<String>,
+
+    // True while a /swap flow is active: assign exactly one role then return to chat,
+    // instead of walking the coder -> R1 -> R2 setup chain.
+    swap_mode: bool,
 }
 
 /// The program a shell command invokes — its first whitespace token, lowercased
@@ -2060,6 +2078,11 @@ impl App {
 
         if cmd == "/config" || cmd == "/setup" {
             self.start_config_wizard();
+            return;
+        }
+
+        if cmd == "/swap" || cmd == "/swap-model" {
+            self.start_role_swap();
             return;
         }
 
@@ -3698,6 +3721,7 @@ impl App {
             note: None,
             current_role: None,
             ollama_model_list: vec![],
+            swap_mode: false,
         };
 
         self.push_system("=== CONFIGURATION WIZARD ===");
@@ -3783,6 +3807,7 @@ impl App {
                     | WizardStep::BindingProvider
                     | WizardStep::ModelName
                     | WizardStep::RoleAssignment { .. }
+                    | WizardStep::SwapRolePick
                     | WizardStep::QuickOllamaModelPick { .. }
             );
             let chosen = if listy && !w.list_items.is_empty() {
@@ -3925,7 +3950,10 @@ impl App {
 
             Some(WizardStep::CredentialKind) => {
                 let kind = effective.to_lowercase();
-                if kind.contains("keyring") || kind == "3" {
+                if (kind.contains("keyring") || kind == "3") && keyring_likely_unavailable() {
+                    self.push_system("OS keyring needs a desktop secret service (D-Bus) that this headless host lacks. Falling back to an environment variable.");
+                }
+                if (kind.contains("keyring") || kind == "3") && !keyring_likely_unavailable() {
                     // Keyring is last / advanced because it has been unreliable for some users on Windows.
                     if let Some(w) = &mut self.config_wizard {
                         w.cred_kind = Some("keyring".to_string());
@@ -4142,6 +4170,22 @@ impl App {
                 self.assign_role_and_advance(role, model.clone(), provider.clone(), model);
             }
 
+            Some(WizardStep::SwapRolePick) => {
+                let choice = effective.trim().to_lowercase();
+                let role = if choice.starts_with("coder") {
+                    "coder"
+                } else if choice.starts_with("reviewer-r1") {
+                    "reviewer_a"
+                } else if choice.starts_with("reviewer-r2") {
+                    "reviewer_b"
+                } else {
+                    return;
+                };
+                // Reuse the standard model list (live models + per-provider manual entry).
+                // swap_mode stays set, so assignment finishes after this one role.
+                self.start_role_list(role);
+            }
+
             Some(WizardStep::QuickOllamaModelPick { role }) => {
                 let model = effective.trim();
                 if model.is_empty() {
@@ -4226,17 +4270,25 @@ impl App {
     }
 
     fn start_credential_list(&mut self) {
+        let mut items = vec![
+            "1. Environment variable (recommended — paste the key once; we auto-set e.g. XAI_API_KEY for this session + print persistence steps)".to_string(),
+            "2. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string(),
+        ];
+        // Only offer the OS keyring where it can actually work. On a headless Linux host
+        // there is no Secret Service, so keyring writes vanish — don't tempt the user with it.
+        if !keyring_likely_unavailable() {
+            items.push("3. OS keyring (advanced; known to be unreliable on some Windows Credential Manager setups — you may see 'No matching entry')".to_string());
+        }
         if let Some(w) = &mut self.config_wizard {
             w.step = WizardStep::CredentialKind;
-            w.list_items = vec![
-                "1. Environment variable (recommended — paste the key once; we auto-set e.g. XAI_API_KEY for this session + print persistence steps)".to_string(),
-                "2. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string(),
-                "3. OS keyring (advanced; known to be unreliable on some Windows Credential Manager setups — you may see 'No matching entry')".to_string(),
-            ];
+            w.list_items = items;
             w.list_selected = 0;
             w.list_title = "How will the API key be provided?".to_string();
         }
         self.push_system("Choose how the credential will be supplied for this provider.");
+        if keyring_likely_unavailable() {
+            self.push_system("(OS keyring is unavailable on this headless host. Use the environment variable option.)");
+        }
     }
 
     fn finish_add_provider(&mut self) {
@@ -4618,6 +4670,76 @@ impl App {
         self.start_role_list("coder");
     }
 
+    /// /swap — hot-swap the model for a single role mid-workflow. Spins up a minimal
+    /// wizard (swap_mode = true) that picks one role then re-points it, returning to chat
+    /// without walking the full coder -> R1 -> R2 chain.
+    fn start_role_swap(&mut self) {
+        if self.cfg.is_none() {
+            self.cfg = load_config(&self.root).ok();
+        }
+        if self.cfg.as_ref().is_none_or(|c| c.providers.is_empty()) {
+            self.push_system(
+                "No providers configured yet — run /config first, then /swap can re-point a role.",
+            );
+            return;
+        }
+        let (c, a, b) = self
+            .cfg
+            .as_ref()
+            .map(|cfg| {
+                (
+                    cfg.roles
+                        .coder
+                        .clone()
+                        .unwrap_or_else(|| "unset".to_string()),
+                    cfg.roles
+                        .reviewer_a
+                        .clone()
+                        .unwrap_or_else(|| "unset".to_string()),
+                    cfg.roles
+                        .reviewer_b
+                        .clone()
+                        .unwrap_or_else(|| "unset".to_string()),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "unset".to_string(),
+                    "unset".to_string(),
+                    "unset".to_string(),
+                )
+            });
+
+        let w = ConfigWizard {
+            step: WizardStep::SwapRolePick,
+            list_items: vec![
+                format!("coder       (now: {})", c),
+                format!("reviewer-R1 (now: {})", a),
+                format!("reviewer-R2 (now: {})", b),
+            ],
+            list_selected: 0,
+            list_title: "Swap which role's model? (↑↓ then Enter)".to_string(),
+            provider_type: None,
+            provider_name: None,
+            base_url: None,
+            cred_kind: None,
+            env_var: None,
+            api_key: None,
+            no_auth: false,
+            model_options: vec![],
+            binding_provider: None,
+            model: None,
+            note: None,
+            current_role: None,
+            ollama_model_list: vec![],
+            swap_mode: true,
+        };
+        self.config_wizard = Some(w);
+        self.push_system("=== SWAP MODEL ===");
+        self.push_system("Pick the role to re-point, then choose a model from the list or '+ Enter a model ID manually'. Esc cancels.");
+        self.update_status();
+    }
+
     fn start_role_list(&mut self, role: &str) {
         let binding_names = self.build_available_bindings_for_roles();
 
@@ -4718,6 +4840,22 @@ impl App {
         };
         self.push_system(&format!("Set {} → {}", display_role, binding_name));
 
+        // /swap flow: a single role was re-pointed. Return to the workflow instead of
+        // walking the coder -> R1 -> R2 setup chain.
+        if self
+            .config_wizard
+            .as_ref()
+            .map(|w| w.swap_mode)
+            .unwrap_or(false)
+        {
+            self.push_system("Model swapped. It's live for that role now. Back to the workflow.");
+            self.config_wizard = None;
+            self.input_secret = false;
+            self.reconcile_stage_from_disk();
+            self.update_status();
+            return;
+        }
+
         let next_role = match role {
             "coder" => Some("reviewer_a".to_string()),
             "reviewer_a" => Some("reviewer_b".to_string()),
@@ -4753,6 +4891,20 @@ impl App {
         } else {
             return;
         };
+
+        // In a /swap flow, Esc/back simply cancels and returns to chat (no config menu).
+        if self
+            .config_wizard
+            .as_ref()
+            .map(|w| w.swap_mode)
+            .unwrap_or(false)
+        {
+            self.config_wizard = None;
+            self.input_secret = false;
+            self.push_system("(swap cancelled)");
+            self.update_status();
+            return;
+        }
 
         if matches!(current_step, WizardStep::MainMenu) {
             self.finish_config_wizard();

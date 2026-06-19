@@ -41,7 +41,7 @@ use crate::config::{
     set_local_env_var, AnvilConfig, CredentialRef, ModelBinding, ProviderConnection,
 };
 use crate::llm::{ChatMessage, LlmClient, Role};
-use crate::state::{load_state, reviews_dir, save_state};
+use crate::state::{active_plan_name, active_plan_path, load_state, reviews_dir, save_state};
 
 /// Turn the CLI's project argument (often ".") into a real absolute path for
 /// display and tool use. Canonicalizes when possible and strips Windows'
@@ -199,8 +199,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/continue", "Resume a paused review gate (run the next round / summary)"),
     ("/update", "Update anvil to the latest release (when one is available)"),
     ("/quit", "Exit the TUI"),
-    ("/view-plan", "Open the current plan.md in a focused review popup"),
+    ("/view-plan", "Open the active plan in a focused review popup"),
     ("/view-reviews", "Open the REVIEW_* files (plan + current phase) in a focused popup"),
+    ("/new-plan <name>", "Start a fresh feature-named plan (e.g. frontpage_plan.md); archives the current plan + its reviews"),
+    ("/plans", "List the active plan and any archived plans"),
 ];
 
 const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, not a timer
@@ -571,6 +573,23 @@ fn keyring_likely_unavailable() -> bool {
         && std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
         && std::env::var_os("DISPLAY").is_none()
         && std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
+/// Turn a free-text plan name into a filesystem-safe slug (lowercase, `[a-z0-9_]`).
+/// "Front Page" -> "front_page"; collapses runs of separators; trims leading/trailing `_`.
+fn slugify_plan_name(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_sep = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_sep = false;
+        } else if (ch == '_' || ch == '-' || ch == ' ') && !out.is_empty() && !prev_sep {
+            out.push('_');
+            prev_sep = true;
+        }
+    }
+    out.trim_matches('_').to_string()
 }
 
 /// Steps in the in-TUI configuration wizard (launched via /config or /setup).
@@ -1775,7 +1794,7 @@ impl App {
                 self.push_system("Reviewers not configured. Use /config.");
                 return;
             }
-            let plan_path = self.root.join("plan.md");
+            let plan_path = self.plan_path();
             if !plan_path.exists() {
                 self.push_system("plan.md not found. Ask the coder to write the plan to plan.md first (it can create the file itself), then /lock-plan.");
                 return;
@@ -1785,7 +1804,7 @@ impl App {
         }
 
         if cmd == "/accept-plan" || cmd == "/accept plan" {
-            let plan_path = self.root.join("plan.md");
+            let plan_path = self.plan_path();
             let rev_dir = reviews_dir(&self.root);
             let r1 = rev_dir.join("REVIEW_plan_R1.md");
             let r2 = rev_dir.join("REVIEW_plan_R2.md");
@@ -2092,8 +2111,22 @@ impl App {
             return;
         }
 
+        if cmd == "/new-plan" || cmd.starts_with("/new-plan ") {
+            let name = cmd
+                .strip_prefix("/new-plan")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            self.start_new_plan(&name);
+            return;
+        }
+        if cmd == "/plans" {
+            self.list_plans();
+            return;
+        }
+
         if cmd == "/view-plan" {
-            let plan_path = self.root.join("plan.md");
+            let plan_path = self.plan_path();
             self.open_doc_viewer("Plan (read before accept)", &plan_path);
             return;
         }
@@ -3047,7 +3080,7 @@ impl App {
             return;
         }
 
-        let plan_path = self.root.join("plan.md");
+        let plan_path = self.plan_path();
         let rev_dir = reviews_dir(&self.root);
         let r1 = rev_dir.join("REVIEW_plan_R1.md");
         let r2 = rev_dir.join("REVIEW_plan_R2.md");
@@ -3704,6 +3737,124 @@ impl App {
     // ---------------------------------------------------------------------
 
     /// Start the interactive configuration wizard from the /config or /setup command.
+    /// Active plan file for this project (defaults to plan.md; /new-plan re-points it).
+    fn plan_path(&self) -> std::path::PathBuf {
+        active_plan_path(&self.root)
+    }
+
+    /// /new-plan <name> — start a fresh, feature-named plan (sequential model). Archives
+    /// the current plan + its REVIEW_* files under .anvil/plans/archive/, resets the gate
+    /// state, and points the coder at <slug>_plan.md.
+    fn start_new_plan(&mut self, raw_name: &str) {
+        let cleaned = raw_name
+            .trim()
+            .trim_end_matches(".md")
+            .trim_end_matches("_plan");
+        let slug = slugify_plan_name(cleaned);
+        if slug.is_empty() {
+            self.push_system(
+                "Usage: /new-plan <name>   (e.g. /new-plan frontpage  ->  frontpage_plan.md)",
+            );
+            return;
+        }
+        let filename = format!("{}_plan.md", slug);
+
+        // Archive the current active plan (+ its reviews) if it exists on disk. Bail on
+        // failure rather than risk clobbering the previous plan.
+        match self.archive_current_plan() {
+            Ok(Some(dir)) => {
+                self.push_system(&format!("Archived the previous plan to {}", dir.display()));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.push_system(&format!(
+                    "Could not archive the previous plan ({e}). Aborting /new-plan to avoid clobbering it."
+                ));
+                return;
+            }
+        }
+
+        // Point state at the new plan and reset the gate.
+        let mut st = load_state(&self.root);
+        st.active_plan = Some(filename.clone());
+        st.current_phase = None;
+        st.accepted_plan_hash = None;
+        st.shipped_phases.clear();
+        st.phase_base = None;
+        if let Err(e) = save_state(&self.root, &st) {
+            self.push_system(&format!("Failed to save state for the new plan: {e}"));
+            return;
+        }
+
+        self.reconcile_stage_from_disk();
+        self.update_status();
+        self.push_system(&format!(
+            "New plan: {filename}. Discuss what you want, then have the coder write the plan to {filename} and run /lock-plan."
+        ));
+    }
+
+    /// Move the active plan file and its REVIEW_*.md files into
+    /// .anvil/plans/archive/<stem>[_n]/. Returns the archive dir, or None if there was no
+    /// plan file to archive.
+    fn archive_current_plan(&self) -> std::io::Result<Option<std::path::PathBuf>> {
+        let current = self.plan_path();
+        if !current.exists() {
+            return Ok(None);
+        }
+        let stem = current
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("plan")
+            .to_string();
+        let archive_base = self.root.join(".anvil").join("plans").join("archive");
+        let mut dir = archive_base.join(&stem);
+        let mut n = 2;
+        while dir.exists() {
+            dir = archive_base.join(format!("{stem}_{n}"));
+            n += 1;
+        }
+        std::fs::create_dir_all(&dir)?;
+        if let Some(fname) = current.file_name() {
+            std::fs::rename(&current, dir.join(fname))?;
+        }
+        // Sweep REVIEW_*.md files at the repo root (they belong to the plan being archived).
+        if let Ok(entries) = std::fs::read_dir(&self.root) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if let Some(fname) = p.file_name().and_then(|s| s.to_str()) {
+                    if fname.starts_with("REVIEW_") && fname.ends_with(".md") {
+                        let _ = std::fs::rename(&p, dir.join(fname));
+                    }
+                }
+            }
+        }
+        Ok(Some(dir))
+    }
+
+    /// /plans — show the active plan and any archived ones.
+    fn list_plans(&mut self) {
+        let active = active_plan_name(&self.root);
+        self.push_system(&format!("Active plan: {active}"));
+        let archive_base = self.root.join(".anvil").join("plans").join("archive");
+        let mut names: Vec<String> = std::fs::read_dir(&archive_base)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        if names.is_empty() {
+            self.push_system("Archived plans: (none)");
+        } else {
+            self.push_system(&format!("Archived plans ({}):", names.len()));
+            for n in names {
+                self.push_system(&format!("  {n}"));
+            }
+        }
+    }
+
     fn start_config_wizard(&mut self) {
         // Make sure we have a cfg to work with (may be empty on first real setup)
         if self.cfg.is_none() {
@@ -6053,7 +6204,7 @@ fn header_model_label(cfg: &crate::config::AnvilConfig, role: &str) -> String {
 /// Inline phase progress: `P0✓ P1→ P2○ P3○`
 fn build_phase_progress(app: &App) -> String {
     let state = load_state(&app.root);
-    let plan_path = app.root.join("plan.md");
+    let plan_path = active_plan_path(&app.root);
 
     if !plan_path.exists() {
         return if state.accepted_plan_hash.is_some() {

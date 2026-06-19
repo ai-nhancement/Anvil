@@ -374,7 +374,7 @@ pub fn cmd_config_add_provider(root: &Path) -> Result<()> {
 
 pub fn cmd_status(root: &Path) -> Result<()> {
     use crate::plan::simple_hash;
-    use crate::state::{load_state, reviews_dir};
+    use crate::state::{active_plan_path, load_state, reviews_dir};
 
     println!("{}", "Anvil Project Status".bold());
     println!("Root: {}", root.display());
@@ -430,7 +430,7 @@ pub fn cmd_status(root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     let rev_dir = reviews_dir(root);
     let r1 = rev_dir.join("REVIEW_plan_R1.md");
     let r2 = rev_dir.join("REVIEW_plan_R2.md");

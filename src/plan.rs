@@ -19,7 +19,7 @@ use colored::Colorize;
 
 use crate::config::{load_config, load_local_env};
 use crate::llm::{ChatMessage, LlmClient};
-use crate::state::{load_state, reviews_dir, save_state};
+use crate::state::{active_plan_path, load_state, reviews_dir, save_state};
 
 /// Max investigation steps a reviewer may take (tool calls) before it must write
 /// up its findings — bounds cost on a cross-vendor review.
@@ -46,7 +46,7 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
     let cfg = load_config(root)?;
     let client = LlmClient::new();
 
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     let reviews = reviews_dir(root);
     fs::create_dir_all(&reviews)?;
 
@@ -133,7 +133,7 @@ pub fn run_plan(root: &Path, fresh: bool, context_file: Option<&Path>) -> Result
 /// Writes `accepted_plan_hash` to .anvil/state.json (same value the TUI /accept-plan produces).
 /// Requires plan.md + both REVIEW_plan_R*.md to exist.
 pub fn accept_plan(root: &Path) -> Result<()> {
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     let rev_dir = reviews_dir(root);
     let r1 = rev_dir.join("REVIEW_plan_R1.md");
     let r2 = rev_dir.join("REVIEW_plan_R2.md");
@@ -382,7 +382,7 @@ pub fn run_plan_r1(root: &Path) -> Result<String> {
     let reviews = reviews_dir(root);
     fs::create_dir_all(&reviews)?;
 
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     if !plan_path.exists() {
         return Err(anyhow!("plan.md not found — coder must write it (via chat) and user must save it to disk before /lock-plan."));
     }
@@ -405,7 +405,7 @@ pub fn run_plan_r2(root: &Path) -> Result<String> {
     let cfg = load_config(root)?;
     let client = LlmClient::new();
 
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     if !plan_path.exists() {
         return Err(anyhow!("plan.md not found."));
     }

@@ -20,7 +20,7 @@ use colored::Colorize;
 
 use crate::config::{load_config, load_local_env};
 use crate::llm::LlmClient;
-use crate::state::{load_state, reviews_dir, save_state};
+use crate::state::{active_plan_path, load_state, reviews_dir, save_state};
 
 pub fn run_phase_list(root: &Path) -> Result<()> {
     let state = load_state(root);
@@ -30,7 +30,7 @@ pub fn run_phase_list(root: &Path) -> Result<()> {
     println!();
 
     // Parse phase declarations from plan.md
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     let phases = if plan_path.exists() {
         let plan = fs::read_to_string(&plan_path).unwrap_or_default();
         parse_plan_phases(&plan)
@@ -185,7 +185,7 @@ pub fn run_phase_start(root: &Path, id: &str) -> Result<Option<String>> {
     state.current_phase = Some(id.clone());
     save_state(root, &state)?;
 
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     if plan_path.exists() {
         if let Ok(plan) = fs::read_to_string(&plan_path) {
             return Ok(extract_phase(&plan, &id));
@@ -234,7 +234,7 @@ pub fn run_phase_review(root: &Path, id: &str) -> Result<()> {
     // In a more advanced version we would compute a real diff or feed file contents.
     // For anti-drift the important thing is that two different models from different providers see the work.
 
-    let plan = fs::read_to_string(root.join("plan.md")).unwrap_or_default();
+    let plan = fs::read_to_string(active_plan_path(root)).unwrap_or_default();
     let phase_excerpt = extract_phase(&plan, id).unwrap_or_else(|| plan.clone());
 
     println!(
@@ -355,7 +355,7 @@ pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
 /// passed R1+R2, the files changed this phase, and links to the review docs.
 /// Deterministic and idempotent (skips if already recorded). Best-effort.
 fn annotate_phase_closed(root: &Path, id: &str, base: Option<&str>) {
-    let plan_path = root.join("plan.md");
+    let plan_path = active_plan_path(root);
     let Ok(plan) = fs::read_to_string(&plan_path) else {
         return;
     };
@@ -548,7 +548,7 @@ fn capture_git_diff(root: &Path) -> String {
 
 /// Compose the reviewer input for a phase: the plan excerpt + the real diff.
 fn build_phase_diff_content(root: &Path, id: &str) -> String {
-    let plan = fs::read_to_string(root.join("plan.md")).unwrap_or_default();
+    let plan = fs::read_to_string(active_plan_path(root)).unwrap_or_default();
     // Prefer the focused phase section; if it can't be located, fall back to the
     // whole plan so the reviewer always has the plan to check drift against.
     let excerpt = extract_phase(&plan, id).unwrap_or_else(|| {

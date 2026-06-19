@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::state::{load_state, reviews_dir};
+use crate::state::{active_plan_name, active_plan_path, load_state, reviews_dir};
 
 /// Hard cap on the whole snapshot so it never bloats the prompt.
 const MAX_SNAPSHOT: usize = 4000;
@@ -29,6 +29,11 @@ pub fn snapshot(root: &Path) -> String {
     s.push_str(&format!("Platform: {}\n", std::env::consts::OS));
     s.push_str(&format!("Stage: {}\n", stage_label(root)));
 
+    let plan_name = active_plan_name(root);
+    s.push_str(&format!(
+        "Plan file: {plan_name} (write and read the plan here; its reviews and phases use this file)\n"
+    ));
+
     let state = load_state(root);
     if let Some(phase) = &state.current_phase {
         s.push_str(&format!("Current phase: {}\n", phase));
@@ -40,12 +45,12 @@ pub fn snapshot(root: &Path) -> String {
         ));
     }
 
-    let plan_text = std::fs::read_to_string(root.join("plan.md")).unwrap_or_default();
+    let plan_text = std::fs::read_to_string(active_plan_path(root)).unwrap_or_default();
 
     // Plan excerpt for the current phase (so the agent sees the spec it's building to).
     if let Some(phase) = &state.current_phase {
         if let Some(excerpt) = crate::phase::extract_phase(&plan_text, phase) {
-            s.push_str("\nCurrent phase from plan.md:\n");
+            s.push_str(&format!("\nCurrent phase from {plan_name}:\n"));
             s.push_str(&cap(&excerpt, MAX_EXCERPT));
             s.push('\n');
         }
@@ -59,7 +64,7 @@ pub fn snapshot(root: &Path) -> String {
                  The plan is already accepted — do NOT run or suggest /accept-plan again.\n"
             ));
             if let Some(excerpt) = crate::phase::extract_phase(&plan_text, next) {
-                s.push_str("\nNext phase from plan.md:\n");
+                s.push_str(&format!("\nNext phase from {plan_name}:\n"));
                 s.push_str(&cap(&excerpt, MAX_EXCERPT));
                 s.push('\n');
             }
@@ -77,8 +82,9 @@ pub fn snapshot(root: &Path) -> String {
 
 /// Derive the workflow stage from disk artifacts (same truth the TUI header uses).
 /// Pure: reads `plan.md` + the two plan reviews + the accepted hash in state.
-fn stage_label(root: &Path) -> &'static str {
-    let plan_path = root.join("plan.md");
+fn stage_label(root: &Path) -> String {
+    let plan_name = active_plan_name(root);
+    let plan_path = root.join(&plan_name);
     let rev = reviews_dir(root);
     let r1 = rev.join("REVIEW_plan_R1.md");
     let r2 = rev.join("REVIEW_plan_R2.md");
@@ -87,16 +93,18 @@ fn stage_label(root: &Path) -> &'static str {
     if plan_path.exists() && r1.exists() && r2.exists() {
         // "Accepted" is a latched state: once the plan was accepted, or any phase
         // has shipped, we're past the plan gate and building phases. Don't bounce
-        // back to "/accept-plan" just because plan.md was edited during the work.
+        // back to "/accept-plan" just because the plan was edited during the work.
         if st.accepted_plan_hash.is_some() || !st.shipped_phases.is_empty() {
-            "PLAN ACCEPTED — building phases (/accept-phase when a phase is done)"
+            "PLAN ACCEPTED — building phases (/accept-phase when a phase is done)".to_string()
         } else {
-            "PLAN REVIEWED (R1+R2 on disk) — /accept-plan to approve (or revise plan.md)"
+            format!(
+                "PLAN REVIEWED (R1+R2 on disk) — /accept-plan to approve (or revise {plan_name})"
+            )
         }
     } else if plan_path.exists() {
-        "PLANNING — plan.md exists; /lock-plan to run the R1+R2 reviewers"
+        format!("PLANNING — {plan_name} exists; /lock-plan to run the R1+R2 reviewers")
     } else {
-        "TALK — no plan yet; discuss, then write plan.md and /lock-plan"
+        format!("TALK — no plan yet; discuss, then write {plan_name} and /lock-plan")
     }
 }
 

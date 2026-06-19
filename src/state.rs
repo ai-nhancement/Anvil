@@ -33,6 +33,27 @@ pub struct ProjectState {
     /// Some(false) = user prefers manual /include only.
     #[serde(default)]
     pub working_in_repo_accepted: Option<bool>,
+
+    /// The active plan file for this project. None = the default `plan.md`. `/new-plan`
+    /// points this at a feature-named file like `frontpage_plan.md`. Sequential model:
+    /// one active plan at a time; the previous plan + its REVIEW_* files are archived
+    /// under `.anvil/plans/archive/` when a new one starts.
+    #[serde(default)]
+    pub active_plan: Option<String>,
+}
+
+/// Filename of the active plan for this project (defaults to `plan.md`).
+pub fn active_plan_name(root: &Path) -> String {
+    load_state(root)
+        .active_plan
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "plan.md".to_string())
+}
+
+/// Path to the active plan file (defaults to `<root>/plan.md`).
+pub fn active_plan_path(root: &Path) -> std::path::PathBuf {
+    root.join(active_plan_name(root))
 }
 
 pub fn load_state(root: &Path) -> ProjectState {
@@ -61,4 +82,43 @@ pub fn reviews_dir(root: &Path) -> std::path::PathBuf {
     // critical reviewer findings are also persisted at root or as _Findings.md siblings).
     // This changed from the old "reviews/" subdir to keep source-of-truth files visible at root alongside plan.md.
     root.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn active_plan_defaults_to_plan_md() {
+        let dir = tempdir().unwrap();
+        assert_eq!(active_plan_name(dir.path()), "plan.md");
+        assert_eq!(active_plan_path(dir.path()), dir.path().join("plan.md"));
+    }
+
+    #[test]
+    fn active_plan_reflects_saved_state() {
+        let dir = tempdir().unwrap();
+        let st = ProjectState {
+            active_plan: Some("frontpage_plan.md".to_string()),
+            ..Default::default()
+        };
+        save_state(dir.path(), &st).unwrap();
+        assert_eq!(active_plan_name(dir.path()), "frontpage_plan.md");
+        assert_eq!(
+            active_plan_path(dir.path()),
+            dir.path().join("frontpage_plan.md")
+        );
+    }
+
+    #[test]
+    fn blank_active_plan_falls_back_to_default() {
+        let dir = tempdir().unwrap();
+        let st = ProjectState {
+            active_plan: Some("   ".to_string()),
+            ..Default::default()
+        };
+        save_state(dir.path(), &st).unwrap();
+        assert_eq!(active_plan_name(dir.path()), "plan.md");
+    }
 }

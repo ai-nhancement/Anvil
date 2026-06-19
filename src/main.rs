@@ -27,6 +27,7 @@ mod talk;
 mod tools;
 mod ui;
 mod update;
+mod websearch;
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;

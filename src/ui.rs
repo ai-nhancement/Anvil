@@ -5635,6 +5635,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
                 | WizardStep::ModelName
                 | WizardStep::RoleAssignment { .. }
                 | WizardStep::QuickOllamaModelPick { .. }
+                | WizardStep::SwapRolePick
         );
         if is_list_step && !wizard.list_items.is_empty() {
             match key.code {

@@ -141,6 +141,21 @@ pub fn tool_defs() -> Vec<ToolDef> {
                 "required": ["command"]
             }),
         },
+        ToolDef {
+            name: "delegate".into(),
+            description: format!(
+                "Delegate a focused evidence-gathering task to a read-only specialist sub-agent and get its findings back. Use this when you need information from OUTSIDE this project — the web, or another repository. The specialist returns evidence; you stay the decision-maker and the only one who edits code. Outward actions (fetching a URL, cloning a repo) ask the user for confirmation. Available specialists:\n{}",
+                crate::specialist::help_listing()
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "specialist": {"type": "string", "enum": crate::specialist::names(), "description": "Which specialist to delegate to"},
+                    "task": {"type": "string", "description": "A clear, self-contained description of what to find out. The specialist cannot see this conversation, so include all the context it needs."}
+                },
+                "required": ["specialist", "task"]
+            }),
+        },
     ]
 }
 
@@ -180,6 +195,7 @@ pub fn summarize_args(call: &ToolCall) -> String {
             format!("{} file(s)", files)
         }
         "run_command" => arg_str(call, "command").unwrap_or_default(),
+        "delegate" => arg_str(call, "specialist").unwrap_or_default(),
         _ => String::new(),
     }
 }

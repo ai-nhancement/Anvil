@@ -469,7 +469,7 @@ pub enum ConfirmHandle {
 }
 
 impl ConfirmHandle {
-    async fn confirm(&mut self, tx: &UnboundedSender<String>, command: &str) -> bool {
+    pub async fn confirm(&mut self, tx: &UnboundedSender<String>, command: &str) -> bool {
         match self {
             ConfirmHandle::AlwaysAllow => true,
             ConfirmHandle::Channel(rx) => {
@@ -488,6 +488,9 @@ pub struct Agent {
     api_key: String,
     system: String,
     root: PathBuf,
+    /// Effective project config — used to resolve specialist delegation
+    /// (web-search backend, etc.). Cloned at construction; cheap.
+    cfg: crate::config::AnvilConfig,
     history: Vec<ChatMessage>,
     /// How `run_command` confirmations are resolved for this agent.
     confirm: ConfirmHandle,
@@ -572,6 +575,7 @@ fn char_budget_for(model: &str) -> usize {
 }
 
 impl Agent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: LlmClient,
         conn: ProviderConnection,
@@ -579,6 +583,7 @@ impl Agent {
         api_key: String,
         system: String,
         root: PathBuf,
+        cfg: crate::config::AnvilConfig,
         confirm: ConfirmHandle,
     ) -> Self {
         // Load the *entire* immutable ledger. The ledger is append-only and
@@ -594,6 +599,7 @@ impl Agent {
             api_key,
             system,
             root,
+            cfg,
             history,
             confirm,
             max_steps: 25,
@@ -845,7 +851,40 @@ impl Agent {
                 );
                 let sig = format!("{}::{}", call.name, call.arguments);
 
-                let result = if read_only && seen_reads.contains(&sig) {
+                let result = if call.name == "delegate" {
+                    // Hand off to a scoped specialist sub-agent. It reuses the
+                    // coder's model connection; its outward actions (web fetch,
+                    // repo clone) are gated through this agent's ConfirmHandle.
+                    let specialist = call
+                        .arguments
+                        .get("specialist")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let task = call
+                        .arguments
+                        .get("task")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    match crate::specialist::run_specialist(
+                        &self.client,
+                        &self.cfg,
+                        &self.conn,
+                        &self.model,
+                        &self.api_key,
+                        &self.root,
+                        &specialist,
+                        &task,
+                        &tx,
+                        &mut self.confirm,
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => format!("ERROR: {e}"),
+                    }
+                } else if read_only && seen_reads.contains(&sig) {
                     // Identical read already done this turn with nothing changed
                     // since — its result is still in history. Nudge instead of repeat.
                     format!(

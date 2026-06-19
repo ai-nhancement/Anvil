@@ -22,6 +22,7 @@ mod phase;
 mod plan;
 mod reality;
 mod repomap;
+mod specialist;
 mod state;
 mod talk;
 mod tools;

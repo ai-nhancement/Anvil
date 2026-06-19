@@ -10,8 +10,6 @@
 //! from a conventional environment variable (`TAVILY_API_KEY` / `BRAVE_API_KEY`),
 //! which Anvil already loads from the global/local `.env`.
 
-#![allow(dead_code)] // wired into the specialist runner in a follow-up step
-
 use std::path::Path;
 
 use anyhow::{anyhow, Result};

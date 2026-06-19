@@ -26,6 +26,20 @@ pub struct AnvilConfig {
     /// Model bindings: a logical name + which provider + exact model id string.
     #[serde(default)]
     pub model_bindings: BTreeMap<String, ModelBinding>,
+
+    /// Web-search backend for evidence-gathering specialists (v0.4.0).
+    #[serde(default)]
+    pub web_search: WebSearchSettings,
+}
+
+/// `[web_search]` block: which backend the `researcher` specialist uses. The API
+/// key is never stored here — it comes from a conventional environment variable
+/// (`TAVILY_API_KEY` / `BRAVE_API_KEY`) loaded from the global/local `.env`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebSearchSettings {
+    /// "tavily" (default) or "brave". `None` → the built-in default at call time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -173,6 +187,9 @@ fn merge(mut base: AnvilConfig, overlay: AnvilConfig) -> AnvilConfig {
     }
     if overlay.roles.reviewer_b.is_some() {
         base.roles.reviewer_b = overlay.roles.reviewer_b;
+    }
+    if overlay.web_search.provider.is_some() {
+        base.web_search.provider = overlay.web_search.provider;
     }
     base
 }

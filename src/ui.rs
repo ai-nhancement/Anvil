@@ -92,6 +92,7 @@ You have tools, scoped to the project root:\n\
 - edit_file(path, old_string, new_string) — simple exact-snippet replace; fine for a single tiny edit, but apply_patch is more reliable.\n\
 - list_dir(path), grep(pattern, [path])\n\
 - run_command(command)  — e.g. cargo build, cargo test, git diff (the user confirms each run)\n\
+- delegate(specialist, task) — hand a focused EVIDENCE-GATHERING task to a scoped, read-only specialist sub-agent when you need information from OUTSIDE this project. researcher: searches the web + reads pages (library/API docs, usage, best practices, error explanations). repo-scout: shallow-clones an external git repo and studies how it does something. The specialist can't see this chat, so put all needed context in `task`; it returns evidence, and YOU stay the decision-maker and the only one who edits code. Its outward actions (web fetch, repo clone) ask the user to confirm.\n\
 \n\
 Always use your built-in read_file / grep / list_dir tools to read and search the code — they work everywhere and need no confirmation. Reserve run_command for build/test/lint/git; do NOT shell out to grep/findstr/Select-String/python to search files (the platform varies; your grep tool is reliable). If a search returns nothing, try a shorter or different pattern rather than switching to the shell.\n\
 For LARGE files (hundreds of lines, e.g. src/ui.rs), do NOT read the whole file repeatedly — grep for the symbol or text you need to find its line, then read_file with offset+limit to read just that section. Reading whole large files wastes context and makes you lose track. Don't re-run the same read/list/project_state call you already ran this turn.\n\
@@ -2828,6 +2829,9 @@ impl App {
         let model = binding.model.clone();
         let conn_for_task = provider.clone();
         let key_for_task = api_key.clone();
+        // Effective config for the agent (specialist delegation needs it). Cloned
+        // here while the `cfg` borrow is live, before the mutable self calls below.
+        let cfg_for_agent = cfg.clone();
 
         // Per-turn correlation id for the jsonl log.
         let turn_id = Uuid::new_v4().to_string();
@@ -2866,6 +2870,7 @@ impl App {
                 key_for_task,
                 coder_system_prompt(),
                 self.root.clone(),
+                cfg_for_agent,
                 ConfirmHandle::Channel(confirm_rx),
             );
             self.agent = Some(Arc::new(Mutex::new(agent)));

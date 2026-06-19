@@ -5826,28 +5826,7 @@ fn build_phase_progress(app: &App) -> String {
     }
 
     let plan = std::fs::read_to_string(&plan_path).unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    let phase_ids: Vec<String> = plan
-        .lines()
-        .filter_map(|line| {
-            let s = line.trim_start_matches('#').trim();
-            if let Some(rest) = s.strip_prefix('P') {
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if !digits.is_empty() {
-                    let id = format!("P{}", digits);
-                    if seen.insert(id.clone()) {
-                        Some(id)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
+    let phase_ids = crate::phase::plan_phase_ids(&plan);
 
     if phase_ids.is_empty() {
         return "phases: (none in plan.md)".to_string();

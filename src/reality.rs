@@ -13,7 +13,6 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::plan::simple_hash;
 use crate::state::{load_state, reviews_dir};
 
 /// Hard cap on the whole snapshot so it never bloats the prompt.
@@ -41,14 +40,31 @@ pub fn snapshot(root: &Path) -> String {
         ));
     }
 
+    let plan_text = std::fs::read_to_string(root.join("plan.md")).unwrap_or_default();
+
     // Plan excerpt for the current phase (so the agent sees the spec it's building to).
     if let Some(phase) = &state.current_phase {
-        if let Ok(plan) = std::fs::read_to_string(root.join("plan.md")) {
-            if let Some(excerpt) = crate::phase::extract_phase(&plan, phase) {
-                s.push_str("\nCurrent phase from plan.md:\n");
+        if let Some(excerpt) = crate::phase::extract_phase(&plan_text, phase) {
+            s.push_str("\nCurrent phase from plan.md:\n");
+            s.push_str(&cap(&excerpt, MAX_EXCERPT));
+            s.push('\n');
+        }
+    } else {
+        // Between phases: point at the next unshipped phase so the agent builds it
+        // rather than getting confused and suggesting the plan be re-accepted.
+        let ids = crate::phase::plan_phase_ids(&plan_text);
+        if let Some(next) = ids.iter().find(|id| !state.shipped_phases.contains(id)) {
+            s.push_str(&format!(
+                "Next phase to build: {next} (not started). Build it directly, or the user can /phase-start {next}. \
+                 The plan is already accepted — do NOT run or suggest /accept-plan again.\n"
+            ));
+            if let Some(excerpt) = crate::phase::extract_phase(&plan_text, next) {
+                s.push_str("\nNext phase from plan.md:\n");
                 s.push_str(&cap(&excerpt, MAX_EXCERPT));
                 s.push('\n');
             }
+        } else if !ids.is_empty() {
+            s.push_str("All planned phases are shipped.\n");
         }
     }
 
@@ -66,15 +82,17 @@ fn stage_label(root: &Path) -> &'static str {
     let rev = reviews_dir(root);
     let r1 = rev.join("REVIEW_plan_R1.md");
     let r2 = rev.join("REVIEW_plan_R2.md");
+    let st = load_state(root);
 
     if plan_path.exists() && r1.exists() && r2.exists() {
-        if let Ok(txt) = std::fs::read_to_string(&plan_path) {
-            let st = load_state(root);
-            if st.accepted_plan_hash.as_deref() == Some(simple_hash(&txt).as_str()) {
-                return "PLAN ACCEPTED — building phases (/accept-phase when a phase is done)";
-            }
+        // "Accepted" is a latched state: once the plan was accepted, or any phase
+        // has shipped, we're past the plan gate and building phases. Don't bounce
+        // back to "/accept-plan" just because plan.md was edited during the work.
+        if st.accepted_plan_hash.is_some() || !st.shipped_phases.is_empty() {
+            "PLAN ACCEPTED — building phases (/accept-phase when a phase is done)"
+        } else {
+            "PLAN REVIEWED (R1+R2 on disk) — /accept-plan to approve (or revise plan.md)"
         }
-        "PLAN REVIEWED (R1+R2 on disk) — /accept-plan to approve (or revise plan.md)"
     } else if plan_path.exists() {
         "PLANNING — plan.md exists; /lock-plan to run the R1+R2 reviewers"
     } else {

@@ -95,34 +95,75 @@ pub fn run_phase_list(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Extract (id, name) pairs from plan.md. Matches "## Px — Name" or "## Px: Name" style headers.
+/// If `line` is a markdown phase header, return its canonical id ("P0", "P1", …).
+/// Tolerant of how the coder actually writes them: `## P0`, `## P0 — Name`,
+/// `## P0: Name`, `## Phase 0`, `### Phase 1 — Name`, `## p2`. Requires a leading
+/// `#` so prose lines mentioning "phase 1" aren't mistaken for headers.
+pub(crate) fn phase_id_from_header(line: &str) -> Option<String> {
+    let t = line.trim_start();
+    if !t.starts_with('#') {
+        return None;
+    }
+    let s = t.trim_start_matches('#').trim();
+    let lower = s.to_ascii_lowercase();
+    // "Phase 0" / "Phase0" / "Phase: 0", else bare "P0".
+    let after = lower
+        .strip_prefix("phase")
+        .map(|r| r.trim_start_matches([' ', ':', '-', '—']))
+        .or_else(|| lower.strip_prefix('p'))?;
+    let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        Some(format!("P{digits}"))
+    }
+}
+
+/// Best-effort human name from a phase header (cosmetic — used by `phase list`).
+fn phase_name(header: &str) -> String {
+    let h = header.trim_start_matches('#').trim();
+    let start = if h.to_ascii_lowercase().starts_with("phase") {
+        5
+    } else if h.to_ascii_lowercase().starts_with('p') {
+        1
+    } else {
+        0
+    };
+    h[start..]
+        .trim_start_matches([' ', ':', '-', '—'])
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .trim_start_matches([' ', ':', '-', '—'])
+        .trim()
+        .to_string()
+}
+
+/// Ordered, de-duplicated canonical phase ids found in `plan.md` text.
+pub(crate) fn plan_phase_ids(plan: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    plan.lines()
+        .filter_map(phase_id_from_header)
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+/// Extract (id, name) pairs from plan.md.
 fn parse_plan_phases(plan: &str) -> Vec<(String, String)> {
+    let mut seen = std::collections::HashSet::new();
     plan.lines()
         .filter_map(|line| {
-            let stripped = line.trim_start_matches('#').trim();
-            // Match "P0", "P1", ... optionally followed by " — Name" or ": Name"
-            if let Some(rest) = stripped.strip_prefix('P') {
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if digits.is_empty() {
-                    return None;
-                }
-                let id = format!("P{}", digits);
-                let after = &rest[digits.len()..];
-                let name = after
-                    .trim_start_matches([' ', '—', '-', ':'])
-                    .trim()
-                    .to_string();
-                Some((
-                    id,
-                    if name.is_empty() {
-                        "(unnamed)".to_string()
-                    } else {
-                        name
-                    },
-                ))
-            } else {
-                None
+            let id = phase_id_from_header(line)?;
+            if !seen.insert(id.clone()) {
+                return None;
             }
+            let name = phase_name(line);
+            Some((
+                id,
+                if name.is_empty() {
+                    "(unnamed)".to_string()
+                } else {
+                    name
+                },
+            ))
         })
         .collect()
 }
@@ -393,24 +434,32 @@ pub fn run_phase_r2_diff(root: &Path, id: &str) -> Result<String> {
 }
 
 pub(crate) fn extract_phase(plan: &str, id: &str) -> Option<String> {
-    let marker = format!("## {}", id);
-    if let Some(start) = plan.find(&marker) {
-        let rest = &plan[start..];
-        // Take until the next ## that looks like a new phase or the risks section
-        let mut lines = rest.lines();
-        let mut out = vec![lines.next().unwrap_or("").to_string()];
-        for line in lines {
-            if line.starts_with("## P")
-                || line.to_lowercase().contains("risk")
-                || line.to_lowercase().contains("open question")
-            {
+    let want = normalize_phase_id(id);
+    let mut out: Vec<String> = Vec::new();
+    let mut in_section = false;
+    for line in plan.lines() {
+        if let Some(hid) = phase_id_from_header(line) {
+            if in_section {
+                break; // the next phase header ends this section
+            }
+            if hid == want {
+                in_section = true;
+                out.push(line.to_string());
+            }
+            continue;
+        }
+        if in_section {
+            let low = line.to_lowercase();
+            if low.contains("risk") || low.contains("open question") {
                 break;
             }
             out.push(line.to_string());
         }
-        Some(out.join("\n"))
-    } else {
+    }
+    if out.is_empty() {
         None
+    } else {
+        Some(out.join("\n"))
     }
 }
 
@@ -437,6 +486,42 @@ mod tests {
         assert!(sec.contains("P0 — Bootstrap"), "{sec}");
         assert!(sec.contains("do a thing"), "{sec}");
         assert!(!sec.contains("P1 — Next"), "{sec}");
+    }
+
+    #[test]
+    fn header_parsing_tolerates_phase_word_and_case() {
+        // The coder may write any of these; all must canonicalize to P0/P1/P2.
+        assert_eq!(
+            phase_id_from_header("## P0 — Bootstrap").as_deref(),
+            Some("P0")
+        );
+        assert_eq!(
+            phase_id_from_header("### Phase 1: Build").as_deref(),
+            Some("P1")
+        );
+        assert_eq!(phase_id_from_header("## phase2").as_deref(), Some("P2"));
+        assert_eq!(
+            phase_id_from_header("## Phase 3 - Ship").as_deref(),
+            Some("P3")
+        );
+        // Not headers / not phases.
+        assert_eq!(phase_id_from_header("We finished phase 1 today"), None); // no leading #
+        assert_eq!(phase_id_from_header("## Planning"), None);
+        assert_eq!(phase_id_from_header("## Performance notes"), None);
+    }
+
+    #[test]
+    fn plan_phase_ids_and_extract_work_with_phase_word_headers() {
+        let plan = "# Plan\n\n## Phase 0 — Bootstrap\ngoal: x\n- do a thing\n\n## Phase 1: Next\ngoal: y\n";
+        assert_eq!(
+            plan_phase_ids(plan),
+            vec!["P0".to_string(), "P1".to_string()]
+        );
+        // A user typing "p0" still locates the "## Phase 0" section.
+        let sec = extract_phase(plan, "p0").expect("section found");
+        assert!(sec.contains("Phase 0 — Bootstrap"), "{sec}");
+        assert!(sec.contains("do a thing"), "{sec}");
+        assert!(!sec.contains("Phase 1"), "{sec}");
     }
 
     #[test]

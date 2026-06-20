@@ -531,3 +531,43 @@ fn prior_reviews_digest(root: &Path, current_artifact: &str, budget: usize) -> S
         "--- PRIOR REVIEWS (your earlier findings from previous phases/rounds — for continuity; don't re-litigate settled points) ---\n{body}\n---\n\n"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accept_plan_requires_plan_and_both_reviews_then_records_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // No plan.md → error.
+        assert!(accept_plan(root).is_err());
+
+        // Plan present but no reviews → still error.
+        std::fs::write(root.join("plan.md"), "# Plan\n\n## P0 — Start\ngoal: x\n").unwrap();
+        assert!(accept_plan(root).is_err());
+
+        // Both plan reviews present → accepts and records the plan hash.
+        std::fs::write(root.join("REVIEW_plan_R1.md"), "r1 findings").unwrap();
+        std::fs::write(root.join("REVIEW_plan_R2.md"), "r2 findings").unwrap();
+        accept_plan(root).unwrap();
+        assert!(crate::state::load_state(root).accepted_plan_hash.is_some());
+    }
+
+    #[test]
+    fn prior_reviews_digest_excludes_current_and_includes_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("REVIEW_P0_R1.md"), "earlier phase finding").unwrap();
+        std::fs::write(root.join("REVIEW_P1_R1.md"), "current phase R1").unwrap();
+        // Building the digest for P1 should carry P0's review but not P1's own.
+        let digest = prior_reviews_digest(root, "P1", 10_000);
+        assert!(digest.contains("earlier phase finding"), "{digest}");
+        assert!(!digest.contains("current phase R1"), "{digest}");
+        // When the only review present is the current artifact's, the digest is empty.
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(dir2.path().join("REVIEW_P0_R1.md"), "only mine").unwrap();
+        assert!(prior_reviews_digest(dir2.path(), "P0", 10_000).is_empty());
+    }
+}

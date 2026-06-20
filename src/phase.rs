@@ -911,4 +911,58 @@ mod tests {
         assert!(with.contains("CODER'S REVIEW BRIEFING"), "{with}");
         assert!(with.contains("The slow test hangs — deferred."), "{with}");
     }
+
+    #[test]
+    fn phase_start_sets_current_and_preserves_existing_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A pre-existing phase_base must NOT be overwritten by /phase-start (else
+        // we'd skip work the coder did before running it — the v0.2.3 bug).
+        let mut st = load_state(root);
+        st.phase_base = Some("abc123".to_string());
+        save_state(root, &st).unwrap();
+
+        run_phase_start(root, "P1").unwrap();
+        let after = load_state(root);
+        assert_eq!(after.current_phase.as_deref(), Some("P1"));
+        assert_eq!(after.phase_base.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn phase_accept_requires_both_reviews_then_ships_idempotently() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("plan.md"),
+            "# Plan\n\n## P0 — Bootstrap\ngoal: x\n",
+        )
+        .unwrap();
+
+        // Missing R1+R2 → error, no state change.
+        assert!(run_phase_accept(root, "P0").is_err());
+        assert!(load_state(root).shipped_phases.is_empty());
+
+        // Both reviews present → ships: recorded in shipped_phases, current cleared.
+        std::fs::write(root.join("REVIEW_P0_R1.md"), "ok").unwrap();
+        std::fs::write(root.join("REVIEW_P0_R2.md"), "ok").unwrap();
+        let mut st = load_state(root);
+        st.current_phase = Some("P0".to_string());
+        save_state(root, &st).unwrap();
+
+        run_phase_accept(root, "P0").unwrap();
+        let after = load_state(root);
+        assert!(after.shipped_phases.iter().any(|p| p == "P0"));
+        assert_eq!(after.current_phase, None);
+
+        // Re-accepting is idempotent: no duplicate shipped entry, no duplicate
+        // CLOSED annotation in plan.md.
+        run_phase_accept(root, "P0").unwrap();
+        let again = load_state(root);
+        assert_eq!(
+            again.shipped_phases.iter().filter(|p| *p == "P0").count(),
+            1
+        );
+        let plan = std::fs::read_to_string(root.join("plan.md")).unwrap();
+        assert_eq!(plan.matches("P0 passed R1 + R2").count(), 1, "{plan}");
+    }
 }

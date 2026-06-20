@@ -4833,6 +4833,11 @@ impl App {
                 }
 
                 save_global_config(self.cfg.as_ref().unwrap()).ok();
+                // Re-pointing the coder must rebuild the cached agent (see
+                // invalidate_agent) so the new model takes effect without a restart.
+                if role == "coder" {
+                    self.invalidate_agent();
+                }
                 self.reconcile_stage_from_disk();
                 self.update_status();
 
@@ -5382,6 +5387,15 @@ impl App {
     /// Auto-register a model binding if it doesn't exist, assign it to `role`, persist,
     /// and advance to the next role (or finish setup). Shared by the role-list pick path
     /// and the manual model-id entry path so both behave identically.
+    /// Drop the cached coder agent (and its confirm channel) so the next turn
+    /// rebuilds it with the current coder binding — new model/provider/api_key —
+    /// instead of the one captured when it was first created. History reloads from
+    /// the append-only ledger on rebuild, so the conversation continues seamlessly.
+    fn invalidate_agent(&mut self) {
+        self.agent = None;
+        self.confirm_tx = None;
+    }
+
     fn assign_role_and_advance(
         &mut self,
         role: &str,
@@ -5429,6 +5443,15 @@ impl App {
 
         // Borrows on cfg have ended; safe to call other &mut self methods now.
         self.save_current_config();
+        // The coder Agent is built once and cached, holding its own model/provider/
+        // api_key from construction. A /swap or /config change to the coder must
+        // invalidate it, or the next turn keeps calling the OLD provider until the
+        // user restarts Anvil. The rebuilt agent reloads history from the ledger, so
+        // continuity is preserved. (Reviewers are constructed fresh per review, so
+        // they already pick up changes.)
+        if role == "coder" {
+            self.invalidate_agent();
+        }
         if did_auto_register {
             self.push_system(&format!(
                 "✓ Auto-registered model binding '{}' via {}.",

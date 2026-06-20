@@ -103,7 +103,7 @@ Match effort to the request. When the user only acknowledges or gives a short st
 \n\
 Anvil adds just enough structure to stop drift, at exactly TWO human gates:\n\
 1. PLAN: discuss the work with the user, then write the plan yourself to plan.md (phases ## P0 — Name, each with a goal, 3–8 actions, a deliverable, and 2–5 acceptance criteria). When the user is happy they run /lock-plan, which drives a SEQUENTIAL review loop: reviewer R1 critiques plan.md → you are asked to apply R1's fixes to plan.md → the user reviews and continues → reviewer R2 critiques the revised plan → you apply R2's fixes → you summarize → the user runs /accept-plan. When Anvil hands you a round's findings, edit plan.md to address the real issues and then STOP (don't summarize until asked).\n\
-2. PHASES: implement the current phase directly (write code + tests, run them). When it's done the user runs /accept-phase, which drives the same sequential loop on the git diff: R1 → you apply fixes to the code → (user continues) → R2 → you apply fixes → you summarize → the user runs /ship-phase. R2 deliberately re-reviews after your R1 fixes, so it can catch bugs those fixes introduced.\n\
+2. PHASES: implement the current phase directly (write code + tests, run them). When it's done the user runs /accept-phase, which FIRST asks you to write a review briefing to REVIEW_<id>_BRIEF.md (what you built and WHY, design decisions, test coverage, and anything intentionally deferred — the reviewers read this alongside the diff so they have intent, not just the patch), THEN drives the same sequential loop: R1 → you apply fixes to the code → (user continues) → R2 → you apply fixes → you summarize → the user runs /ship-phase. R2 deliberately re-reviews after your R1 fixes, so it can catch bugs those fixes introduced.\n\
 \n\
 Outside those two gates, just collaborate normally — answer questions, explore, refactor, debug — using your tools. Don't fake a gate or claim a review happened; only the /lock-plan and /accept-phase commands trigger the reviewers. When asked to address a round's findings, fix the real ones and skip spurious ones — don't expand scope. Be precise, skeptical of scope creep, and surface risks early.\n\
 \n\
@@ -153,6 +153,9 @@ enum Round {
 /// or Enter on an empty line) so they can inspect each round before proceeding.
 #[derive(Clone, PartialEq)]
 enum GateStep {
+    /// Phase gate only: the coder writes its review briefing (what was built + why)
+    /// before the reviewers run. Plan gates skip straight to R1Reviewing.
+    BriefWriting,
     R1Reviewing,
     R1Fixing,
     PausedAfterR1,
@@ -193,7 +196,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/lock-plan", "Plan gate: R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/accept-plan", "Quench the reviewed plan — lock it in (records the hash, unlocks phases)"),
     ("/phase-start <id>", "Set the current phase (e.g. P0). Optional — you can also just tell the coder to start"),
-    ("/accept-phase [id]", "Phase gate: R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
+    ("/accept-phase [id]", "Phase gate: coder writes review briefing → R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/ship-phase [id]", "Quench the phase — ship it after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Clinker the forge: fold the conversation into .anvil/working-memory.md and rake out older turns (alias /clinker)"),
@@ -3348,17 +3351,41 @@ impl App {
     /// Begin a sequential review gate: kick off R1.
     fn start_gate_flow(&mut self, artifact: GateArtifact) {
         let label = Self::gate_artifact_label(&artifact);
-        self.gate_flow = Some(GateFlow {
-            artifact: artifact.clone(),
-            step: GateStep::R1Reviewing,
-        });
-        self.push_system(&format!(
-            "── Review gate started on {} ──  R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary.",
-            label
-        ));
-        self.push_system("Running R1 (reviewer-a)…");
-        self.follow_bottom = true;
-        self.spawn_review(&artifact, Round::R1);
+        match &artifact {
+            // Phase gate: the coder first writes a review briefing (what was built
+            // and WHY) so the reviewers have intent + rationale, not just the diff.
+            GateArtifact::Phase(id) => {
+                let id = id.clone();
+                self.gate_flow = Some(GateFlow {
+                    artifact: artifact.clone(),
+                    step: GateStep::BriefWriting,
+                });
+                self.push_system(&format!(
+                    "── Review gate started on {} ──  coder writes the review briefing → R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary.",
+                    label
+                ));
+                self.push_system(
+                    "→ Coder writing the phase review briefing (what was built & why)…",
+                );
+                self.follow_bottom = true;
+                let prompt = crate::phase::briefing_prompt(&id);
+                self.gate_drive_coder(&prompt);
+            }
+            // Plan gate: reviews plan.md directly — no diff/briefing, start at R1.
+            GateArtifact::Plan => {
+                self.gate_flow = Some(GateFlow {
+                    artifact: artifact.clone(),
+                    step: GateStep::R1Reviewing,
+                });
+                self.push_system(&format!(
+                    "── Review gate started on {} ──  R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary.",
+                    label
+                ));
+                self.push_system("Running R1 (reviewer-a)…");
+                self.follow_bottom = true;
+                self.spawn_review(&artifact, Round::R1);
+            }
+        }
     }
 
     /// Spawn a single review round (writes REVIEW_*.md, streams findings over gate_rx).
@@ -3452,6 +3479,13 @@ impl App {
             return;
         };
         match flow.step {
+            GateStep::BriefWriting => {
+                // Briefing written by the coder — now run R1 with it in context.
+                self.push_system("→ Briefing written. Running R1 (reviewer-a)…");
+                self.set_gate_step(GateStep::R1Reviewing);
+                self.follow_bottom = true;
+                self.spawn_review(&flow.artifact, Round::R1);
+            }
             GateStep::R1Fixing => {
                 self.set_gate_step(GateStep::PausedAfterR1);
                 self.push_system(
@@ -3559,7 +3593,8 @@ impl App {
     fn gate_busy(&self) -> bool {
         matches!(
             self.gate_flow.as_ref().map(|f| &f.step),
-            Some(GateStep::R1Reviewing)
+            Some(GateStep::BriefWriting)
+                | Some(GateStep::R1Reviewing)
                 | Some(GateStep::R1Fixing)
                 | Some(GateStep::R2Reviewing)
                 | Some(GateStep::R2Fixing)
@@ -3588,6 +3623,7 @@ impl App {
                 .unwrap_or_else(|| "?".to_string())
         };
         let s = match flow.step {
+            GateStep::BriefWriting => "coder writing review briefing".to_string(),
             GateStep::R1Reviewing => format!("R1 reviewing — {}", model("reviewer_a")),
             GateStep::R1Fixing => "coder applying R1 fixes".to_string(),
             GateStep::PausedAfterR1 => "R1 done — /continue for R2".to_string(),

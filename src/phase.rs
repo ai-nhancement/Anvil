@@ -1,16 +1,25 @@
 //! Phase commands — the heart of "build by phases".
 //!
-//! Preferred flow (TUI chat-driven, matches PHASE_REVIEW_WORKFLOW.md + user spec):
-//! - /phase-start Px (or chat "start phase Px") — coder + human implement per plan excerpt.
-//! - When done: human tells *coder* "phase Px complete, write the R1 review document" (coder outputs full REVIEW_Px_R1.md markdown per template).
-//! - Human uses /save-r1 (TUI) to persist the coder-written briefing to root as REVIEW_Px_R1.md.
-//! - /critical-r1 (or equivalent) — R1 (reviewer_a) *automatically reads the coder's review doc* and runs critical review, presents findings in chat, writes sibling _Findings.
-//! - Human approves findings; coder implements fixes (code + tests).
-//! - Human tells coder "write the R2 review document" (coder outputs REVIEW_Px_R2.md including "Findings from R1" table).
-//! - /save-r2 ; /critical-r2 (reviewer_b critical on the R2 doc coder wrote) ; human approves ; coder implements ; coder summarizes and asks approval to ship phase.
-//! - /phase-accept Px — mark shipped (updates state, clears current_phase).
+//! Current flow (TUI chat-driven, automated by the `/accept-phase` gate in ui.rs):
+//! - /phase-start Px (or chat "start phase Px") — coder implements the phase per
+//!   the plan excerpt (writes code + tests, runs them) directly via its tools.
+//! - /accept-phase Px drives the sequential gate:
+//!     1. The coder writes a REVIEW BRIEFING to REVIEW_Px_BRIEF.md (what was built
+//!        and WHY, design decisions, test coverage, anything deferred) — see
+//!        `briefing_prompt` / `brief_path`. Reviewers read this alongside the diff.
+//!     2. R1 (reviewer_a) investigates the briefing + plan excerpt + real git diff
+//!        (`build_phase_diff_content` → `plan::run_single_review`), writes
+//!        REVIEW_Px_R1.md → coder applies fixes → (user /continue).
+//!     3. R2 (reviewer_b) re-reviews after the R1 fixes → coder applies fixes →
+//!        (user /continue) → coder summarizes.
+//! - /ship-phase Px — mark shipped (annotates the plan, advances phase_base).
 //!
-//! Legacy CLI `anvil phase review` still does the old "always two reviews immediately" against implementation state (kept for scripts). New flow keeps human gates between coder-written docs and each critical reviewer pass. All REVIEW_* now at repo root.
+//! Review artifacts (REVIEW_Px_BRIEF.md + REVIEW_Px_R{1,2}.md) live at the repo
+//! root and are excluded from the review diff (see `DIFF_EXCLUDES`) so prior-round
+//! review text never pollutes the next round's diff.
+//!
+//! Legacy CLI `anvil phase review` still does the old "always two reviews
+//! immediately" against implementation state (kept for scripts).
 
 use std::fs;
 use std::path::Path;
@@ -584,7 +593,42 @@ fn capture_git_diff(root: &Path) -> String {
     diff
 }
 
-/// Compose the reviewer input for a phase: the plan excerpt + the real diff.
+/// Path to the coder-written review briefing for a phase (what was built + WHY).
+/// Lives at the repo root alongside the reviewers' REVIEW_<id>_R{1,2}.md outputs,
+/// and is excluded from the review diff (see DIFF_EXCLUDES) so it never pollutes
+/// the diff — it's injected into the reviewer's context separately.
+pub fn brief_path(root: &Path, id: &str) -> std::path::PathBuf {
+    reviews_dir(root).join(format!("REVIEW_{}_BRIEF.md", normalize_phase_id(id)))
+}
+
+/// The instruction given to the coder to produce a phase review briefing *before*
+/// the reviewers run. Modeled on the manual workflow's handoff doc: what was built
+/// and WHY (design rationale), test coverage, and anything intentionally deferred —
+/// context a raw diff can't convey, so reviewers don't re-flag accepted decisions.
+pub fn briefing_prompt(id: &str) -> String {
+    let id = normalize_phase_id(id);
+    format!(
+        "You've finished implementing phase {id}. Before the reviewers look at it, write a REVIEW BRIEFING that explains what you did and WHY — the diff alone shows what changed, not the intent, the design rationale, or what you deliberately left out.\n\n\
+         Write it with your write_file tool to `REVIEW_{id}_BRIEF.md` (repo root), with these sections:\n\n\
+         # {id} — Review Briefing\n\
+         **Scope:** which plan phase + goal this implements (cite the plan).\n\n\
+         ## What Was Built\n\
+         Per file/area, the concrete changes — functions, endpoints, types added or changed. Tables are good. Be specific.\n\n\
+         ## Design Decisions\n\
+         The non-obvious choices and WHY — tradeoffs made, alternatives rejected, anything a reviewer might question.\n\n\
+         ## Test Coverage\n\
+         What tests exist, what each covers, and the exact command to run them.\n\n\
+         ## Known Issues / Deferred\n\
+         Anything intentionally skipped or deferred (e.g. a test that hangs, or follow-up work) so the reviewers do NOT flag it as a defect. Be explicit and honest.\n\n\
+         ## Not Built in This Phase (Per Plan)\n\
+         Scope boundaries — what's explicitly out of scope for {id}.\n\n\
+         Base every claim on what you ACTUALLY did — read the diff and the files if unsure. This briefing is the reviewers' primary context, so make it accurate and concrete. Write ONLY the file; you don't need to repeat it in chat."
+    )
+}
+
+/// Compose the reviewer input for a phase: the coder's briefing + plan excerpt +
+/// the real diff. The briefing supplies the intent/rationale a diff can't; the
+/// diff + files remain ground truth (the reviewer is told to verify against them).
 fn build_phase_diff_content(root: &Path, id: &str) -> String {
     let plan = fs::read_to_string(active_plan_path(root)).unwrap_or_default();
     // Prefer the focused phase section; if it can't be located, fall back to the
@@ -601,12 +645,32 @@ fn build_phase_diff_content(root: &Path, id: &str) -> String {
             format!("(phase section '{id}' not found — full plan below)\n{p}")
         }
     });
+    // The coder's briefing (what + why). Optional: if it wasn't written, the
+    // reviewer still gets plan + diff and is told so.
+    let brief = fs::read_to_string(brief_path(root, id))
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| {
+            let capped: String = b.chars().take(16_000).collect();
+            let trunc = if b.chars().count() > 16_000 {
+                "\n… [briefing truncated]"
+            } else {
+                ""
+            };
+            format!(
+                "--- CODER'S REVIEW BRIEFING (the implementer's own account of WHAT was built and WHY, plus tests and anything intentionally deferred — context the diff can't convey. Treat deferred/known items as accepted, not defects; still verify the claims against the real files) ---\n{capped}{trunc}\n--- END BRIEFING ---\n\n"
+            )
+        })
+        .unwrap_or_else(|| {
+            "(no review briefing was written for this phase — review from the plan + diff alone)\n\n"
+                .to_string()
+        });
     let diff = capture_git_diff(root);
     format!(
         "Phase {} — critically review the implementation against the plan.\n\n\
-         --- PLAN EXCERPT ---\n{}\n\n\
+         {}--- PLAN EXCERPT ---\n{}\n\n\
          --- GIT DIFF (working tree vs HEAD) ---\n{}\n",
-        id, excerpt, diff
+        id, brief, excerpt, diff
     )
 }
 
@@ -840,5 +904,33 @@ mod tests {
         let content = build_phase_diff_content(dir.path(), "P9");
         assert!(content.contains("full plan below"), "{content}");
         assert!(content.contains("ship it"), "{content}");
+    }
+
+    #[test]
+    fn build_phase_diff_includes_coder_briefing_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("plan.md"),
+            "# Plan\n\n## P0 — Only phase\ngoal: x\n",
+        )
+        .unwrap();
+
+        // No briefing yet → reviewer is told it's absent.
+        let without = build_phase_diff_content(root, "P0");
+        assert!(
+            without.contains("no review briefing was written"),
+            "{without}"
+        );
+
+        // With a briefing → its content + the briefing header reach the reviewer.
+        std::fs::write(
+            brief_path(root, "P0"),
+            "# P0 — Review Briefing\n## Known Issues / Deferred\nThe slow test hangs — deferred.\n",
+        )
+        .unwrap();
+        let with = build_phase_diff_content(root, "P0");
+        assert!(with.contains("CODER'S REVIEW BRIEFING"), "{with}");
+        assert!(with.contains("The slow test hangs — deferred."), "{with}");
     }
 }

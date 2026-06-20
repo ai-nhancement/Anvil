@@ -690,6 +690,16 @@ fn program_of(cmd: &str) -> String {
     cmd.split_whitespace().next().unwrap_or("").to_lowercase()
 }
 
+/// Whether a config layer explicitly sets the given role (for /status provenance).
+fn role_is_set(c: &AnvilConfig, role: &str) -> bool {
+    match role {
+        "coder" => c.roles.coder.is_some(),
+        "reviewer_a" => c.roles.reviewer_a.is_some(),
+        "reviewer_b" => c.roles.reviewer_b.is_some(),
+        _ => false,
+    }
+}
+
 /// Entry point called from main when no subcommand (or `anvil ui`) is given.
 pub fn run_ui(root: &Path) -> Result<()> {
     // Load any secrets from .anvil/.env into the process env *before* we do anything
@@ -1802,6 +1812,59 @@ impl App {
                 self.messages.len()
             ));
             self.push_system("  (the coder reads/edits files and runs commands directly via its tools — no manual context needed)");
+
+            // Roles + config provenance ("why is this repo using that model?").
+            // Build the lines first (borrows self.cfg), then push (needs &mut self).
+            let role_lines: Vec<String> = if let Some(cfg) = &self.cfg {
+                let (global, project) = crate::config::config_layers(&self.root);
+                [
+                    ("CODER", "coder"),
+                    ("R1 (reviewer-a)", "reviewer_a"),
+                    ("R2 (reviewer-b)", "reviewer_b"),
+                ]
+                .iter()
+                .map(|(label, role)| match cfg.resolve_role_or_binding(role) {
+                    Ok((_n, binding, provider)) => {
+                        let in_project = project
+                            .as_ref()
+                            .map(|c| role_is_set(c, role))
+                            .unwrap_or(false);
+                        let in_global = global
+                            .as_ref()
+                            .map(|c| role_is_set(c, role))
+                            .unwrap_or(false);
+                        let src = if in_project {
+                            "project anvil.toml (overrides global)"
+                        } else if in_global {
+                            "global config"
+                        } else {
+                            "default"
+                        };
+                        format!(
+                            "  {}: {} (via {}) — from {}",
+                            label, binding.model, provider.r#type, src
+                        )
+                    }
+                    Err(_) => format!("  {}: (not configured)", label),
+                })
+                .collect()
+            } else {
+                Vec::new()
+            };
+            if !role_lines.is_empty() {
+                self.push_system("Roles (active model — source):");
+                for l in &role_lines {
+                    self.push_system(l);
+                }
+                if let Some(g) = crate::config::global_config_path() {
+                    self.push_system(&format!("  global config: {}", g.display()));
+                }
+                self.push_system(&format!(
+                    "  project config: {}",
+                    crate::config::config_path(&self.root).display()
+                ));
+                self.push_system("  change a role with /swap · full setup with /config");
+            }
 
             // Snapshot to avoid long-lived & borrow of self while calling push_system (mut).
             let gpu_snap: Vec<(usize, f32, f32, u8)> = self

@@ -215,6 +215,15 @@ fn merge(mut base: AnvilConfig, overlay: AnvilConfig) -> AnvilConfig {
     base
 }
 
+/// The (global, project) config layers separately (each `None` if absent), for
+/// showing provenance — which file supplied a given role. The merged view that the
+/// app actually uses is `load_config`.
+pub fn config_layers(root: &Path) -> (Option<AnvilConfig>, Option<AnvilConfig>) {
+    let global = global_config_path().as_deref().and_then(read_config_file);
+    let project = read_config_file(&config_path(root));
+    (global, project)
+}
+
 /// Load the effective config for `root`: the global config as a base, overlaid
 /// by the project's `anvil.toml` if present. Either alone is enough; if neither
 /// exists the project is not initialized.

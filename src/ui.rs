@@ -3645,6 +3645,10 @@ impl App {
             self.push_system("Nothing running to interrupt.");
             return;
         }
+        // Tell any in-flight run_command to kill its (possibly hung) child tree NOW.
+        // Aborting the async task alone can't stop a synchronous blocking command;
+        // this flag is what actually terminates a looping test/server.
+        crate::tools::request_command_interrupt();
         if let Some(h) = self.agent_task.take() {
             h.abort();
         }

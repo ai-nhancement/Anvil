@@ -14,6 +14,8 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
@@ -862,11 +864,100 @@ fn collect_matches(
     }
 }
 
+/// Set by the UI (Ctrl+B) to ask an in-flight `run_command` to stop NOW. The
+/// command's poll loop sees it, kills the process tree, and returns promptly —
+/// because a synchronous blocking command can't be cancelled by aborting the
+/// async task alone (that only takes effect at an await point, and run_command
+/// has none while the child runs).
+static COMMAND_INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+/// Ask any currently-running `run_command` to abort and kill its child tree.
+/// Called from the Ctrl+B handler. Harmless when nothing is running (the flag is
+/// reset at the start of each command).
+pub fn request_command_interrupt() {
+    COMMAND_INTERRUPT.store(true, Ordering::SeqCst);
+}
+
+/// Default wall-clock cap on a single `run_command` before it's killed, so a test
+/// or server that never returns can't hang the whole agent. Overridable per
+/// environment via `ANVIL_COMMAND_TIMEOUT_SECS`.
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300;
+
+fn command_timeout() -> Duration {
+    let secs = std::env::var("ANVIL_COMMAND_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
 fn run_command(root: &Path, command: &str) -> Result<String> {
-    let output = shell(command, root).map_err(|e| anyhow!("failed to launch command: {}", e))?;
+    use std::io::Read;
+
+    // Fresh interrupt state for this command (drop any stale Ctrl+B from before).
+    COMMAND_INTERRUPT.store(false, Ordering::SeqCst);
+
+    let mut child =
+        spawn_shell(command, root).map_err(|e| anyhow!("failed to launch command: {}", e))?;
+    let pid = child.id();
+
+    // Drain stdout/stderr on threads so a chatty command can't deadlock by filling
+    // a pipe buffer while we're busy polling for completion.
+    let drain = |s: Option<std::process::ChildStdout>| {
+        s.map(|mut s| {
+            std::thread::spawn(move || {
+                let mut b = Vec::new();
+                let _ = s.read_to_end(&mut b);
+                b
+            })
+        })
+    };
+    let out_handle = drain(child.stdout.take());
+    let err_handle = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = s.read_to_end(&mut b);
+            b
+        })
+    });
+
+    // Poll for completion, honoring both a timeout and a Ctrl+B interrupt. On
+    // either, kill the whole process *tree* (the command may have spawned its own
+    // children — a dev server, a test runner forking workers) and reap the child.
+    let deadline = Instant::now() + command_timeout();
+    let mut status = None;
+    let mut stopped: Option<&str> = None; // Some("timeout") | Some("interrupt")
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        if COMMAND_INTERRUPT.swap(false, Ordering::SeqCst) {
+            stopped = Some("interrupt");
+            kill_tree(pid);
+            let _ = child.wait();
+            break;
+        }
+        if Instant::now() >= deadline {
+            stopped = Some("timeout");
+            kill_tree(pid);
+            let _ = child.wait();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let out_buf = out_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    let err_buf = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+
     let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    combined.push_str(&String::from_utf8_lossy(&out_buf));
+    let stderr = String::from_utf8_lossy(&err_buf);
     if !stderr.trim().is_empty() {
         combined.push_str("\n[stderr]\n");
         combined.push_str(&stderr);
@@ -875,26 +966,74 @@ fn run_command(root: &Path, command: &str) -> Result<String> {
         combined.truncate(MAX_CMD_OUTPUT);
         combined.push_str("\n... [output truncated]");
     }
-    let code = output.status.code().unwrap_or(-1);
-    Ok(format!("exit code: {}\n{}", code, combined))
+
+    match stopped {
+        Some("timeout") => Ok(format!(
+            "exit code: -1\n[command timed out after {}s and its process tree was killed — it did NOT finish. If this command runs indefinitely (a dev server, a file watcher, or a test that hangs/loops), do NOT run it again — skip it or note it as deferred in .anvil/decisions.md so the reviewers know. If it just needs longer, raise ANVIL_COMMAND_TIMEOUT_SECS.]\n{}",
+            command_timeout().as_secs(),
+            combined
+        )),
+        Some("interrupt") => Ok(format!(
+            "exit code: -1\n[command was interrupted by the user (Ctrl+B) and its process tree was killed. Don't blindly re-run it — ask the user how to proceed.]\n{}",
+            combined
+        )),
+        _ => {
+            let code = status.and_then(|s| s.code()).unwrap_or(-1);
+            Ok(format!("exit code: {}\n{}", code, combined))
+        }
+    }
 }
 
 #[cfg(windows)]
-fn shell(command: &str, cwd: &Path) -> std::io::Result<std::process::Output> {
+fn spawn_shell(command: &str, cwd: &Path) -> std::io::Result<std::process::Child> {
+    use std::process::Stdio;
     Command::new("cmd")
         .arg("/C")
         .arg(command)
         .current_dir(cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
 }
 
 #[cfg(not(windows))]
-fn shell(command: &str, cwd: &Path) -> std::io::Result<std::process::Output> {
+fn spawn_shell(command: &str, cwd: &Path) -> std::io::Result<std::process::Child> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
     Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Run in its own process group so we can signal the whole tree at once
+        // (the child becomes the group leader; killing -pid kills the group).
+        .process_group(0)
+        .spawn()
+}
+
+/// Kill a process and everything it spawned. On Windows, `taskkill /T` walks the
+/// child tree; on Unix the child leads its own process group, so a negative pid
+/// signals the whole group. Best-effort — failures are ignored.
+#[cfg(windows)]
+fn kill_tree(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(windows))]
+fn kill_tree(pid: u32) {
+    // SIGKILL the whole process group (negative pid). The child was started as a
+    // group leader via process_group(0).
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{pid}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 // ── path sandboxing + argument helpers ───────────────────────────────────────
@@ -1034,6 +1173,18 @@ mod tests {
                 "should require approval: {danger}"
             );
         }
+    }
+
+    #[test]
+    fn run_command_happy_path_captures_output_and_exit() {
+        // Exercises the spawn + drain-threads + poll-loop path on both platforms.
+        let dir = tempfile::tempdir().unwrap();
+        let r = execute(
+            &call("run_command", json!({"command": "echo hello_anvil"})),
+            dir.path(),
+        );
+        assert!(r.starts_with("exit code: 0"), "{r}");
+        assert!(r.contains("hello_anvil"), "{r}");
     }
 
     #[test]

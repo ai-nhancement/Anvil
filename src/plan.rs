@@ -241,8 +241,23 @@ pub fn run_single_review(
                   When you have investigated enough, output a structured review with sections: ## Summary, ## High, ## Medium, ## Low, ## Questions. \
                   In ## Summary, state explicitly what you independently verified in the code versus what you could not confirm.";
 
+    // Carry the coder's durable decisions / known-issues into the review. Without
+    // this the reviewer starts blind and re-flags things the coder intentionally
+    // deferred (e.g. a test that hangs and was skipped on purpose) — which sends
+    // the coder back to redo accepted work in a loop. Deferred/known items here are
+    // accepted context, not defects to re-raise.
+    let decisions = std::fs::read_to_string(crate::agent::decisions_path(root))
+        .ok()
+        .filter(|c| has_meaningful_body(c));
+    let context_block = match decisions {
+        Some(d) => format!(
+            "--- CODER'S PROJECT DECISIONS / KNOWN ISSUES (.anvil/decisions.md — accepted context for your review; items the coder marked deferred or intentionally skipped here are ALREADY accepted, so do NOT re-raise them as must-fix defects, though you may mention them) ---\n{}\n--- END DECISIONS ---\n\n",
+            crate::reality::cap(&d, 4000)
+        ),
+        None => String::new(),
+    };
     let user = format!(
-        "Review the following artifact ({round}). The content below is the implementer's CLAIM, not ground truth — verify it against the real files with your tools before trusting any of it.\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---\n\nInvestigate with your read-only tools, then produce the structured review.",
+        "{context_block}Review the following artifact ({round}). The content below is the implementer's CLAIM, not ground truth — verify it against the real files with your tools before trusting any of it.\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---\n\nInvestigate with your read-only tools, then produce the structured review.",
     );
 
     // Agentic read-only loop: the reviewer may read/grep/list the repo to confirm
@@ -427,4 +442,14 @@ pub fn simple_hash(s: &str) -> String {
     let mut hasher = DefaultHasher::new();
     s.hash(&mut hasher);
     format!("{:x}", hasher.finish())
+}
+
+/// True if the markdown has real content beyond headers / HTML-comments /
+/// blockquotes — i.e. something worth injecting. A fresh template has none, so we
+/// don't feed the reviewer an empty decisions scaffold. Mirrors agent::has_body.
+fn has_meaningful_body(content: &str) -> bool {
+    content.lines().any(|l| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#') && !t.starts_with("<!--") && !t.starts_with('>')
+    })
 }

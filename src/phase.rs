@@ -631,34 +631,22 @@ pub fn briefing_prompt(id: &str) -> String {
 /// diff + files remain ground truth (the reviewer is told to verify against them).
 fn build_phase_diff_content(root: &Path, id: &str) -> String {
     let plan = fs::read_to_string(active_plan_path(root)).unwrap_or_default();
-    // Prefer the focused phase section; if it can't be located, fall back to the
-    // whole plan so the reviewer always has the plan to check drift against.
-    let excerpt = extract_phase(&plan, id).unwrap_or_else(|| {
-        if plan.trim().is_empty() {
-            "(plan.md not found or empty — ask the user for the plan)".to_string()
-        } else {
-            let mut p = plan.clone();
-            if p.len() > 16_000 {
-                p.truncate(16_000);
-                p.push_str("\n… [plan truncated]");
-            }
-            format!("(phase section '{id}' not found — full plan below)\n{p}")
-        }
-    });
+    // The WHOLE plan (capped), not just this phase's section — the reviewer needs
+    // to see how this phase fits the overall plan and its other phases.
+    let plan_block = if plan.trim().is_empty() {
+        "(plan.md not found or empty — ask the user for the plan)".to_string()
+    } else {
+        crate::reality::cap(&plan, 20_000)
+    };
     // The coder's briefing (what + why). Optional: if it wasn't written, the
     // reviewer still gets plan + diff and is told so.
     let brief = fs::read_to_string(brief_path(root, id))
         .ok()
         .filter(|b| !b.trim().is_empty())
         .map(|b| {
-            let capped: String = b.chars().take(16_000).collect();
-            let trunc = if b.chars().count() > 16_000 {
-                "\n… [briefing truncated]"
-            } else {
-                ""
-            };
             format!(
-                "--- CODER'S REVIEW BRIEFING (the implementer's own account of WHAT was built and WHY, plus tests and anything intentionally deferred — context the diff can't convey. Treat deferred/known items as accepted, not defects; still verify the claims against the real files) ---\n{capped}{trunc}\n--- END BRIEFING ---\n\n"
+                "--- CODER'S REVIEW BRIEFING (what was built and WHY, tests, and anything intentionally deferred) ---\n{}\n--- END BRIEFING ---\n\n",
+                crate::reality::cap(&b, 16_000)
             )
         })
         .unwrap_or_else(|| {
@@ -667,10 +655,9 @@ fn build_phase_diff_content(root: &Path, id: &str) -> String {
         });
     let diff = capture_git_diff(root);
     format!(
-        "Phase {} — critically review the implementation against the plan.\n\n\
-         {}--- PLAN EXCERPT ---\n{}\n\n\
-         --- GIT DIFF (working tree vs HEAD) ---\n{}\n",
-        id, brief, excerpt, diff
+        "{}--- FULL PLAN (phase {} is the one under review — judge it against this phase's section AND the plan's overall goals and other phases) ---\n{}\n\n\
+         --- GIT DIFF (this phase's changes, from the phase base to the current tree) ---\n{}\n",
+        brief, id, plan_block, diff
     )
 }
 
@@ -900,9 +887,10 @@ mod tests {
             "# Plan\n\n## P0 — Only phase\ngoal: ship it\n",
         )
         .unwrap();
-        // A phase id with no matching section → reviewer still gets the full plan.
+        // The reviewer always gets the WHOLE plan (not just one phase's section),
+        // so it can judge how the phase fits the overall plan.
         let content = build_phase_diff_content(dir.path(), "P9");
-        assert!(content.contains("full plan below"), "{content}");
+        assert!(content.contains("FULL PLAN"), "{content}");
         assert!(content.contains("ship it"), "{content}");
     }
 

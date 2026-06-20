@@ -230,34 +230,58 @@ pub fn run_single_review(
 
     let api_key = client.get_credential(&binding.provider, provider)?;
 
-    // The reviewer is an *investigator*, not a rubber stamp. The hard-won lesson:
-    // every frontier coder (Claude/GPT/Grok) will at times claim work it did not
-    // do — so the reviewer must confirm against the real files, never the handoff.
-    let system = "You are a skeptical, experienced engineer from a *different* model family than the coder/implementer. \
-                  Your job is to find real problems: work the implementer claims but did NOT actually do, scope drift, hidden risks, missing or broken tests, and weak acceptance criteria. \
-                  CRITICAL: do NOT trust the summary or diff you are given — coders frequently report work as done when it is not. \
-                  You have READ-ONLY tools (read_file, list_dir, grep, project_state). USE THEM to verify against the actual files on disk: open the files the change claims to touch, confirm the code really exists and does what is claimed, check that tests exist and cover it, and confirm earlier phases' acceptance criteria still hold. \
-                  Base every finding on what you actually read; cite exact file paths and line numbers. Do not be nice. Be specific. \
-                  When you have investigated enough, output a structured review with sections: ## Summary, ## High, ## Medium, ## Low, ## Questions. \
-                  In ## Summary, state explicitly what you independently verified in the code versus what you could not confirm.";
+    // Lean by design: capable models review well with little instruction. The one
+    // thing that must stay is "verify against the real files with your tools" —
+    // in the manual workflow the human did that; here the reviewer must, because
+    // coders sometimes report work as done when it isn't.
+    let system = "You are a skeptical senior engineer critically reviewing another model's implementation. \
+                  Find real errors, bugs, risks, scope drift, and missing or weak tests, and suggest improvements. \
+                  You have read-only tools (read_file, list_dir, grep, project_state) — use them to verify the work against the actual files rather than trusting the implementer's claims, which are sometimes wrong. \
+                  Present findings in order of priority, highest first, citing exact file:line, then suggested improvements. Do NOT write code.";
 
-    // Carry the coder's durable decisions / known-issues into the review. Without
-    // this the reviewer starts blind and re-flags things the coder intentionally
-    // deferred (e.g. a test that hangs and was skipped on purpose) — which sends
-    // the coder back to redo accepted work in a loop. Deferred/known items here are
-    // accepted context, not defects to re-raise.
-    let decisions = std::fs::read_to_string(crate::agent::decisions_path(root))
+    // The coder's durable decisions / known-issues — so the reviewer doesn't
+    // re-flag things intentionally deferred (e.g. a test that hangs, skipped on
+    // purpose), which was sending the coder into a redo loop.
+    let decisions_block = std::fs::read_to_string(crate::agent::decisions_path(root))
         .ok()
-        .filter(|c| has_meaningful_body(c));
-    let context_block = match decisions {
-        Some(d) => format!(
-            "--- CODER'S PROJECT DECISIONS / KNOWN ISSUES (.anvil/decisions.md — accepted context for your review; items the coder marked deferred or intentionally skipped here are ALREADY accepted, so do NOT re-raise them as must-fix defects, though you may mention them) ---\n{}\n--- END DECISIONS ---\n\n",
-            crate::reality::cap(&d, 4000)
-        ),
-        None => String::new(),
+        .filter(|c| has_meaningful_body(c))
+        .map(|d| {
+            format!(
+                "--- KNOWN DECISIONS / DEFERRALS (.anvil/decisions.md — already accepted; don't re-flag these) ---\n{}\n---\n\n",
+                crate::reality::cap(&d, 4000)
+            )
+        })
+        .unwrap_or_default();
+
+    // Reviewer memory: the earlier review findings from previous phases/rounds, so
+    // the reviewer has continuity (what was already raised, accepted, or fixed) the
+    // way a retained chat thread would — instead of starting blind each time.
+    let prior_reviews = prior_reviews_digest(root, artifact, 10_000);
+
+    // R2 is the SECOND pass: R1 already reviewed and the coder applied fixes. Tell
+    // R2 to judge the work as a whole and hand it R1's findings as a checklist. The
+    // content already carries the FULL change (the diff spans the phase base to the
+    // current tree, so it includes the R1 fixes).
+    let is_r2 = round.eq_ignore_ascii_case("R2");
+    let round_note = if is_r2 {
+        " This is the SECOND pass — R1 already reviewed and the coder applied fixes. Judge the work as a whole: confirm R1's points were actually fixed, that the fixes caused no regressions, and flag anything R1 missed (R1's findings are below)."
+    } else {
+        ""
+    };
+    let prior_round_block = if is_r2 {
+        let r1_path = reviews_dir(root).join(format!("REVIEW_{}_R1.md", artifact));
+        match std::fs::read_to_string(&r1_path) {
+            Ok(f) if !f.trim().is_empty() => format!(
+                "\n\n--- R1 FINDINGS (verify each was fixed and caused no regressions) ---\n{}\n---",
+                crate::reality::cap(&f, 8000)
+            ),
+            _ => String::new(),
+        }
+    } else {
+        String::new()
     };
     let user = format!(
-        "{context_block}Review the following artifact ({round}). The content below is the implementer's CLAIM, not ground truth — verify it against the real files with your tools before trusting any of it.\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---\n\nInvestigate with your read-only tools, then produce the structured review.",
+        "{decisions_block}{prior_reviews}Critically review the {round} of \"{artifact}\" below — verify it against the real files with your tools, then give your findings, highest priority first.{round_note}\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---{prior_round_block}",
     );
 
     // Agentic read-only loop: the reviewer may read/grep/list the repo to confirm
@@ -452,4 +476,57 @@ fn has_meaningful_body(content: &str) -> bool {
         let t = l.trim();
         !t.is_empty() && !t.starts_with('#') && !t.starts_with("<!--") && !t.starts_with('>')
     })
+}
+
+/// Reviewer memory: a bounded, newest-first digest of the review findings from
+/// EARLIER phases/rounds (REVIEW_<other>_R{1,2}.md), excluding `current_artifact`
+/// (the current phase's own R1 is injected separately for an R2 pass). This gives
+/// the reviewer continuity across the project — what was already raised, accepted,
+/// or fixed — the way a retained chat thread would, instead of starting blind.
+fn prior_reviews_digest(root: &Path, current_artifact: &str, budget: usize) -> String {
+    let dir = reviews_dir(root);
+    let cur_r1 = format!("REVIEW_{current_artifact}_R1.md");
+    let cur_r2 = format!("REVIEW_{current_artifact}_R2.md");
+
+    let mut files: Vec<(std::time::SystemTime, String, std::path::PathBuf)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            let is_review = name.starts_with("REVIEW_")
+                && (name.ends_with("_R1.md") || name.ends_with("_R2.md"));
+            if !is_review || name == cur_r1 || name == cur_r2 {
+                continue;
+            }
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            files.push((mtime, name, e.path()));
+        }
+    }
+    if files.is_empty() {
+        return String::new();
+    }
+    files.sort_by_key(|f| std::cmp::Reverse(f.0)); // newest first
+
+    let mut body = String::new();
+    let mut used = 0usize;
+    for (_, name, path) in files {
+        if used >= budget {
+            break;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let per_file = (budget - used).min(4_000);
+            let snippet = crate::reality::cap(content.trim(), per_file);
+            let block = format!("\n### {name}\n{snippet}\n");
+            used += block.len();
+            body.push_str(&block);
+        }
+    }
+    if body.trim().is_empty() {
+        return String::new();
+    }
+    format!(
+        "--- PRIOR REVIEWS (your earlier findings from previous phases/rounds — for continuity; don't re-litigate settled points) ---\n{body}\n---\n\n"
+    )
 }

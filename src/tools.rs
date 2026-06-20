@@ -15,6 +15,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
@@ -892,9 +893,33 @@ fn command_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-fn run_command(root: &Path, command: &str) -> Result<String> {
-    use std::io::Read;
+/// Drain a child pipe into a shared buffer on a background thread, returning the
+/// buffer. We read in chunks and append as we go so the caller can SNAPSHOT the
+/// output at any time without joining the thread. Critical for not hanging: if the
+/// command spawned a process that survives the kill and keeps the pipe's write end
+/// open (a dev server, a daemon), `read` never reaches EOF — but because we never
+/// join this thread, that can't block the agent. The orphaned thread simply sits
+/// on its blocking read until the pipe finally closes (harmless).
+fn drain_to_shared<R: std::io::Read + Send + 'static>(mut r: R) -> Arc<Mutex<Vec<u8>>> {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buf);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut b) = sink.lock() {
+                        b.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+    });
+    buf
+}
 
+fn run_command(root: &Path, command: &str) -> Result<String> {
     // Fresh interrupt state for this command (drop any stale Ctrl+B from before).
     COMMAND_INTERRUPT.store(false, Ordering::SeqCst);
 
@@ -902,25 +927,11 @@ fn run_command(root: &Path, command: &str) -> Result<String> {
         spawn_shell(command, root).map_err(|e| anyhow!("failed to launch command: {}", e))?;
     let pid = child.id();
 
-    // Drain stdout/stderr on threads so a chatty command can't deadlock by filling
-    // a pipe buffer while we're busy polling for completion.
-    let drain = |s: Option<std::process::ChildStdout>| {
-        s.map(|mut s| {
-            std::thread::spawn(move || {
-                let mut b = Vec::new();
-                let _ = s.read_to_end(&mut b);
-                b
-            })
-        })
-    };
-    let out_handle = drain(child.stdout.take());
-    let err_handle = child.stderr.take().map(|mut s| {
-        std::thread::spawn(move || {
-            let mut b = Vec::new();
-            let _ = s.read_to_end(&mut b);
-            b
-        })
-    });
+    // Drain stdout/stderr into shared buffers (see drain_to_shared) — captured
+    // incrementally and snapshotted WITHOUT joining, so a survivor process holding
+    // the pipe open can't deadlock us.
+    let out_buf = child.stdout.take().map(drain_to_shared);
+    let err_buf = child.stderr.take().map(drain_to_shared);
 
     // Poll for completion, honoring both a timeout and a Ctrl+B interrupt. On
     // either, kill the whole process *tree* (the command may have spawned its own
@@ -952,12 +963,39 @@ fn run_command(root: &Path, command: &str) -> Result<String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    let out_buf = out_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-    let err_buf = err_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+    // Let the drain threads flush, then SNAPSHOT (never join). On a normal exit the
+    // pipe closes and output settles within a few ms; bound the wait so a killed
+    // command whose orphaned grandchild still holds the pipe open can't stall us.
+    let snap = |b: &Option<Arc<Mutex<Vec<u8>>>>| -> Vec<u8> {
+        b.as_ref()
+            .and_then(|m| m.lock().ok().map(|g| g.clone()))
+            .unwrap_or_default()
+    };
+    let snap_len = |b: &Option<Arc<Mutex<Vec<u8>>>>| -> usize {
+        b.as_ref()
+            .and_then(|m| m.lock().ok().map(|g| g.len()))
+            .unwrap_or(0)
+    };
+    let settle_cap =
+        Instant::now() + Duration::from_millis(if stopped.is_some() { 150 } else { 1500 });
+    let mut last_len = 0usize;
+    loop {
+        if Instant::now() >= settle_cap {
+            break;
+        }
+        let cur = snap_len(&out_buf) + snap_len(&err_buf);
+        if cur > 0 && cur == last_len {
+            break; // output has stopped growing — done flushing
+        }
+        last_len = cur;
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out_bytes = snap(&out_buf);
+    let err_bytes = snap(&err_buf);
 
     let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&out_buf));
-    let stderr = String::from_utf8_lossy(&err_buf);
+    combined.push_str(&String::from_utf8_lossy(&out_bytes));
+    let stderr = String::from_utf8_lossy(&err_bytes);
     if !stderr.trim().is_empty() {
         combined.push_str("\n[stderr]\n");
         combined.push_str(&stderr);

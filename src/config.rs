@@ -398,6 +398,12 @@ pub fn global_env_path() -> Option<PathBuf> {
     global_config_path().and_then(|p| p.parent().map(|d| d.join(".env")))
 }
 
+/// The machine-wide "build tag" badge image: `<OS config dir>/anvil/tag-badge.png`.
+/// Set once via `/tag set <path>` and reused to tag any project Anvil helps build.
+pub fn global_badge_path() -> Option<PathBuf> {
+    global_config_path().and_then(|p| p.parent().map(|d| d.join("tag-badge.png")))
+}
+
 fn load_env_file(path: &Path) {
     if !path.exists() {
         return;

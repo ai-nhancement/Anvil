@@ -216,6 +216,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/setup", "Alias for /config — providers, models, keys"),
     ("/swap", "Hot-swap one role's model (coder, R1, or R2): pick the role, then pick or type the model id"),
     ("/approvals", "Edit which shell commands auto-run without a y/n prompt (checklist; Space toggles, Esc saves)"),
+    ("/tag", "Tag this build: add a 'Built with Anvil' + your-badge footer. /tag set <path.png> stores the badge; /tag show checks it"),
     ("/status", "Show roles, config state, and current gate progress"),
     ("/models", "Show each role's model facts (context window, tool-call, price) via models.dev"),
     ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
@@ -2333,6 +2334,11 @@ impl App {
 
         if cmd == "/approvals" || cmd == "/commands" || cmd == "/approve-list" {
             self.open_approvals_editor();
+            return;
+        }
+
+        if cmd == "/tag" || cmd == "/tag show" || cmd.starts_with("/tag ") {
+            self.handle_tag(cmd.strip_prefix("/tag").unwrap_or("").trim());
             return;
         }
 
@@ -5394,6 +5400,115 @@ impl App {
     fn invalidate_agent(&mut self) {
         self.agent = None;
         self.confirm_tx = None;
+    }
+
+    /// Where to drop a copied asset in a project: the first conventional static dir
+    /// that exists, else the project root. Returns (absolute dir, relative label).
+    fn project_asset_dir(root: &std::path::Path) -> (std::path::PathBuf, String) {
+        for cand in ["public", "static", "assets", "src/assets"] {
+            if root.join(cand).is_dir() {
+                return (root.join(cand), cand.to_string());
+            }
+        }
+        (root.to_path_buf(), ".".to_string())
+    }
+
+    /// `/tag` — stamp a "Built with Anvil" + badge footer on the current build.
+    /// `/tag set <path.png>` stores the global badge; `/tag show` reports status;
+    /// `/tag` copies the badge into the project and drives the coder to add the
+    /// footer (the coder's tools are text-only, so Anvil does the binary copy).
+    fn handle_tag(&mut self, arg: &str) {
+        // /tag set <path-to-png>
+        if let Some(rest) = arg.strip_prefix("set") {
+            let path = rest.trim().trim_matches('"').trim_matches('\'').trim();
+            if path.is_empty() {
+                self.push_system(
+                    "Usage: /tag set <path-to-png> — store a badge image to stamp on builds.",
+                );
+                return;
+            }
+            let src = std::path::Path::new(path);
+            let Some(dest) = crate::config::global_badge_path() else {
+                self.push_system(
+                    "Could not resolve the global config directory to store the badge.",
+                );
+                return;
+            };
+            if !src.is_file() {
+                self.push_system(&format!("No file at '{}'.", path));
+                return;
+            }
+            let is_png = src
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("png"))
+                .unwrap_or(false);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::copy(src, &dest) {
+                Ok(bytes) => {
+                    self.push_system(&format!(
+                        "✓ Badge stored ({} bytes) — applies to every project.",
+                        bytes
+                    ));
+                    if !is_png {
+                        self.push_system(
+                            "  (note: expected a .png — stored it anyway, but PNG is recommended.)",
+                        );
+                    }
+                    self.push_system("  Run /tag in a project to add a 'Built with Anvil' footer with this badge.");
+                }
+                Err(e) => self.push_system(&format!("Could not store badge: {}", e)),
+            }
+            return;
+        }
+
+        let badge = crate::config::global_badge_path().filter(|p| p.is_file());
+
+        // /tag show — status only.
+        if arg == "show" {
+            match &badge {
+                Some(p) => self.push_system(&format!("Build-tag badge: set ({}).", p.display())),
+                None => self.push_system(
+                    "Build-tag badge: not set. Store one with /tag set <path-to-png>.",
+                ),
+            }
+            return;
+        }
+
+        // /tag — apply to the current project.
+        let Some(badge) = badge else {
+            self.push_system("No badge set yet. Store one first:  /tag set <path-to-png>");
+            return;
+        };
+
+        // Anvil copies the binary into the project (the coder can't — text tools only).
+        let (asset_abs, asset_rel) = Self::project_asset_dir(&self.root);
+        let _ = std::fs::create_dir_all(&asset_abs);
+        let dest = asset_abs.join("anvil-badge.png");
+        if let Err(e) = std::fs::copy(&badge, &dest) {
+            self.push_system(&format!("Could not copy the badge into the project: {}", e));
+            return;
+        }
+        let rel = if asset_rel == "." {
+            "anvil-badge.png".to_string()
+        } else {
+            format!("{}/anvil-badge.png", asset_rel)
+        };
+        self.push_system(&format!(
+            "Badge copied to {} — asking the coder to add the footer…",
+            rel
+        ));
+
+        let task = format!(
+            "The user ran /tag to tag this build with their badge. The badge image is already in the project at `{rel}`. \
+             FIRST ask the user to confirm they want a \"Built with Anvil\" footer added, and make NO changes until they confirm in their next message. \
+             On confirm: add a footer to the site that shows the badge image (`{rel}`) AND a text link \"Built with Anvil\" pointing to https://github.com/ai-nhancement/Anvil (open in a new tab). \
+             Integrate it the correct way for THIS project's stack — find the shared layout/footer so it appears site-wide; keep it small and unobtrusive. \
+             If the user declines, delete `{rel}` and make no other changes."
+        );
+        self.start_real_chat(&task);
     }
 
     fn assign_role_and_advance(

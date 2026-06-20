@@ -257,6 +257,7 @@ Workflow
 
 Confirm a command
   /y  /a  /n          Yes once · Yes + allow this program for the session · No
+  /approvals          Edit which commands auto-run without a prompt (checklist; Space toggles, Esc saves)
 
 Models & config
   /config or /setup   Providers, model bindings, roles & keys (full wizard) — saved globally
@@ -267,12 +268,18 @@ Models & config
 
 Memory & context
   /clinker (/compact) Fold the conversation into working memory and rake out older turns
+  /context            How full the context window is (tokens used / budget / % · compaction-imminent)
   /memory             Inspect the memory layers (ledger, working memory, what's sent next turn)
   /clear-memory       Reset the session (the ledger is preserved)
   /decisions /assumptions /scratch /architecture   View the coder-maintained context files
   /refresh            Show the live reality snapshot the coder is grounded on
 
   /view-plan  /view-reviews   Open plan.md / the REVIEW_*.md files in a focused popup
+
+Build
+  /tag                Add a "Built with Anvil" + your-badge footer to this build
+  /tag set <png>      Store the badge image (global; reused for every project)
+
   /help   /quit
 ```
 

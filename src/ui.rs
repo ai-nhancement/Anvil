@@ -2238,7 +2238,7 @@ impl App {
                 combined.push_str(&c);
             } else {
                 combined.push_str(
-                    "(REVIEW_plan_R1.md not found — follow /plan → /save-plan → /lock-plan)\n",
+                    "(REVIEW_plan_R1.md not found — the coder writes plan.md, then run /lock-plan)\n",
                 );
             }
             combined.push_str("\n\n=== PLAN REVIEW R2 (reviewer-b) ===\n\n");

@@ -144,7 +144,7 @@ work, and you **quench** it to lock it in.
 
 1. **`/phase-start P0`** (optional — you can just tell the coder to start a phase).
 2. The coder implements the phase directly: reads what it needs, edits files, runs tests. You approve each shell command (see [Approving commands](#approving-commands)).
-3. **`/accept-phase`** runs the *same* R1 → fix → ⏸ → R2 → fix → ⏸ → summary loop, but on the actual `git diff`.
+3. **`/accept-phase`** runs the gate on the actual `git diff`: the coder first writes a **review briefing** (`REVIEW_<id>_BRIEF.md` — what it built and *why*, tests, anything deferred), then the *same* R1 → fix → ⏸ → R2 → fix → ⏸ → summary loop. Reviewers see the briefing, the whole plan, and the diff — plus their own findings from earlier phases/rounds (R2 also gets R1's findings to verify the fixes landed).
 4. **`/ship-phase`** — *quench* the phase. (Re-run `/accept-phase` any time to re-review.)
 
 **The invariant:** the human approves at each gate; the coder does the creative work and the file changes; two diverse reviewers supply a critical second opinion on the locked artifact (the plan, then each phase's diff). Because **R2 reviews after R1's fixes have been applied**, it catches problems the first round's fixes introduced — the part single-pass review misses.

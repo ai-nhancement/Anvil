@@ -126,7 +126,9 @@ enum PhaseCmd {
         id: String,
     },
 
-    /// Legacy: run R1+R2 immediately on "done" claim. New TUI flow: coder writes REVIEW_Px_R1.md (the briefing doc), user /save-r1 then /critical-r1 runs reviewer critical *on coder's doc* (human gate), coder fixes, coder writes R2 doc, /critical-r2, human gate, coder summarizes, /phase-accept.
+    /// Legacy CLI: run R1+R2 immediately on a "done" claim. Preferred is the TUI
+    /// gate: build the phase, then /accept-phase (coder writes the briefing → R1 →
+    /// fixes → /continue → R2 → fixes → summary) → /ship-phase.
     Review {
         /// Phase id, e.g. P0
         id: String,

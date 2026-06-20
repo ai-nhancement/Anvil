@@ -68,23 +68,13 @@ pub fn run_phase_list(root: &Path) -> Result<()> {
         let is_current = state.current_phase.as_deref() == Some(id.as_str());
 
         let status = if is_shipped {
-            format!("{}", "✓ accepted".green())
+            format!("{}", "✓ shipped".green())
         } else if is_current && has_both {
-            format!(
-                "{}",
-                "R1+R2 artifacts present — /phase-accept (or legacy review)".yellow()
-            )
+            format!("{}", "R1+R2 reviews done — /ship-phase".yellow())
         } else if is_current && has_r1 {
-            format!(
-                "{}",
-                "R1 review doc present — continue to R2 doc + criticals".yellow()
-            )
+            format!("{}", "R1 done — /continue for R2".yellow())
         } else if is_current {
-            format!(
-                "{}",
-                "in progress — tell coder 'write R1 review doc' then /save-r1 + /critical-r1"
-                    .cyan()
-            )
+            format!("{}", "in progress — build it, then /accept-phase".cyan())
         } else {
             format!("{}", "pending".dimmed())
         };
@@ -266,7 +256,7 @@ pub fn run_phase_review(root: &Path, id: &str) -> Result<()> {
     let _r2 = run_phase_review_one(&client, &cfg, reviewer_b, id, "R2", &reviews, &context)?;
     println!("{} R2 (reviewer-b) complete", "✓".green());
 
-    println!("\nReviews written (legacy path). For the chat-driven flow use coder to write REVIEW_Px_R1.md, /save-r1, then critical reviewer passes with human approve gates between.");
+    println!("\nReviews written (legacy CLI path). The preferred flow is the TUI gate: build the phase, then /accept-phase (coder writes the briefing → R1 → fixes → /continue → R2 → fixes → summary) → /ship-phase.");
     println!("Address the findings, then run:");
     println!(
         "  {} {}   (only succeeds after both R1 and R2 exist for the phase)",
@@ -328,7 +318,7 @@ pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
     let id = &normalize_phase_id(id);
     let reviews = reviews_dir(root);
 
-    // Support both the preferred new TUI flow naming (REVIEW_Px_R1.md written by /save-r1 etc.)
+    // Support both the TUI gate naming (REVIEW_Px_R1.md, written by /accept-phase)
     // and the legacy CLI naming (REVIEW_phase-Px_R1.md from `anvil phase review`).
     let r1_new = reviews.join(format!("REVIEW_{}_R1.md", id));
     let r2_new = reviews.join(format!("REVIEW_{}_R2.md", id));
@@ -339,7 +329,7 @@ pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
     if !has_r1r2 {
         return Err(anyhow!(
             "Both R1 and R2 review files must exist before you can accept a phase.\n\
-             Preferred (TUI): tell coder to write REVIEW_{}_R1.md, /save-r1, /critical-r1, then R2 doc + /save-r2 + /critical-r2.\n\
+             Preferred (TUI): build the phase, then /accept-phase {} (briefing → R1 → fixes → R2 → fixes → summary) → /ship-phase.\n\
              Legacy: run `anvil phase review {}` (writes the phase- named files).",
             id, id
         ));

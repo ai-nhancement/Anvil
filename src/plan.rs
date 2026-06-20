@@ -1,15 +1,16 @@
 //! `anvil plan` (and TUI /plan support)
 //!
-//! The interactive flow (preferred): plan is discussed and written by the *coder* role inside the TUI chat.
-//! User saves it (`/save-plan`), then uses the explicit human gates:
-//!   /lock-plan  -> R1 (reviewer-a) automatically reviews plan.md and presents findings (writes REVIEW_plan_R1.md at root)
-//!   (coder helps apply fixes to plan.md; user may /save-plan again)
-//!   /approve-r1 -> R2 (reviewer-b) automatically reviews (updated) plan and presents findings
-//!   (user approves R2 findings)
-//!   /accept-plan -> records hash, plan approved, phases unlocked.
+//! Interactive flow (preferred): the *coder* discusses and writes plan.md inside
+//! the TUI chat. Then the plan gate runs as a single sequential loop:
+//!   /lock-plan   -> R1 (reviewer-a) reviews plan.md (writes REVIEW_plan_R1.md)
+//!                   -> coder applies fixes -> (user /continue)
+//!                   -> R2 (reviewer-b) re-reviews the revised plan -> coder fixes
+//!                   -> (user /continue) -> coder summarizes
+//!   /accept-plan -> records the plan hash, unlocks phase work.
 //!
-//! The legacy one-shot `anvil plan --fresh` still generates via coder + immediately runs both R1+R2 (for scripts/CLI users).
-//! Both paths now write REVIEW_plan_R*.md at repo *root* (see PHASE_REVIEW_WORKFLOW.md).
+//! The legacy one-shot `anvil plan --fresh` still generates via the coder +
+//! immediately runs both R1+R2 (for scripts/CLI users). Both paths write
+//! REVIEW_plan_R*.md at the repo root.
 
 use std::fs;
 use std::path::Path;

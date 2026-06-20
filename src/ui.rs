@@ -93,6 +93,7 @@ You have tools, scoped to the project root:\n\
 - list_dir(path), grep(pattern, [path])\n\
 - run_command(command)  — e.g. cargo build, cargo test, git diff (the user confirms each run)\n\
 - delegate(specialist, task) — hand a focused EVIDENCE-GATHERING task to a scoped, read-only specialist sub-agent when you need information from OUTSIDE this project. researcher: searches the web + reads pages (library/API docs, usage, best practices, error explanations). repo-scout: shallow-clones an external git repo and studies how it does something. The specialist can't see this chat, so put all needed context in `task`; it returns evidence, and YOU stay the decision-maker and the only one who edits code. Its outward actions (web fetch, repo clone) ask the user to confirm.\n\
+- flag_risk(note) — surface a risk or decision that deserves the user's eyes NOW, mid-task, without waiting for a review gate. Use it when you proceed past real uncertainty (an ambiguous requirement, a risky tradeoff, a possible breaking change, a load-bearing assumption that might be wrong). It shows immediately in the UI and is saved to .anvil/risks.md. It does NOT block you — flag it and keep working. Prefer this over silently parking doubt in assumptions.md when the decision could send the work down the wrong path.\n\
 \n\
 Always use your built-in read_file / grep / list_dir tools to read and search the code — they work everywhere and need no confirmation. Reserve run_command for build/test/lint/git; do NOT shell out to grep/findstr/Select-String/python to search files (the platform varies; your grep tool is reliable). If a search returns nothing, try a shorter or different pattern rather than switching to the shell.\n\
 For LARGE files (hundreds of lines, e.g. src/ui.rs), do NOT read the whole file repeatedly — grep for the symbol or text you need to find its line, then read_file with offset+limit to read just that section. Reading whole large files wastes context and makes you lose track. Don't re-run the same read/list/project_state call you already ran this turn.\n\
@@ -3194,6 +3195,16 @@ impl App {
             if let Some(note) = delta.strip_prefix("[note]") {
                 self.close_assistant_line();
                 self.push_system(note.trim());
+                changed = true;
+                continue;
+            }
+            // The coder flagged a risk mid-task (flag_risk tool) — surface it
+            // prominently now, not just at a gate. Also persisted to .anvil/risks.md.
+            if let Some(note) = delta.strip_prefix("[risk]") {
+                self.close_assistant_line();
+                self.push_system(&format!("⚠ RISK FLAGGED by the coder: {}", note.trim()));
+                self.push_system("  (recorded in .anvil/risks.md — review when convenient)");
+                self.follow_bottom = true;
                 changed = true;
                 continue;
             }

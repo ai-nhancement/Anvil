@@ -934,6 +934,13 @@ impl Agent {
                     call.name,
                     tools::result_summary(&call.name, &result)
                 ));
+                // A flagged risk gets a prominent, real-time surface in the UI
+                // (not just the tool line) so the user sees it mid-task.
+                if call.name == "flag_risk" {
+                    if let Some(note) = call.arguments.get("note").and_then(|v| v.as_str()) {
+                        let _ = tx.send(format!("[risk]{}", note));
+                    }
+                }
                 let tr = ChatMessage::tool_result(call.id.clone(), result);
                 self.history.push(tr.clone());
                 self.append_ledger(&[tr]);

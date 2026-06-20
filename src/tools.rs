@@ -145,6 +145,17 @@ pub fn tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "flag_risk".into(),
+            description: "Flag a risk or decision that deserves the user's eyes NOW, mid-task — without waiting for a review gate. Use when you're proceeding past real uncertainty (an ambiguous requirement, a risky tradeoff, a possible breaking change, an assumption that could be wrong). It surfaces immediately in the UI and is recorded in .anvil/risks.md. This does NOT block you — note the risk and keep working.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string", "description": "The risk/decision, stated concretely (what, and why it matters)"}
+                },
+                "required": ["note"]
+            }),
+        },
+        ToolDef {
             name: "delegate".into(),
             description: format!(
                 "Delegate a focused evidence-gathering task to a read-only specialist sub-agent and get its findings back. Use this when you need information from OUTSIDE this project — the web, or another repository. The specialist returns evidence; you stay the decision-maker and the only one who edits code. Outward actions (fetching a URL, cloning a repo) ask the user for confirmation. Available specialists:\n{}",
@@ -325,6 +336,7 @@ pub fn summarize_args(call: &ToolCall) -> String {
         }
         "run_command" => arg_str(call, "command").unwrap_or_default(),
         "delegate" => arg_str(call, "specialist").unwrap_or_default(),
+        "flag_risk" => arg_str(call, "note").unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -425,6 +437,7 @@ fn run(call: &ToolCall, root: &Path) -> Result<String> {
         "list_dir" => list_dir(root, &arg_str(call, "path").unwrap_or_else(|_| ".".into())),
         "grep" => grep(root, &arg_str(call, "pattern")?, arg_opt(call, "path")),
         "project_state" => Ok(crate::reality::snapshot(root)),
+        "flag_risk" => record_risk(root, &arg_str(call, "note")?),
         "run_command" => run_command(root, &arg_str(call, "command")?),
         other => bail!("unknown tool '{}'", other),
     }
@@ -919,6 +932,33 @@ fn drain_to_shared<R: std::io::Read + Send + 'static>(mut r: R) -> Arc<Mutex<Vec
     buf
 }
 
+/// Append a coder-flagged risk to `.anvil/risks.md` (a visible, user-readable
+/// file). The UI also surfaces it prominently in real time; this is the durable
+/// record so it isn't lost when the transcript scrolls.
+fn record_risk(root: &Path, note: &str) -> Result<String> {
+    let note = note.trim();
+    if note.is_empty() {
+        bail!("flag_risk needs a non-empty note");
+    }
+    let path = crate::config::anvil_dir(root).join("risks.md");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut out = if existing.trim().is_empty() {
+        "# Risks flagged by the coder\n<!-- Mid-task risks/decisions the coder surfaced for your attention. Newest at the bottom. -->\n".to_string()
+    } else {
+        existing
+    };
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("\n- [{}] {}\n", ts, note));
+    std::fs::write(&path, out).map_err(|e| anyhow!("could not write risks.md: {}", e))?;
+    Ok(format!("risk recorded to .anvil/risks.md: {}", note))
+}
+
 fn run_command(root: &Path, command: &str) -> Result<String> {
     // Fresh interrupt state for this command (drop any stale Ctrl+B from before).
     COMMAND_INTERRUPT.store(false, Ordering::SeqCst);
@@ -1223,6 +1263,26 @@ mod tests {
         );
         assert!(r.starts_with("exit code: 0"), "{r}");
         assert!(r.contains("hello_anvil"), "{r}");
+    }
+
+    #[test]
+    fn flag_risk_appends_to_risks_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let r = execute(
+            &call("flag_risk", json!({"note": "auth token TTL is a guess"})),
+            root,
+        );
+        assert!(r.contains("risk recorded"), "{r}");
+        let risks = std::fs::read_to_string(root.join(".anvil/risks.md")).unwrap();
+        assert!(risks.contains("auth token TTL is a guess"), "{risks}");
+        // A second flag appends (both retained).
+        execute(&call("flag_risk", json!({"note": "second risk"})), root);
+        let risks2 = std::fs::read_to_string(root.join(".anvil/risks.md")).unwrap();
+        assert!(risks2.contains("auth token TTL is a guess") && risks2.contains("second risk"));
+        // Empty note is rejected.
+        let bad = execute(&call("flag_risk", json!({"note": "  "})), root);
+        assert!(bad.starts_with("ERROR:"), "{bad}");
     }
 
     #[test]

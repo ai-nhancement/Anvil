@@ -277,8 +277,8 @@ Memory & context
   /view-plan  /view-reviews   Open plan.md / the REVIEW_*.md files in a focused popup
 
 Build
-  /tag                Add a "Built with Anvil" + your-badge footer to this build
-  /tag set <png>      Store the badge image (global; reused for every project)
+  /tag                Add a "Built with Anvil" + badge footer to this build (bundled default badge)
+  /tag set <png>      Override the badge with your own image (global; reused for every project)
 
   /help   /quit
 ```

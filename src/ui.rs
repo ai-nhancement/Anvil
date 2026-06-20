@@ -80,6 +80,11 @@ fn project_display_name(root: &Path) -> String {
         })
 }
 
+/// The default "Built with Anvil" badge, bundled into the binary so `/tag` works
+/// out of the box on any machine (no file needed). Overridable per-user with
+/// `/tag set <path.png>`. Source lives at the repo root as `tag.png`.
+const DEFAULT_BADGE_PNG: &[u8] = include_bytes!("../tag.png");
+
 /// System prompt for the coder agent. Short and agentic: the model has real
 /// tools and works directly on the repo. Structure is imposed at exactly two
 /// human gates (lock the plan, accept a phase); everything else is free-form.
@@ -216,7 +221,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/setup", "Alias for /config — providers, models, keys"),
     ("/swap", "Hot-swap one role's model (coder, R1, or R2): pick the role, then pick or type the model id"),
     ("/approvals", "Edit which shell commands auto-run without a y/n prompt (checklist; Space toggles, Esc saves)"),
-    ("/tag", "Tag this build: add a 'Built with Anvil' + your-badge footer. /tag set <path.png> stores the badge; /tag show checks it"),
+    ("/tag", "Tag this build: add a 'Built with Anvil' + badge footer (bundled default badge works out of the box). /tag set <path.png> overrides it"),
     ("/status", "Show roles, config state, and current gate progress"),
     ("/models", "Show each role's model facts (context window, tool-call, price) via models.dev"),
     ("/loaded", "/ps /ollama-ps — list Ollama models currently in VRAM + sizes"),
@@ -5464,31 +5469,43 @@ impl App {
             return;
         }
 
-        let badge = crate::config::global_badge_path().filter(|p| p.is_file());
+        let custom = crate::config::global_badge_path().filter(|p| p.is_file());
 
         // /tag show — status only.
         if arg == "show" {
-            match &badge {
-                Some(p) => self.push_system(&format!("Build-tag badge: set ({}).", p.display())),
+            match &custom {
+                Some(p) => {
+                    self.push_system(&format!("Build-tag badge: custom badge set ({}).", p.display()))
+                }
                 None => self.push_system(
-                    "Build-tag badge: not set. Store one with /tag set <path-to-png>.",
+                    "Build-tag badge: using the bundled default. Override with /tag set <path-to-png>.",
                 ),
             }
             return;
         }
 
-        // /tag — apply to the current project.
-        let Some(badge) = badge else {
-            self.push_system("No badge set yet. Store one first:  /tag set <path-to-png>");
-            return;
+        // /tag — apply to the current project. Badge bytes are the custom global
+        // badge if set, otherwise the default bundled into the binary (tag.png).
+        let badge_bytes: Vec<u8> = match &custom {
+            Some(p) => match std::fs::read(p) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.push_system(&format!("Could not read the stored badge: {}", e));
+                    return;
+                }
+            },
+            None => DEFAULT_BADGE_PNG.to_vec(),
         };
 
-        // Anvil copies the binary into the project (the coder can't — text tools only).
+        // Anvil writes the binary into the project (the coder can't — text tools only).
         let (asset_abs, asset_rel) = Self::project_asset_dir(&self.root);
         let _ = std::fs::create_dir_all(&asset_abs);
         let dest = asset_abs.join("anvil-badge.png");
-        if let Err(e) = std::fs::copy(&badge, &dest) {
-            self.push_system(&format!("Could not copy the badge into the project: {}", e));
+        if let Err(e) = std::fs::write(&dest, &badge_bytes) {
+            self.push_system(&format!(
+                "Could not write the badge into the project: {}",
+                e
+            ));
             return;
         }
         let rel = if asset_rel == "." {

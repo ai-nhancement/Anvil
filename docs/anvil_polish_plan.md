@@ -48,9 +48,14 @@ Goal: a safety net around the workflow core before refactoring it.
 Deliverable: focused test suite. Accept: `cargo test` covers start→brief→R1→R2→
 ship state transitions + missing/stale artifact handling.
 
-## P6 — Split `src/ui.rs` (do last, with P5 net in place)
-Goal: reduce the biggest maintenance pressure point.
-- Carve into a `ui/` module dir (e.g. `popups.rs`, `wizard.rs`, `render.rs`,
-  keeping the `App` core + gate machine together), behavior-identical.
-Deliverable: same behavior, smaller files. Accept: build/clippy/test green; no
-functional change; `git` shows pure moves + visibility tweaks.
+## P6 — Split `src/ui.rs` — DEFERRED to its own dedicated plan
+`src/ui.rs` is ~7.4k lines. The feedback itself flags this as a broad, risky
+refactor to do deliberately (and the TUI internals aren't yet test-covered, unlike
+the gate core now covered by P5). Carving it (`ui/popups.rs`, `ui/wizard.rs`,
+`ui/render.rs`, `ui/commands.rs`, keeping the `App` core + gate machine together)
+will be its own plan so it gets the care + verification it needs — not bolted onto
+this batch while the tool is in active use on a real project.
+
+---
+
+**Status: P1–P5 shipped (release v0.5.0). P6 deferred to a dedicated plan.**

@@ -115,7 +115,8 @@ PROJECT CONTEXT FILES you maintain with your write_file/edit_file tools (all pla
 - ARCHITECTURE.md (repo root) — a small, maintained map of the codebase; update it when structure changes.\n\
 decisions.md, assumptions.md and working memory are injected into your context every turn; scratch.md and ARCHITECTURE.md are NOT — read them on demand. Keep all of them short and high-signal.\n\
 \n\
-When implementing a phase, follow this checklist: read the relevant files first → make the minimal diff → add/update tests → run the project's verification commands (from decisions.md) → inspect the diff before declaring it done."
+When implementing a phase, follow this checklist: read the relevant files first → make the minimal diff → add/update tests → run the project's verification commands (from decisions.md) → inspect the diff before declaring it done.\n\
+Prefer verification commands that terminate on their own. If a test runner or build hangs (open handles, watch mode, a started server that never exits, an infinite loop), don't just re-run it — make it exit (e.g. a force-exit / non-watch / timeout flag appropriate to that tool) and record the working, terminating invocation in decisions.md so future runs and the reviewers use it. A command that times out is killed and reported, but a fast clean exit is far better."
         .to_string()
 }
 

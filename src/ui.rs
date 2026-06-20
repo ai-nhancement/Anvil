@@ -200,6 +200,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/ship-phase [id]", "Quench the phase — ship it after its reviews (run /accept-phase first)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Clinker the forge: fold the conversation into .anvil/working-memory.md and rake out older turns (alias /clinker)"),
+    ("/context", "Show how full the coder's context window is (tokens used / budget / % · whether compaction is imminent)"),
     ("/memory", "Inspect the coder's memory + context files (ledger, history window, working memory, decisions, assumptions, token estimate)"),
     ("/clear-memory", "Reset the in-session history + working memory (the append-only ledger is kept)"),
     ("/decisions", "View .anvil/decisions.md — durable preferences + verification commands (injected each turn)"),
@@ -2153,6 +2154,70 @@ impl App {
                         Err(e) => { let _ = tx.send(format!("[gate-error]clinker: {}", e)); }
                     }
                 });
+            }
+            return;
+        }
+
+        if cmd == "/context" || cmd == "/ctx" {
+            // Focused readout of how full the coder's context window is and whether
+            // auto-compaction ("clinkering") is about to fire — so the memory
+            // behavior isn't a black box.
+            match self.agent.as_ref().and_then(|a| {
+                a.try_lock().ok().map(|g| {
+                    (
+                        g.history_len(),
+                        g.context_chars(),
+                        g.context_budget(),
+                        g.compaction_pending(),
+                    )
+                })
+            }) {
+                Some((hist, used_chars, budget_chars, pending)) => {
+                    // Grounding injected on top of the history window each turn.
+                    let wm = std::fs::read_to_string(crate::agent::working_memory_path(&self.root))
+                        .unwrap_or_default();
+                    let snap = crate::reality::snapshot(&self.root).len();
+                    let dec = std::fs::read_to_string(crate::agent::decisions_path(&self.root))
+                        .map(|s| s.len().min(2000))
+                        .unwrap_or(0);
+                    let asm = std::fs::read_to_string(crate::agent::assumptions_path(&self.root))
+                        .map(|s| s.len().min(2000))
+                        .unwrap_or(0);
+                    let grounding_tok = (wm.trim().len() + snap + dec + asm) / 4;
+                    let used_tok = used_chars / 4;
+                    let budget_tok = budget_chars.max(1) / 4;
+                    let pct =
+                        (used_chars as f64 / budget_chars.max(1) as f64 * 100.0).round() as u32;
+                    self.push_system("Context window (coder):");
+                    self.push_system(&format!(
+                        "  history window: ~{} / ~{} tokens ({}% full) · {} messages in memory",
+                        used_tok, budget_tok, pct, hist
+                    ));
+                    self.push_system(&format!(
+                        "  + grounding injected each turn (working memory + reality + decisions/assumptions): ~{} tokens",
+                        grounding_tok
+                    ));
+                    self.push_system(&format!(
+                        "  working memory: {}",
+                        if wm.trim().is_empty() {
+                            "empty"
+                        } else {
+                            "present (re-injected each turn)"
+                        }
+                    ));
+                    self.push_system(&format!(
+                        "  compaction: {}",
+                        if pending {
+                            "IMMINENT — older turns fold into working memory at the end of the next turn"
+                        } else {
+                            "not imminent"
+                        }
+                    ));
+                    self.push_system("  (budget is sized from the coder model's context window; see /models. /compact forces it now.)");
+                }
+                None => self.push_system(
+                    "No coder agent yet — start chatting first, then /context shows window usage.",
+                ),
             }
             return;
         }

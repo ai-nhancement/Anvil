@@ -640,6 +640,18 @@ impl Agent {
         self.context_window().iter().map(|m| m.text.len()).sum()
     }
 
+    /// The recent-history char budget for this model (drives window trimming + the
+    /// auto-compact trigger). For the /context readout.
+    pub fn context_budget(&self) -> usize {
+        self.char_budget
+    }
+
+    /// True when the full history has outgrown the send window — i.e. auto-compaction
+    /// ("clinkering") will fire at the end of the next turn. For the /context readout.
+    pub fn compaction_pending(&self) -> bool {
+        self.over_send_window()
+    }
+
     /// Reset the in-memory working history (used by /clear-memory). The ledger is
     /// untouched; a reset marker is written separately so reloads start fresh.
     pub fn clear_history(&mut self) {

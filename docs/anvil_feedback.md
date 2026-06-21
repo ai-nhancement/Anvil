@@ -238,9 +238,19 @@ Surfaced while wiring up Grok/Gemini through Google Vertex and AI Studio. Diagno
 
 **Fix:** either implement Gemini native tool-calling, or **warn when a non-tool-capable provider type is assigned to the coder role**. Document that a Gemini *coder* must use `openai_compat` against AI Studio's `/v1beta/openai` endpoint (which does support tools). Lost time here only because bug #1 hid the failure.
 
+### 6. Gemini 3.x "thinking" models can't be the coder — dropped `thought_signature` → 400
+
+**Symptom:** with `gemini-3.5-flash` (or `gemini-flash-latest`) as the coder via AI Studio's OpenAI-compat endpoint, the first tool call ran fine (`write_file`), then the very next turn failed: `400 INVALID_ARGUMENT — "Function call is missing a thought_signature in functionCall parts."`
+
+**Root cause:** Gemini 3.x are thinking models that return a `thought_signature` on each function call (in `extra_content.google.thought_signature`) and **require it echoed back** when that call is replayed in history. Anvil's openai_compat parser (`handle_openai_tool_stream`, `llm.rs`) keeps only `id/name/arguments` and drops the signature, so turn 2's assistant tool_call is missing it → 400.
+
+**Repro:** replaying an assistant tool_call *without* a thought_signature returns **400 on `gemini-3.5-flash` / `gemini-flash-latest`** but **200 on `gemini-2.5-flash`** (which emits no signature). So 2.5-flash is the working coder today; 3.x is unusable as a coder until fixed.
+
+**Fix:** capture `thought_signature` from the streamed response and round-trip it back in the assistant tool_call (`extra_content`) on subsequent turns. Cheaper interim guard: **warn when a 3.x-class Gemini is assigned to the coder role**, pointing users to 2.5-flash.
+
 ### Suggested order of attack
 
 1. **#1 (silent errors)** — by far the highest value; it masks all the others.
 2. **#3 (env provenance/shadowing)** and **#2 (`/config` base_url)** — config papercuts that make setup feel broken.
-3. **#5 (coder tool-capability warning)** — cheap guard against a silent dead end.
+3. **#5 (coder tool-capability warning)** and **#6 (thought_signature guard)** — cheap guards against silent/confusing dead ends.
 4. **#4 (429 backoff)** — matters more as users hit rate-limited/free-tier providers.

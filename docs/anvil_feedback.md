@@ -191,3 +191,56 @@ The most valuable next polish is probably not adding more features, but tighteni
 4. Add targeted tests around the gate system.
 
 That combination would make Anvil feel less like a fast-moving beta and more like a durable tool people can trust with real projects.
+
+---
+
+## v0.5.5 session findings — provider/credential bugs (2026-06-20)
+
+Surfaced while wiring up Grok/Gemini through Google Vertex and AI Studio. Diagnosing a simple 401 took *hours* — almost entirely because of bug #1 below. Each of these will bite anyone setting up a non-trivial provider (Vertex, Bedrock, gateways, AI Studio).
+
+### 1. Silent failures: errors render as `model error:` + the entire prompt-log (HIGHEST value)
+
+**Symptom:** a failing coder turn flashed `[coder]` for an instant, the user message turned yellow, and nothing else appeared. The session log showed the "error" content was the **whole prompt-log** (system prompt + 134 messages) with `model error:` prefixed — the real error string (`401 ... ACCESS_TOKEN_TYPE_UNSUPPORTED`) was nowhere on screen.
+
+**Root cause:** the UI error path (`drain_llm_stream` handling of `[prompt-log]` / `[llm-error]`) appears to surface the buffered prompt-log instead of the actual `[llm-error]` message. So real provider errors are invisible to the user.
+
+**Fix:** when a turn errors, render the `[llm-error]` text (and point to `.anvil/last-llm-error.json`). Never fold the prompt-log into the user-facing error. This one bug turned a 30-second "oh, wrong credential" into a multi-hour dig.
+
+### 2. `/config` drops `base_url` when round-tripping a provider
+
+**Symptom:** after editing the `vertex` provider via `/config`, its `base_url` vanished from `anvil.toml`, so every call failed with "provider has no base_url set."
+
+**Root cause:** the provider wizard rewrites the provider entry without preserving fields it didn't prompt for (`base_url`, possibly `keep_alive`).
+
+**Fix:** preserve all existing provider fields through the wizard round-trip; only overwrite what the user actually changed.
+
+### 3. `.env` values silently lose to OS environment variables
+
+**Symptom:** the OAuth token written to `.anvil/.env` (`GOOGLE_API_KEY`) was ignored; Anvil sent a stale `AIza...` value instead → 401. The culprit was a persistent **Windows user env var** `GOOGLE_API_KEY` shadowing the file.
+
+**Root cause:** `load_env_file` (`config.rs` ~L434) is set-if-absent (`if std::env::var(key).is_err()`), so any pre-existing OS var wins over `.env`, with **zero indication** of which source supplied a credential.
+
+**Fix:** surface credential provenance (which source supplied each provider's key), and/or warn when a provider's credential var exists in *both* the OS env and `.env` with different values. Especially nasty for common names like `GOOGLE_API_KEY`.
+
+### 4. 429 / RESOURCE_EXHAUSTED backoff is too short
+
+**Symptom:** on a low per-minute quota, all 3 retries failed inside the same exhausted minute, then surfaced a hard error.
+
+**Root cause:** `openai_turn_stream` retry loop backs off only `500ms → 1s` over 3 attempts — far shorter than a per-minute quota window.
+
+**Fix:** on 429/`RESOURCE_EXHAUSTED`, honor the provider's `retryDelay` / `Retry-After`, and back off much longer (tens of seconds). Reasoning models on rate-limited providers make this routine.
+
+### 5. Native `google`/`gemini` provider type can't call tools (silent footgun)
+
+**Symptom:** assigning a `google`-type Gemini binding as the **coder** would produce a coder that can't read/write/run anything.
+
+**Root cause:** `chat_turn_stream`'s google branch (`llm.rs` ~L1166) flattens history to a single text turn and returns it as terminal — no tool calls. Fine for chat/reviewers; useless for the coder.
+
+**Fix:** either implement Gemini native tool-calling, or **warn when a non-tool-capable provider type is assigned to the coder role**. Document that a Gemini *coder* must use `openai_compat` against AI Studio's `/v1beta/openai` endpoint (which does support tools). Lost time here only because bug #1 hid the failure.
+
+### Suggested order of attack
+
+1. **#1 (silent errors)** — by far the highest value; it masks all the others.
+2. **#3 (env provenance/shadowing)** and **#2 (`/config` base_url)** — config papercuts that make setup feel broken.
+3. **#5 (coder tool-capability warning)** — cheap guard against a silent dead end.
+4. **#4 (429 backoff)** — matters more as users hit rate-limited/free-tier providers.

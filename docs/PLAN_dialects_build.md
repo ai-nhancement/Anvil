@@ -11,23 +11,30 @@ Related: `docs/ROADMAP_local_coder_tuning.md` (Phase 4 decides whether it's even
 
 ---
 
-## Phase 0 — Scaffolding (pure plumbing, zero behavior change)
+## Phase 0 — Scaffolding at the transport boundary (pure plumbing, zero behavior change)
 
-The riskiest-to-get-subtly-wrong wiring, so prove it changes nothing before adding any dialect.
+**Translate dialects at the LLM gateway (`llm.rs`), not in the agent loop** (review Recommendation
+A). This keeps the confirmation gate, dedup/loop-breaker, history, and the ledger canonical — fixing
+review findings #1 (confirmation bypass), #2 (dedup corruption), and #4 (cross-vendor ledger drift)
+*by construction* rather than by careful ordering. Prove it changes nothing before adding any
+dialect.
 
-- Add `src/dialect.rs`: `Dialect` enum + `tool_defs()` / `normalize()` / `prompt_addendum()`, with
-  **only `Codex` implemented as an exact pass-through** of today's `tools::tool_defs()`.
-- Coder `Agent` carries a `Dialect` (construction seam `src/ui.rs:3036`).
-- In the loop (`src/agent.rs`): source tools from `dialect.tool_defs()`, splice
-  `dialect.prompt_addendum()` into the coder system prompt, run `dialect.normalize()` on each call
-  **before** `tools::execute()` and before the transcript summary
-  (`summarize_args`/`result_summary`, `tools.rs:319/352`).
+- Add `src/dialect.rs`: `Dialect` enum + `advertise()` / `format_call()` / `to_canonical()` /
+  `prompt_addendum()`, with **only `Codex` as an exact pass-through** (advertise = today's schema;
+  `to_canonical` / `format_call` = identity).
+- Resolve the dialect in `src/ui.rs` where the logical binding is known (~`3036`) and thread the
+  resolved `Dialect` to the transport — **not** derived inside `Agent::new` from the raw model id
+  (finding #3).
+- Thread `Dialect` into `src/llm.rs`: outbound `advertise()` in `openai_turn_stream` /
+  `anthropic_turn_stream`; outbound `format_call()` in `build_openai_messages` /
+  `build_anthropic_messages` (`1563`/`1608`); inbound `to_canonical()` in `handle_openai_tool_stream`
+  / `handle_anthropic_tool_stream` (`1316`/`1469`).
 
-**Verify:** existing tests green; a real phase build under `Codex` behaves byte-identically to
-today.
+**Verify:** existing tests green; a real phase build under `Codex` behaves byte-identically to today,
+**and** the ledger (`.anvil/session.json`) contains only canonical tool names.
 
-**Touches:** `src/dialect.rs` (new), `src/agent.rs`, `src/ui.rs`. No change to `tools.rs` exec or
-`llm.rs` transport.
+**Touches:** `src/dialect.rs` (new), `src/llm.rs` (boundary), `src/ui.rs` (resolution + threading).
+No change to `agent.rs` gates, `tools.rs` exec, or the ledger schema.
 
 ---
 
@@ -35,17 +42,17 @@ today.
 
 The agnostic floor: after this, Anvil works with any function-calling model.
 
-- `Dialect::Generic`: `tool_defs()` = current set **minus `apply_patch`**, with the
-  "PREFER apply_patch" framing stripped from `edit_file`'s description; pass-through `normalize()`;
-  a short neutral prompt addendum.
+- `Dialect::Generic`: `advertise()` = canonical set **minus `apply_patch`**, with the
+  "PREFER apply_patch" framing stripped from `edit_file`; identity `to_canonical()` / `format_call()`
+  (canonical already *is* the generic shape); a short neutral prompt addendum.
 - Selection: per-binding `dialect = "..."` override → family inference (Anthropic→Anthropic,
   OpenAI/Codex→Codex) → **`Generic` fallback**.
 
 **Verify:** bind a coder to `generic`, run a scratch edit task end-to-end — `edit_file` / `write_file`
-land the change without `apply_patch`.
+land the change without `apply_patch`, and the confirmation gate + dedup still fire (they see
+canonical names).
 
-**Touches:** `src/dialect.rs`, config plumbing (`src/config.rs`), wherever the coder binding is
-resolved.
+**Touches:** `src/dialect.rs`, config plumbing (`src/config.rs`), binding resolution in `src/ui.rs`.
 
 ---
 
@@ -75,12 +82,13 @@ Higher ceiling; let Phase 2 settle the native-vs-mimic fork before building.
 - Resolve the fork from data: real built-in tool types (`text_editor_20250728` +
   `str_replace_based_edit_tool`, `bash_20250124`) vs ordinary custom tools shaped like `str_replace`.
 - Additive canonical op `insert_lines{path, after_line, text}` in `tools.rs::run()` (the one exec
-  change; `normalize()` stays I/O-free so it can't synthesize `insert`).
-- If native path: optional `native_type` marker on `ToolDef` (`llm.rs:84`) honored by
-  `anthropic_turn_stream` (`llm.rs:1402/1437`).
-- `normalize()` map: `str_replace`→`edit_file`, `view`→`read_file`, `create`→`write_file`,
-  `insert`→`insert_lines`, `bash`→`run_command`; keep Anvil `read_file`/`list_dir`/`grep`/
-  `project_state`/`flag_risk`/`delegate` as ordinary tools.
+  change; `to_canonical()` stays I/O-free so it can't synthesize `insert`).
+- **`advertise()` for the native path emits `{"type": "text_editor_20250728", "name": "..."}` with
+  NO `input_schema`** — the API rejects a custom schema on a native type (finding #6).
+- **`to_canonical()` dispatches on `args["command"]`** of the single `str_replace_based_edit_tool`
+  (`str_replace`/`view`/`create`/`insert`) — *not* on the tool name (finding #5) — and maps
+  `bash`→`run_command`. Anvil `read_file`/`list_dir`/`grep`/`project_state`/`flag_risk`/`delegate`
+  stay as ordinary tools.
 
 **Verify:** a Claude coder edits via `str_replace` end-to-end (sandbox + confirmation gate intact);
 bench shows Anthropic ≥ Codex for Claude.
@@ -92,6 +100,9 @@ bench shows Anthropic ≥ Codex for Claude.
 ## Phase 4 — The payoff test (local model)
 
 - Run a local open-weight on `Generic` vs `Codex` through the bench.
+- **Give each model a fair prompt baseline (finding #7):** keep the *task* dialect-neutral, but use
+  the model-appropriate system scaffold (its dialect's `prompt_addendum`). A model that fails on
+  *both* dialects is a "can't tool-use here" result to log — not evidence that dialect doesn't help.
 
 **Verify / decide:** does Generic move a local model from "hopeless coder" to viable? This gate
 decides whether `ROADMAP_local_coder_tuning.md` is needed at all, or whether the dialect alone was

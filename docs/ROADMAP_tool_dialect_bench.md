@@ -144,6 +144,11 @@ executes its tool calls against the scratch dir, then diffs against `after/`.
 - **Instruction phrasing leaks.** The instruction text must be dialect-neutral — don't say "apply a
   patch" in the prompt for one arm and "replace the string" in another, or you're benchmarking the
   prompt, not the surface. Keep the task description identical; only the advertised tools change.
+- **Fair prompt baseline per model (local-model false negatives).** Local open-weights are sensitive
+  to prompt styling; one may fail on *every* dialect for prompt-format reasons, not dialect ones.
+  Give each model its appropriate scaffold (the dialect's `prompt_addendum`) so the comparison
+  isolates the tool surface. A model that fails across all dialects is a "can't tool-use here"
+  finding to log — not evidence that dialect choice doesn't matter.
 - **Rate limits / cost.** Free-tier and local providers throttle; sweeps need backoff and the runs
   should be resumable per cell so a 429 doesn't trash the matrix (relates to v0.5.5 bug #4).
 - **Native-tool-type plumbing.** The str_replace arm needs the Anthropic built-in tool types

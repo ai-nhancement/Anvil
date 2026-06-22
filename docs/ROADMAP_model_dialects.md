@@ -46,30 +46,46 @@ The high-value difference between families is **the edit format**, not the tool 
 
 ---
 
-## 2. The `Dialect` abstraction (`src/dialect.rs`)
+## 2. The `Dialect` abstraction (`src/dialect.rs`) — applied at the transport boundary
 
-A dialect owns three things; execution owns none of them.
+**A dialect is a translation layer at the LLM gateway (`llm.rs`), NOT a step inside the agent loop.**
+The agent loop, `tools.rs`, conversation history, and the ledger only ever see Anvil's **canonical**
+tools (`edit_file` / `read_file` / `run_command` / …). The dialect translates on the wire:
 
 ```rust
 pub enum Dialect { Codex, Anthropic, Generic }   // open to extension
 
 impl Dialect {
-    /// Tools advertised to the model, in this family's idiom.
-    fn tool_defs(&self) -> Vec<ToolDef>;
+    /// OUTBOUND: render the canonical tool set into this family's advertised schema.
+    fn advertise(&self, canonical: &[ToolDef]) -> Vec<ProviderTool>;
 
-    /// Map a model-emitted call into a CANONICAL call that tools::run() already understands.
-    /// Pure name/arg rewriting — no I/O.
-    fn normalize(&self, call: ToolCall) -> ToolCall;
+    /// OUTBOUND: render a canonical history tool-call into this family's idiom, so a model
+    /// always sees its OWN vocabulary on replay (str_replace for Claude, apply_patch for GPT).
+    fn format_call(&self, msg: &ChatMessage) -> Value;
 
-    /// Family-specific addendum spliced into the coder system prompt (loop discipline is
-    /// family-tuned too — e.g. the Anthropic dialect must NOT say "prefer apply_patch").
+    /// INBOUND: map a model-emitted call back to a CANONICAL ToolCall — dispatching on args
+    /// where the family uses one consolidated tool (see §3, Anthropic). Pure rewriting, no I/O.
+    fn to_canonical(&self, raw: RawToolCall) -> ToolCall;
+
+    /// Family-specific system-prompt addendum (loop discipline is family-tuned too — e.g. the
+    /// Anthropic dialect must NOT say "prefer apply_patch").
     fn prompt_addendum(&self) -> &str;
 }
 ```
 
-The dialect is a thin adapter *over* the canonical core — never a fork of it. Adding support for a
-new model is writing one small adapter, not touching execution, sandboxing, or the gates. That
-adapter-over-invariant shape is what makes "any model" real instead of N parallel codepaths.
+**Why the boundary, not the loop.** The agent's confirmation gate, read-only dedup, and loop-breaker
+all key on the **raw call name** (`agent.rs:866`/`870`/`913`). Normalizing *inside* the loop would
+have to run before those checks or they'd see `bash` / `view` / `str_replace_based_edit_tool` and
+(1) skip the `run_command` confirmation gate (a `bash` call slips through — `requires_confirmation`
+only matches `run_command`) and (2) miscount reads (a `view` clears `seen_reads`, killing dedup).
+Translating at the gateway means the loop only ever sees canonical names, so every existing gate
+keeps working untouched. It also keeps the **ledger canonical and portable**: a session can switch
+models mid-stream — Anvil's whole cross-vendor-review thesis — because history is stored canonically
+and re-rendered per-model on the way out.
+
+The dialect is still a thin adapter *over* the canonical core, never a fork of it; adding a model is
+writing one small adapter at the boundary, not touching execution, sandboxing, the gates, or the
+ledger.
 
 ---
 
@@ -103,15 +119,17 @@ ordinary tools (dialects need not be all-or-nothing):
 - `bash_20250124` — name `bash`
 - plus Anvil's `read_file` / `list_dir` / `grep` / `project_state` / `flag_risk` / `delegate` as-is
 
-`normalize()` maps the native commands back to canonical:
+`to_canonical()` maps the native surface back to canonical. **Note the editor is a *single* tool
+`str_replace_based_edit_tool` carrying a `command` arg — dispatch on `args["command"]`, not the tool
+name** (a name-only map fails; the action lives in the args):
 
 | Native (Claude) | Canonical (Anvil `execute()`) |
 |---|---|
-| `str_replace{path, old_str, new_str}` | `edit_file{path, old_string, new_string}` |
-| `view{path, view_range}` | `read_file{path, offset, limit}` |
-| `create{path, file_text}` | `write_file{path, content}` |
-| `insert{path, insert_line, insert_text}` | `insert_lines{...}` — **the one additive exec op needed** (see §6) |
-| `bash{command}` | `run_command{command}` (keeps the confirmation gate, `tools.rs:188`) |
+| `str_replace_based_edit_tool{command:"str_replace", path, old_str, new_str}` | `edit_file{path, old_string, new_string}` |
+| `str_replace_based_edit_tool{command:"view", path, view_range}` | `read_file{path, offset, limit}` |
+| `str_replace_based_edit_tool{command:"create", path, file_text}` | `write_file{path, content}` |
+| `str_replace_based_edit_tool{command:"insert", path, insert_line, insert_text}` | `insert_lines{...}` — **the one additive exec op needed** (see §6) |
+| `bash{command}` | `run_command{command}` (re-enters the confirmation gate, `tools.rs:188`) |
 
 These tools are **client-executed**, so Anvil still runs them through its own sandbox (`resolve()`
 path confinement, `tools.rs:1122`) and the review gate still reviews the committed diff. The model
@@ -147,26 +165,32 @@ dialect only if the ledger/bench shows it fumbling.
 
 ---
 
-## 5. Wiring — what changes, what doesn't
+## 5. Wiring — translate on the wire, keep the core canonical
 
-The Agent owns a `Dialect` (set at coder construction, `src/ui.rs:3036`). In the agent loop
-(`src/agent.rs`):
+**Dialect resolution happens where the binding is known** — `src/ui.rs`, coder construction
+(~`3036`) — not inside `Agent::new` from the raw model id. Two logical bindings can share a model
+but differ in dialect, so resolve `binding.dialect` (override → family inference → `Generic`) at the
+binding site and thread the resolved `Dialect` down to the transport call. (Review finding #3 /
+Recommendation B.)
 
-1. Build the turn's tools from `dialect.tool_defs()` instead of `tools::tool_defs()`.
-2. Splice `dialect.prompt_addendum()` into the coder system prompt.
-3. On each returned `ToolCall`, run `dialect.normalize()` **before** `tools::execute()` and before
-   the transcript summary (`summarize_args`/`result_summary` are name-keyed on canonical names,
-   `tools.rs:319/352` — normalize first or display degrades).
+At the transport (`src/llm.rs`):
+- **Outbound — advertise tools:** `openai_turn_stream` / `anthropic_turn_stream` build the advertised
+  schema via `dialect.advertise(canonical_defs)` (replaces the fixed `parameters` / `input_schema`
+  serialization at `llm.rs:1234`/`1437`).
+- **Outbound — render history:** `build_openai_messages` / `build_anthropic_messages`
+  (`llm.rs:1563`/`1608`) render canonical history tool-calls via `dialect.format_call()`, so each
+  model replays its own vocabulary.
+- **Inbound — parse calls:** `handle_openai_tool_stream` / `handle_anthropic_tool_stream`
+  (`llm.rs:1316`/`1469`) run `dialect.to_canonical()` on each assembled call **before** it leaves
+  the transport.
 
-**Unchanged:**
-- `tools::execute()` / `run()` — the canonical core (one additive op, §6).
-- `llm.rs` transport interface — it still serializes whatever `ToolDef`s it's handed into each
-  provider's envelope (`openai_turn_stream` `parameters`, `llm.rs:1234`; `anthropic_turn_stream`
-  `input_schema`, `llm.rs:1437`). The Anthropic built-in-type arm is the one transport touch (§8).
-- Reviewers / specialists — keep the canonical read-only subset (`read_only_tool_defs`,
-  `tools.rs:179`); they're not fighting harness training the way the coder is. A reviewer dialect is
-  a possible later refinement, not v1.
-- Gates, plan, audit, sandbox — entirely above/below the dialect line.
+**Unchanged — and now provably so, because none of it ever sees a dialect:**
+- `src/agent.rs` loop + every gate (confirmation, dedup, loop-breaker) — all key on canonical names.
+- `tools::execute()` / `run()` — canonical core (one additive op, §6).
+- Conversation history + the **ledger** — canonical only → portable across vendors mid-session.
+- `summarize_args` / `result_summary` (`tools.rs:319`/`352`) — canonical names, no change.
+- Reviewers / specialists — canonical read-only subset (`read_only_tool_defs`, `tools.rs:179`).
+- Gates, plan, audit, sandbox.
 
 ---
 
@@ -198,11 +222,15 @@ onto ops that already exist.
 
 - **Every dialect is a surface to validate.** The bench (`ROADMAP_tool_dialect_bench.md`) is the
   eval; don't add a dialect you can't measure. The gate ledger is the real-world cross-check.
-- **`ToolDef` needs an optional native marker for the Anthropic built-in arm.** Today `ToolDef` is
-  `{name, description, input_schema}` (`llm.rs:84`). Built-in types are schema-less and serialize as
-  `{"type": "text_editor_20250728", "name": "..."}`. Either add an optional `native_type` field that
-  `anthropic_turn_stream` honors, or take the mimic path (custom tools shaped like str_replace) and
-  avoid the transport change entirely. Decide via the bench.
+- **Anthropic native payload format (finding #6).** When `dialect.advertise()` emits a built-in
+  type it must serialize as `{"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"}`
+  / `{"type": "bash_20250124", "name": "bash"}` with **no `input_schema`** — the API rejects a custom
+  schema on a native type. Fork to settle via the bench: native built-in types (max RL fidelity,
+  Anthropic-transport-only) vs ordinary custom tools shaped like str_replace (portable, slightly less
+  native).
+- **Provider envelope and dialect are separate axes.** Transport = wire envelope (which
+  `*_turn_stream` runs); dialect = tool vocabulary. A Gemini coder on `openai_compat` can still pick
+  `Generic`. Both resolve at the boundary; don't conflate them.
 - **The toolbox does NOT fix the transport bugs.** Gemini's dropped `thought_signature` (#6) and the
   google-branch flatten (#5, `llm.rs:1166`) are *transport* problems — a Gemini coder still runs
   through `openai_compat`. The dialect split *contains* them ("transport for family X needs work")
@@ -210,8 +238,6 @@ onto ops that already exist.
 - **Mixed surface for Anthropic.** Native text_editor/bash for edits+shell, Anvil tools for
   nav/search — make sure the prompt addendum describes the combined set coherently so the model
   isn't told to `apply_patch` in one breath and `str_replace` in the next.
-- **Display correctness.** Normalize before `summarize_args`/`result_summary` or the transcript
-  shows raw native names the helpers don't recognize.
 - **Don't over-fork.** Three dialects is the v1 ceiling. Resist a per-model dialect explosion;
   Generic should absorb the long tail, with tuned dialects only where the data earns one.
 

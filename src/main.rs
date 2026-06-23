@@ -16,6 +16,7 @@
 mod agent;
 mod cli;
 mod config;
+mod git;
 mod llm;
 mod modelsdev;
 mod phase;

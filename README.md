@@ -122,6 +122,8 @@ Then just type to chat with your coder. It works directly in the project directo
 
 > **Tool-calling matters.** The coder drives itself through tool calls, so it needs a model that supports tool/function calling. Frontier hosted models (Claude, GPT, Grok, Gemini) all do; many small local models don't. Anvil reads each model's capabilities from [models.dev](https://models.dev) and **warns you at startup** if your coder model can't do tool calls.
 
+> **Git is required — and Anvil sets it up for you.** Every review gate works by diffing git (a phase review is `git diff <base>..worktree`; `/review` diffs the tree), so a project must be a git repo with a baseline commit. The first time Anvil opens a project that isn't one, it runs `git init`, adds `.anvil/` to `.gitignore`, and makes a baseline commit — then tells you. The coder commits its own work as it completes each phase, so every review sees a clean, isolated diff. (If `git` isn't installed, Anvil says so at startup — install it and restart.)
+
 ---
 
 ## The Workflow

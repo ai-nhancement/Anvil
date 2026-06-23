@@ -111,6 +111,8 @@ Anvil adds just enough structure to stop drift, at exactly TWO human gates:\n\
 1. PLAN: discuss the work with the user, then write the plan yourself to plan.md (phases ## P0 — Name, each with a goal, 3–8 actions, a deliverable, and 2–5 acceptance criteria). When the user is happy they run /lock-plan, which drives a SEQUENTIAL review loop: reviewer R1 critiques plan.md → you are asked to apply R1's fixes to plan.md → the user reviews and continues → reviewer R2 critiques the revised plan → you apply R2's fixes → you summarize → the user runs /accept-plan. When Anvil hands you a round's findings, edit plan.md to address the real issues and then STOP (don't summarize until asked).\n\
 2. PHASES: implement the current phase directly (write code + tests, run them). When it's done the user runs /accept-phase, which FIRST asks you to write a review briefing to REVIEW_<id>_BRIEF.md (what you built and WHY, design decisions, test coverage, and anything intentionally deferred — the reviewers read this alongside the diff so they have intent, not just the patch), THEN drives the same sequential loop: R1 → you apply fixes to the code → (user continues) → R2 → you apply fixes → you summarize → the user runs /ship-phase. R2 deliberately re-reviews after your R1 fixes, so it can catch bugs those fixes introduced.\n\
 \n\
+GIT IS THE SOURCE OF TRUTH FOR REVIEWS. This project is a git repository, and the review gates work by diffing git (a phase review is the git diff of your work; /review diffs the tree). So COMMIT your work with git (via run_command: `git add -A` then `git commit -m \"…\"`) as you finish each phase — and ideally at meaningful checkpoints within it — so every review sees a clean, self-contained diff and phases stay isolated. Write clear, conventional commit messages (e.g. `feat(P1): …`). Don't leave a finished phase uncommitted: uncommitted work still appears in the diff, but committing per phase is what keeps each phase's review focused on just that phase. Never use `git reset --hard`, force-push, or other history-destroying commands unless the user explicitly asks.\n\
+\n\
 Outside those two gates, just collaborate normally — answer questions, explore, refactor, debug — using your tools. Don't fake a gate or claim a review happened; only the /lock-plan and /accept-phase commands trigger the reviewers. When asked to address a round's findings, fix the real ones and skip spurious ones — don't expand scope. Be precise, skeptical of scope creep, and surface risks early.\n\
 \n\
 PROJECT CONTEXT FILES you maintain with your write_file/edit_file tools (all plain, user-visible files — no hidden state):\n\
@@ -761,6 +763,9 @@ pub fn run_ui(root: &Path) -> Result<()> {
             "Working in {}. The coder reads, edits, and runs the project directly — just tell it what to build.",
             app.root.display()
         ));
+        // The review gates diff git, so make sure this project actually is a git repo
+        // with a baseline before any work starts (resolves the non-git hole on boot).
+        app.bootstrap_git_repo();
         // Continuity: if a prior session was persisted for this project, show a
         // short transcript tail so the chat doesn't look blank. The agent itself
         // reloads the full bounded history when it's first used this run.
@@ -840,6 +845,9 @@ struct App {
     last_max_scroll: u16, // cached from the last chat render: max scroll offset (in wrapped rows) that still shows content
     should_quit: bool,
     first_run: bool,
+    /// One-shot guard so the git bootstrap (ensure repo + baseline commit) runs at
+    /// most once per session, whether triggered at boot or right after setup.
+    git_bootstrapped: bool,
     status_line: String,
 
     // For real LLM chat (phase 2+)
@@ -970,6 +978,7 @@ impl App {
             last_max_scroll: 0,
             should_quit: false,
             first_run: false,
+            git_bootstrapped: false,
             status_line: String::new(),
             runtime,
             llm: LlmClient::new(),
@@ -3415,6 +3424,20 @@ impl App {
     /// the high-level WorkflowStage. The fine-grained sequential gate (/lock-plan and /accept-phase, each
     /// running R1 → coder fix → R2 → coder fix → summary) is enforced by command handlers + chat + file presence.
     /// Source of truth remains the REVIEW_* and plan.md files at repo root.
+    /// Ensure the project is a git repo with a baseline commit (once per session).
+    /// Anvil's review gates diff git, so a non-git folder silently produces empty
+    /// reviews — this resolves it on first run and tells the user what happened.
+    fn bootstrap_git_repo(&mut self) {
+        if self.git_bootstrapped {
+            return;
+        }
+        self.git_bootstrapped = true;
+        let outcome = crate::git::ensure_repo_ready(&self.root);
+        if let Some(msg) = crate::git::bootstrap_message(&outcome) {
+            self.push_system(&msg);
+        }
+    }
+
     fn reconcile_stage_from_disk(&mut self) {
         if !self.is_configured() {
             self.stage = WorkflowStage::Unconfigured;
@@ -5796,6 +5819,11 @@ impl App {
                     self.push_system("Just type to chat with the coder — it reads, edits, and runs the project directly.");
                     self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → fix → /continue → R2 → fix → /continue → summary → /accept-plan. Phase gate: build → /accept-phase (same loop on the diff) → /ship-phase.");
                     self.push_system("This is the lightweight structure that keeps vibe coding from drifting — valuable for beginners and hardcore users alike.");
+                    // A brand-new user just configured — bootstrap git now so their
+                    // first phase/review has a real diff (boot skipped this while
+                    // unconfigured).
+                    crate::agent::ensure_context_files(&self.root);
+                    self.bootstrap_git_repo();
                 }
             }
             self.populate_main_menu();
@@ -6132,6 +6160,8 @@ impl App {
                 self.push_system("Setup complete! Just type to chat with the coder — it reads, edits, and runs the project directly.");
                 self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → fix → /continue → R2 → fix → /continue → summary → /accept-plan. Phase gate: build → /accept-phase (same loop) → /ship-phase.");
                 self.push_system("The workflow is deliberately simple to start yet powerful enough for serious use: structure that prevents drift without killing velocity.");
+                crate::agent::ensure_context_files(&self.root);
+                self.bootstrap_git_repo();
             } else {
                 self.push_system("Configuration wizard finished. Changes saved to anvil.toml (and keyring where used).");
                 self.push_system("You can now chat with the coder and run /plan for the gate.");

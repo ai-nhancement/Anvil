@@ -61,6 +61,13 @@ pub fn cmd_init(root: &Path) -> Result<()> {
         root.display(),
         crate::config::ANVIL_DIR
     );
+
+    // Anvil's review gates diff git, so the project must be a git repo with a baseline
+    // commit. Resolve it here too (mirrors the TUI's first-run bootstrap).
+    if let Some(msg) = crate::git::bootstrap_message(&crate::git::ensure_repo_ready(root)) {
+        println!("  {}", msg);
+    }
+
     match (&global, has_global) {
         (Some(p), true) => {
             println!("  Using your shared global config: {}", p.display());

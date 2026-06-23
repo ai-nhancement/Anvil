@@ -839,6 +839,60 @@ pub fn run_phase_r2_diff(root: &Path, id: &str) -> Result<String> {
 // follow the same REVIEW_<slug>_{BRIEF,R1,R2}.md convention, keyed by a slug so
 // repeated additions don't clobber each other.
 
+/// Whether an ad-hoc `/review` actually has something to look at — so the caller can
+/// refuse *up front* with a clear message rather than spending a whole reviewer turn
+/// on an empty diff (which reviewers reasonably misread as "the work doesn't exist").
+pub enum AdditionReviewReadiness {
+    /// Not a git work tree, or `git` isn't installed / on PATH. `/review` builds its
+    /// diff entirely from git, so it can't review anything here.
+    NoGit,
+    /// A git repo, but nothing to review: clean tree, nothing untracked, and no
+    /// recent commit to fall back to.
+    NothingToReview,
+    /// There are changes (uncommitted, untracked, or a recent commit) to review.
+    Ready,
+}
+
+/// Decide whether `/review` can run in `root` (see [`AdditionReviewReadiness`]).
+/// Mirrors what [`capture_addition_diff`] would find, but cheaply and without
+/// building the full diff text.
+pub fn addition_review_readiness(root: &Path) -> AdditionReviewReadiness {
+    // Is this a git work tree Anvil can actually see? Covers both "not a repo" and
+    // "git unavailable" — the exact case that produced an empty, misleading review.
+    let is_repo = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !is_repo {
+        return AdditionReviewReadiness::NoGit;
+    }
+    let git = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let nonempty = |s: Option<String>| s.map(|d| !d.trim().is_empty()).unwrap_or(false);
+    let has_uncommitted = nonempty(git(&diff_args(&["diff", "HEAD"])));
+    let has_recent_commit = nonempty(git(&diff_args(&["diff", "HEAD~1", "HEAD"])));
+    let has_untracked = git(&["ls-files", "--others", "--exclude-standard"])
+        .map(|l| {
+            l.lines()
+                .any(|n| !n.trim().is_empty() && !is_review_noise(n.trim()))
+        })
+        .unwrap_or(false);
+    if has_uncommitted || has_untracked || has_recent_commit {
+        AdditionReviewReadiness::Ready
+    } else {
+        AdditionReviewReadiness::NothingToReview
+    }
+}
+
 /// Path to the coder-written briefing for an addition review (REVIEW_<slug>_BRIEF.md).
 pub fn addition_brief_path(root: &Path, slug: &str) -> std::path::PathBuf {
     reviews_dir(root).join(format!("REVIEW_{}_BRIEF.md", slug))
@@ -1375,6 +1429,62 @@ mod tests {
         // Existing REVIEW_<slug>_R1.md forces a -2 suffix so reviews aren't overwritten.
         std::fs::write(root.join("REVIEW_my-addition_R1.md"), "r1").unwrap();
         assert_eq!(addition_slug(root, "My Addition"), "my-addition-2");
+    }
+
+    #[test]
+    fn addition_readiness_distinguishes_no_git_clean_and_changes() {
+        // A non-git folder → NoGit (the case that produced the empty, misleading review).
+        let nogit = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            addition_review_readiness(nogit.path()),
+            AdditionReviewReadiness::NoGit
+        ));
+
+        // The git-dependent half is skipped where git isn't available.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        // Fresh repo, nothing changed, no commit → NothingToReview.
+        assert!(matches!(
+            addition_review_readiness(root),
+            AdditionReviewReadiness::NothingToReview
+        ));
+        // An untracked source file is real work to review → Ready.
+        std::fs::write(root.join("game.js"), "export const x = 1;\n").unwrap();
+        assert!(matches!(
+            addition_review_readiness(root),
+            AdditionReviewReadiness::Ready
+        ));
+        // …but a stray REVIEW_*.md alone is review noise, not reviewable work.
+        let only_noise = tempfile::tempdir().unwrap();
+        let nroot = only_noise.path();
+        let ngit = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(nroot)
+                .output()
+                .unwrap()
+        };
+        ngit(&["init", "-q"]);
+        std::fs::write(nroot.join("REVIEW_x_R1.md"), "findings").unwrap();
+        assert!(matches!(
+            addition_review_readiness(nroot),
+            AdditionReviewReadiness::NothingToReview
+        ));
     }
 
     #[test]

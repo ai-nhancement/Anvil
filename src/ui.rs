@@ -2119,6 +2119,26 @@ impl App {
                     t => label_parts.push(t),
                 }
             }
+            // Pre-flight: don't spend a reviewer turn on an empty diff. `/review` is
+            // git-based, so a non-git folder (or a clean tree) has nothing to review —
+            // say so clearly instead of running a misleading "working tree is clean".
+            match crate::phase::addition_review_readiness(&self.root) {
+                crate::phase::AdditionReviewReadiness::NoGit => {
+                    self.push_system(
+                        "/review reviews a git diff, but this folder isn't a git repository (or `git` isn't installed / on PATH), so there's nothing to diff. \
+                         Initialize it — `git init`, then commit a baseline — and from then on Anvil can review your changes. (The phase/plan gates are git-based too.)",
+                    );
+                    return;
+                }
+                crate::phase::AdditionReviewReadiness::NothingToReview => {
+                    self.push_system(
+                        "Nothing to review — the working tree is clean and there's no recent commit. \
+                         Make the change you want reviewed (or commit it), then run /review.",
+                    );
+                    return;
+                }
+                crate::phase::AdditionReviewReadiness::Ready => {}
+            }
             let label = label_parts.join(" ");
             let slug = crate::phase::addition_slug(&self.root, &label);
             self.start_gate_flow(GateArtifact::Addition { slug, deep });

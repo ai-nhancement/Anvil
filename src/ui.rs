@@ -2060,7 +2060,12 @@ impl App {
                 return;
             }
             match crate::phase::run_phase_accept(&self.root, &id) {
-                Ok(()) => self.push_system(&format!("✓ Quenched — phase {} shipped (R1 + R2 reviewed and accepted). Start the next phase with /phase-start, or just tell the coder to continue.", id)),
+                Ok(None) => self.push_system(&format!("✓ Quenched — phase {} shipped (R1 + R2 reviewed and accepted). Start the next phase with /phase-start, or just tell the coder to continue.", id)),
+                Ok(Some(c)) => self.push_system(&format!(
+                    "✓ Quenched — phase {} shipped, and it was the LAST phase. Plan closed: {} → {}. \
+                     All phases cleared. Discuss the next piece of work and have the coder write a new <feature>_plan.md, then /lock-plan.",
+                    id, c.old_name, c.new_name
+                )),
                 Err(e) => self.push_system(&format!("ship phase: {} (run /accept-phase {} first to produce the reviews)", e, id)),
             }
             self.reconcile_stage_from_disk();

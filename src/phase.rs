@@ -29,7 +29,19 @@ use colored::Colorize;
 
 use crate::config::{load_config, load_local_env};
 use crate::llm::LlmClient;
-use crate::state::{active_plan_path, load_state, reviews_dir, save_state};
+use crate::state::{
+    active_plan_name, active_plan_path, load_state, reviews_dir, save_state, ProjectState,
+};
+
+/// Returned by [`run_phase_accept`] when shipping the phase also closed the whole
+/// plan — i.e. it was the last unshipped phase. Carries the rename so callers can
+/// tell the user (and the coder) the plan is done and a new one can start.
+pub struct ClosedPlan {
+    /// The active plan filename before closure (e.g. `frontpage_plan.md`).
+    pub old_name: String,
+    /// The retired filename it was renamed to (e.g. `frontpage_plan_closed.md`).
+    pub new_name: String,
+}
 
 pub fn run_phase_list(root: &Path) -> Result<()> {
     let state = load_state(root);
@@ -313,7 +325,12 @@ fn run_phase_review_one(
 
 /// Accept (ship) a phase after its R1+R2 reviews exist (state only — no stdout,
 /// so it's safe from the TUI). Errors if both review files aren't present.
-pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
+///
+/// Returns `Some(ClosedPlan)` when this was the *last* unshipped phase: shipping it
+/// closes the whole plan (clears the phase tracking and retires the plan file). The
+/// caller should report the closure to the user. Returns `None` for a normal phase
+/// ship that leaves later phases still to build.
+pub fn run_phase_accept(root: &Path, id: &str) -> Result<Option<ClosedPlan>> {
     load_local_env(root);
     let id = &normalize_phase_id(id);
     let reviews = reviews_dir(root);
@@ -346,8 +363,118 @@ pub fn run_phase_accept(root: &Path, id: &str) -> Result<()> {
                                 // "accepted" stage means editing plan.md here won't re-trigger the plan gate.
     annotate_phase_closed(root, id, state.phase_base.as_deref());
     state.phase_base = git_head_sha(root); // the next phase's work starts from here
+
+    // If every phase declared in the plan is now shipped, this was the final phase:
+    // close the plan. `annotate_phase_closed` above has already written this phase's
+    // CLOSED note, so the plan body is current before we append the plan-level marker.
+    let plan = fs::read_to_string(active_plan_path(root)).unwrap_or_default();
+    let ids = plan_phase_ids(&plan);
+    let all_shipped = !ids.is_empty()
+        && ids
+            .iter()
+            .all(|p| state.shipped_phases.iter().any(|s| s == p));
+    let closed = if all_shipped {
+        close_plan(root, &mut state)
+    } else {
+        None
+    };
+
     save_state(root, &state)?;
-    Ok(())
+    Ok(closed)
+}
+
+/// Close the plan once its last phase ships: (a) append an internal marker to the
+/// plan body recording closure, (b) retire the file by renaming `<stem>.md` →
+/// `<stem>_closed.md`, (c) archive the generic plan-level reviews so a *future*
+/// plan in this repo isn't mistaken as already-reviewed, and (d) clear all phase
+/// tracking + the plan pointer so a new plan can be started in the same project.
+///
+/// Mutates `state` (the caller persists it); filesystem steps are best-effort, so a
+/// failed rename still resets state and lets the project move on. Returns the rename
+/// for the caller to report, or `None` if there was no plan file to close.
+fn close_plan(root: &Path, state: &mut ProjectState) -> Option<ClosedPlan> {
+    let old_name = active_plan_name(root);
+    let old_path = root.join(&old_name);
+    if !old_path.exists() {
+        return None;
+    }
+
+    // (a) Append an internal marker so the plan body itself records the closure.
+    //     Idempotent: skip if a previous close already stamped it.
+    if let Ok(plan) = fs::read_to_string(&old_path) {
+        if !plan.contains("PLAN CLOSED") {
+            let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            let mut updated = plan;
+            if !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(&format!(
+                "\n---\n\n> **PLAN CLOSED {date} — every phase shipped (each R1 + R2 reviewed and accepted). \
+                 This plan is complete. Start a new `<feature>_plan.md` if there's more work in this project.**\n"
+            ));
+            let _ = fs::write(&old_path, updated);
+        }
+    }
+
+    // (b) Retire the file: `<stem>.md` → `<stem>_closed.md` (plan.md → plan_closed.md,
+    //     frontpage_plan.md → frontpage_plan_closed.md). On a name collision, suffix a
+    //     counter so an older closed plan is never clobbered.
+    let new_name = closed_plan_name(root, &old_name);
+    if fs::rename(&old_path, root.join(&new_name)).is_err() {
+        // Rename failed (e.g. the file is locked). Leave it in place but still reset
+        // state below — the marker is written and the project shouldn't be wedged.
+        return Some(ClosedPlan {
+            old_name: old_name.clone(),
+            new_name: old_name,
+        });
+    }
+
+    // (c) Retire the plan-level reviews. They use generic names (REVIEW_plan_R*.md),
+    //     so leaving them at root would make the next plan look already-reviewed (the
+    //     stage gate keys off their presence). Move them beside the archived plan.
+    retire_plan_reviews(root, &new_name);
+
+    // (d) Clear all phase tracking and the plan pointer. With `active_plan` cleared the
+    //     stage falls back to TALK and a coder-written `<feature>_plan.md` auto-adopts,
+    //     reopening planning for the next piece of work in this same repo.
+    state.current_phase = None;
+    state.shipped_phases.clear();
+    state.phase_base = None;
+    state.accepted_plan_hash = None;
+    state.active_plan = None;
+
+    Some(ClosedPlan { old_name, new_name })
+}
+
+/// `<stem>.md` → `<stem>_closed.md`, picking `<stem>_closed_2.md`, `_3`, … if a
+/// closed plan with that name already exists so we never overwrite one.
+fn closed_plan_name(root: &Path, name: &str) -> String {
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    let base = format!("{stem}_closed");
+    let mut candidate = format!("{base}.md");
+    let mut n = 2;
+    while root.join(&candidate).exists() {
+        candidate = format!("{base}_{n}.md");
+        n += 1;
+    }
+    candidate
+}
+
+/// Move the generic plan-level review docs (REVIEW_plan_R1.md / R2.md) into
+/// `.anvil/plans/archive/<closed-stem>/` so they're preserved with the closed plan
+/// but no longer sit at the repo root where the stage gate would treat the *next*
+/// plan as already reviewed. Best-effort; per-phase REVIEW_Px_*.md stay at root
+/// (the closed plan references them by name in its CLOSED annotations).
+fn retire_plan_reviews(root: &Path, closed_name: &str) {
+    let stem = closed_name.strip_suffix(".md").unwrap_or(closed_name);
+    let archive = root.join(".anvil").join("plans").join("archive").join(stem);
+    for f in ["REVIEW_plan_R1.md", "REVIEW_plan_R2.md"] {
+        let src = root.join(f);
+        if src.exists() {
+            let _ = fs::create_dir_all(&archive);
+            let _ = fs::rename(&src, archive.join(f));
+        }
+    }
 }
 
 /// Append a closure record for `id` into its `plan.md` section: date, that it
@@ -932,9 +1059,11 @@ mod tests {
     fn phase_accept_requires_both_reviews_then_ships_idempotently() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
+        // Two phases so shipping P0 does NOT close the plan (P1 is still pending) —
+        // keeps this test focused on the ship + idempotency invariants.
         std::fs::write(
             root.join("plan.md"),
-            "# Plan\n\n## P0 — Bootstrap\ngoal: x\n",
+            "# Plan\n\n## P0 — Bootstrap\ngoal: x\n\n## P1 — Next\ngoal: y\n",
         )
         .unwrap();
 
@@ -949,7 +1078,8 @@ mod tests {
         st.current_phase = Some("P0".to_string());
         save_state(root, &st).unwrap();
 
-        run_phase_accept(root, "P0").unwrap();
+        // Not the last phase → no closure reported.
+        assert!(run_phase_accept(root, "P0").unwrap().is_none());
         let after = load_state(root);
         assert!(after.shipped_phases.iter().any(|p| p == "P0"));
         assert_eq!(after.current_phase, None);
@@ -964,5 +1094,71 @@ mod tests {
         );
         let plan = std::fs::read_to_string(root.join("plan.md")).unwrap();
         assert_eq!(plan.matches("P0 passed R1 + R2").count(), 1, "{plan}");
+    }
+
+    #[test]
+    fn shipping_last_phase_closes_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A feature-named plan with two phases; P0 already shipped, P1 is the last.
+        std::fs::write(
+            root.join("frontpage_plan.md"),
+            "# Plan\n\n## P0 — Bootstrap\ngoal: x\n\n## P1 — Finish\ngoal: y\n",
+        )
+        .unwrap();
+        let mut st = load_state(root);
+        st.active_plan = Some("frontpage_plan.md".to_string());
+        st.accepted_plan_hash = Some("hash".to_string());
+        st.shipped_phases = vec!["P0".to_string()];
+        st.current_phase = Some("P1".to_string());
+        save_state(root, &st).unwrap();
+
+        // Plan-level reviews exist at root (would taint the next plan if left behind).
+        std::fs::write(root.join("REVIEW_plan_R1.md"), "r1").unwrap();
+        std::fs::write(root.join("REVIEW_plan_R2.md"), "r2").unwrap();
+        // P1's phase reviews so the accept gate passes.
+        std::fs::write(root.join("REVIEW_P1_R1.md"), "ok").unwrap();
+        std::fs::write(root.join("REVIEW_P1_R2.md"), "ok").unwrap();
+
+        // Shipping the final phase closes the plan and reports the rename.
+        let closed = run_phase_accept(root, "P1").unwrap().expect("plan closed");
+        assert_eq!(closed.old_name, "frontpage_plan.md");
+        assert_eq!(closed.new_name, "frontpage_plan_closed.md");
+
+        // (a) Internal marker written into the (now renamed) plan body.
+        let body = std::fs::read_to_string(root.join("frontpage_plan_closed.md")).unwrap();
+        assert!(body.contains("PLAN CLOSED"), "{body}");
+        // The final phase's own CLOSED annotation is still present too.
+        assert!(body.contains("P1 passed R1 + R2"), "{body}");
+        // (b) The original filename no longer exists.
+        assert!(!root.join("frontpage_plan.md").exists());
+
+        // (c) Generic plan reviews were moved out of root, into the archive.
+        assert!(!root.join("REVIEW_plan_R1.md").exists());
+        assert!(!root.join("REVIEW_plan_R2.md").exists());
+        let archived = root.join(".anvil/plans/archive/frontpage_plan_closed/REVIEW_plan_R1.md");
+        assert!(archived.exists(), "expected {}", archived.display());
+
+        // (d) All phase tracking + plan pointer cleared, reopening planning.
+        let after = load_state(root);
+        assert!(after.shipped_phases.is_empty());
+        assert_eq!(after.current_phase, None);
+        assert_eq!(after.phase_base, None);
+        assert_eq!(after.accepted_plan_hash, None);
+        assert_eq!(after.active_plan, None);
+    }
+
+    #[test]
+    fn closed_plan_name_handles_default_and_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(closed_plan_name(root, "plan.md"), "plan_closed.md");
+        assert_eq!(
+            closed_plan_name(root, "frontpage_plan.md"),
+            "frontpage_plan_closed.md"
+        );
+        // A pre-existing closed plan must not be clobbered.
+        std::fs::write(root.join("plan_closed.md"), "old").unwrap();
+        assert_eq!(closed_plan_name(root, "plan.md"), "plan_closed_2.md");
     }
 }

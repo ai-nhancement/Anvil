@@ -36,6 +36,15 @@ pub fn snapshot(root: &Path) -> String {
             "Plan file: {plan_name} (write and read the plan here; its reviews and phases use this file)\n"
         ));
     } else {
+        // No active plan. If a plan was recently closed (all its phases shipped), say
+        // so — the work is done; the coder shouldn't try to resume it, but CAN start a
+        // fresh plan for the next piece of work in this same repo.
+        if let Some(closed) = most_recent_closed_plan(root) {
+            s.push_str(&format!(
+                "Previous plan: {closed} — CLOSED (every phase was shipped and accepted). That work \
+                 is complete; do NOT reopen or resume it. If the user wants more, treat it as new work.\n"
+            ));
+        }
         s.push_str(
             "Plan file: not chosen yet. When the user asks you to write the plan, pick a short \
              descriptive name like <feature>_plan.md (e.g. trusteazy_plan.md) and write the full \
@@ -87,6 +96,36 @@ pub fn snapshot(root: &Path) -> String {
 
     s.push_str("--- END REALITY SNAPSHOT ---\n");
     cap(&s, MAX_SNAPSHOT)
+}
+
+/// Newest retired plan at the repo root (a `*_plan_closed.md` from `close_plan`),
+/// if any. Used to tell the coder the previous plan shipped without keeping it as
+/// the active plan. Matches `plan_closed.md` and `<feature>_plan_closed.md` (plus
+/// the `_closed_2` collision variants) — never a `REVIEW_*` doc.
+fn most_recent_closed_plan(root: &Path) -> Option<String> {
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let is_closed_plan =
+            name.ends_with(".md") && name.contains("plan") && name.contains("_closed");
+        if !is_closed_plan {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+            newest = Some((mtime, name.to_string()));
+        }
+    }
+    newest.map(|(_, n)| n)
 }
 
 /// Derive the workflow stage from disk artifacts (same truth the TUI header uses).

@@ -196,12 +196,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             PhaseCmd::Review { id } => phase::run_phase_review(&cli.project, &id),
             PhaseCmd::Accept { id, note } => {
-                phase::run_phase_accept(&cli.project, &id)?;
+                let closed = phase::run_phase_accept(&cli.project, &id)?;
                 println!("Phase {id} accepted (R1 + R2 reviewed).");
                 if let Some(n) = note {
                     println!("  Note recorded: {n}");
                 }
-                println!("\nMove to the next phase with `anvil phase start <next-id>`.");
+                if let Some(c) = closed {
+                    println!(
+                        "\nThat was the final phase — plan closed: {} → {}. \
+                         Start a new <feature>_plan.md for the next piece of work.",
+                        c.old_name, c.new_name
+                    );
+                } else {
+                    println!("\nMove to the next phase with `anvil phase start <next-id>`.");
+                }
                 Ok(())
             }
             PhaseCmd::List => phase::run_phase_list(&cli.project),

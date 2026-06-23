@@ -5,6 +5,7 @@
 //! automatically the first time Anvil opens a project, so the workflow can't silently
 //! run on a non-git folder.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -76,8 +77,9 @@ pub fn ensure_repo_ready(root: &Path) -> GitBootstrap {
     }
 
     // We're establishing the baseline (fresh init, or an existing repo with no
-    // commits). Keep Anvil's own session/state dir out of the committed history first.
-    ensure_anvil_ignored(root);
+    // commits). Seed .gitignore FIRST so the baseline `git add -A` doesn't sweep in
+    // dependencies/build output/secrets (.anvil/, node_modules, target, .env, …).
+    seed_gitignore(root);
 
     if let Err(e) = git_ok(root, &["add", "-A"]) {
         return GitBootstrap::Failed(format!("git add failed: {e}"));
@@ -133,24 +135,94 @@ fn has_identity(root: &Path) -> bool {
     set("user.name") && set("user.email")
 }
 
-/// Add `.anvil/` to `.gitignore` if it isn't already ignored, so Anvil's session
-/// ledger / logs / working-memory don't get committed into the user's project. The
-/// gate artifacts (`plan.md`, `REVIEW_*.md`) live at the repo ROOT and stay tracked.
-fn ensure_anvil_ignored(root: &Path) {
+/// Normalize a `.gitignore` line for set membership: drop comments/blanks, trim, and
+/// strip leading/trailing `/` so `target`, `/target`, and `target/` all compare equal.
+fn normalize_ignore(line: &str) -> String {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('#') {
+        return String::new();
+    }
+    t.trim_start_matches('/').trim_end_matches('/').to_string()
+}
+
+/// Seed `.gitignore` (before the baseline commit) so Anvil's own state, plus the
+/// detected stack's dependency/build dirs and common secret/log files, never land in
+/// the baseline. Only ever APPENDS patterns that aren't already present — it never
+/// rewrites or removes what the project already ignores — and the gate artifacts
+/// (`plan.md`, `REVIEW_*.md`) live at the repo ROOT, so they stay tracked.
+fn seed_gitignore(root: &Path) {
     let gi = root.join(".gitignore");
     let existing = std::fs::read_to_string(&gi).unwrap_or_default();
-    let already = existing.lines().any(|l| {
-        let t = l.trim().trim_start_matches('/').trim_end_matches('/');
-        t == ".anvil"
-    });
-    if already {
-        return;
+    // Patterns already covered (by the file, and accumulated as we add) so we never
+    // duplicate — across the existing file AND between our own groups.
+    let mut have: HashSet<String> = existing
+        .lines()
+        .map(normalize_ignore)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // (section label, patterns). The first few apply to every project; the rest are
+    // gated on a detected manifest so we only seed ignores relevant to this stack.
+    let mut groups: Vec<(&str, Vec<&str>)> = vec![
+        ("Anvil session/state (local only)", vec![".anvil/"]),
+        (
+            "Secrets & local env",
+            vec![".env", ".env.local", ".env.*.local"],
+        ),
+        ("Logs & OS cruft", vec!["*.log", ".DS_Store", "Thumbs.db"]),
+    ];
+    let has = |name: &str| root.join(name).exists();
+    if has("package.json") {
+        groups.push((
+            "Node",
+            vec!["node_modules/", "dist/", "build/", "npm-debug.log*"],
+        ));
     }
+    if has("Cargo.toml") {
+        groups.push(("Rust", vec!["/target/"]));
+    }
+    if has("pyproject.toml") || has("requirements.txt") || has("setup.py") {
+        groups.push((
+            "Python",
+            vec!["__pycache__/", "*.pyc", ".venv/", "venv/", ".pytest_cache/"],
+        ));
+    }
+    if has("go.mod") {
+        groups.push(("Go", vec!["/bin/"]));
+    }
+    if has("pom.xml") || has("build.gradle") || has("build.gradle.kts") {
+        groups.push(("JVM", vec!["target/", "build/", ".gradle/"]));
+    }
+
+    let mut block = String::new();
+    for (label, patterns) in groups {
+        let mut missing: Vec<&str> = Vec::new();
+        for p in patterns {
+            let n = normalize_ignore(p);
+            if n.is_empty() || have.contains(&n) {
+                continue;
+            }
+            have.insert(n);
+            missing.push(p);
+        }
+        if missing.is_empty() {
+            continue;
+        }
+        block.push_str(&format!("\n# {label} (added by Anvil)\n"));
+        for p in missing {
+            block.push_str(p);
+            block.push('\n');
+        }
+    }
+    if block.is_empty() {
+        return; // everything relevant is already ignored — leave the file untouched
+    }
+
     let mut out = existing;
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str("\n# Anvil session/state (local only)\n.anvil/\n");
+    out.push_str(&block);
     let _ = std::fs::write(&gi, out);
 }
 
@@ -159,14 +231,17 @@ pub fn bootstrap_message(outcome: &GitBootstrap) -> Option<String> {
     match outcome {
         GitBootstrap::AlreadyReady => None,
         GitBootstrap::InitializedWithBaseline => Some(
-            "This wasn't a git repository — Anvil ran `git init` and committed a baseline, so the \
-             review gates (phase diffs and /review) can diff your changes. Anvil's own state \
-             (.anvil/) is gitignored; your plan.md and REVIEW_* files stay tracked."
+            "This wasn't a git repository — Anvil ran `git init`, seeded a `.gitignore` (your stack's \
+             build/dependency dirs, common secrets like `.env`, and Anvil's own `.anvil/`), and \
+             committed a baseline, so the review gates (phase diffs and /review) can diff your \
+             changes. Your plan.md and REVIEW_* files stay tracked. Review the `.gitignore` if you \
+             keep anything unusual."
                 .to_string(),
         ),
         GitBootstrap::BaselineCommitted => Some(
-            "This repository had no commits — Anvil made a baseline commit so the review gates have \
-             something to diff your work against."
+            "This repository had no commits — Anvil seeded a `.gitignore` (build/dependency dirs, \
+             secrets, and `.anvil/`) and made a baseline commit so the review gates have something \
+             to diff your work against."
                 .to_string(),
         ),
         GitBootstrap::InitializedEmpty => Some(
@@ -233,6 +308,35 @@ mod tests {
         assert!(dir.path().join(".git").exists());
         assert!(has_head(dir.path()), "baseline commit exists");
         assert!(dir.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn seed_gitignore_detects_stack_and_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A Node project, with a partial .gitignore the user already wrote.
+        std::fs::write(root.join("package.json"), "{}\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "node_modules/\n# mine\ncustom/\n").unwrap();
+
+        seed_gitignore(root);
+        let gi = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+
+        // Stack-specific + universal ignores were added.
+        assert!(gi.contains(".anvil/"), "{gi}");
+        assert!(gi.contains(".env"), "{gi}");
+        assert!(gi.contains("dist/"), "{gi}");
+        // The user's existing lines are preserved...
+        assert!(gi.contains("custom/"), "{gi}");
+        // ...and an already-present pattern is NOT duplicated.
+        assert_eq!(gi.matches("node_modules/").count(), 1, "{gi}");
+
+        // A Rust project gets /target/, not Node's node_modules.
+        let rdir = tempfile::tempdir().unwrap();
+        std::fs::write(rdir.path().join("Cargo.toml"), "[package]\n").unwrap();
+        seed_gitignore(rdir.path());
+        let rgi = std::fs::read_to_string(rdir.path().join(".gitignore")).unwrap();
+        assert!(rgi.contains("/target/"), "{rgi}");
+        assert!(!rgi.contains("node_modules"), "{rgi}");
     }
 
     #[test]

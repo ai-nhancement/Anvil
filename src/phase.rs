@@ -667,39 +667,7 @@ fn capture_git_diff(root: &Path) -> String {
     // New (untracked) files never appear in `git diff` — but a phase is often
     // implemented as brand-new files, so include their *content* (not just names),
     // or the reviewer would think nothing was done. Skip review/session artifacts.
-    if let Some(list) = git(&["ls-files", "--others", "--exclude-standard"]) {
-        for name in list
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !is_review_noise(l.trim()))
-            .take(40)
-        {
-            let is_binary = Path::new(name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|ext| {
-                    crate::tools::SKIP_EXTS
-                        .iter()
-                        .any(|x| x.eq_ignore_ascii_case(ext))
-                })
-                .unwrap_or(false);
-            if is_binary {
-                diff.push_str(&format!("\n--- New file (binary, not shown): {name} ---\n"));
-                continue;
-            }
-            match fs::read_to_string(root.join(name)) {
-                Ok(content) => {
-                    diff.push_str(&format!("\n--- New file: {name} ---\n"));
-                    let capped: String = content.chars().take(20_000).collect();
-                    diff.push_str(&capped);
-                    if content.len() > capped.len() {
-                        diff.push_str("\n… [new file truncated]");
-                    }
-                    diff.push('\n');
-                }
-                Err(_) => diff.push_str(&format!("\n--- New file (unreadable): {name} ---\n")),
-            }
-        }
-    }
+    append_untracked_files(root, &mut diff);
     if diff.trim().is_empty() {
         return "(no changes since the phase started — nothing to review yet; the coder may not have implemented this phase)".to_string();
     }
@@ -708,6 +676,54 @@ fn capture_git_diff(root: &Path) -> String {
         diff.push_str("\n... [diff truncated for review]");
     }
     diff
+}
+
+/// Append the *content* of untracked (new) files to `diff` — git diff never shows
+/// them, but new code is real work the reviewer must see. Skips review/session
+/// noise (REVIEW_*.md, .anvil/) and binaries (shown by name only). Shared by the
+/// phase and ad-hoc addition diff capture.
+fn append_untracked_files(root: &Path, diff: &mut String) {
+    let list = std::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let Some(list) = list else {
+        return;
+    };
+    for name in list
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !is_review_noise(l.trim()))
+        .take(40)
+    {
+        let is_binary = Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|ext| {
+                crate::tools::SKIP_EXTS
+                    .iter()
+                    .any(|x| x.eq_ignore_ascii_case(ext))
+            })
+            .unwrap_or(false);
+        if is_binary {
+            diff.push_str(&format!("\n--- New file (binary, not shown): {name} ---\n"));
+            continue;
+        }
+        match fs::read_to_string(root.join(name)) {
+            Ok(content) => {
+                diff.push_str(&format!("\n--- New file: {name} ---\n"));
+                let capped: String = content.chars().take(20_000).collect();
+                diff.push_str(&capped);
+                if content.len() > capped.len() {
+                    diff.push_str("\n… [new file truncated]");
+                }
+                diff.push('\n');
+            }
+            Err(_) => diff.push_str(&format!("\n--- New file (unreadable): {name} ---\n")),
+        }
+    }
 }
 
 /// Path to the coder-written review briefing for a phase (what was built + WHY).
@@ -811,6 +827,196 @@ pub fn run_phase_r2_diff(root: &Path, id: &str) -> Result<String> {
         .as_deref()
         .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
     crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", root, &id)
+}
+
+// ─── Ad-hoc additions (the `/review` command) ───────────────────────────────
+//
+// Not every change deserves a whole plan, but every change should be reviewable.
+// `/review [--deep] [label]` runs a *lighter* version of the phase gate on whatever
+// is currently changed in the tree: the coder writes a short briefing, then R1
+// critiques the diff (the cross-vendor second opinion R2 is opt-in via `--deep`).
+// There's no ship/accept step — the work is already in the working tree. Artifacts
+// follow the same REVIEW_<slug>_{BRIEF,R1,R2}.md convention, keyed by a slug so
+// repeated additions don't clobber each other.
+
+/// Path to the coder-written briefing for an addition review (REVIEW_<slug>_BRIEF.md).
+pub fn addition_brief_path(root: &Path, slug: &str) -> std::path::PathBuf {
+    reviews_dir(root).join(format!("REVIEW_{}_BRIEF.md", slug))
+}
+
+/// Lowercase, hyphen-separated slug from arbitrary text (alphanumerics kept, every
+/// other run collapsed to a single `-`), trimmed and capped so it's a clean,
+/// filesystem-safe artifact id. Empty if the input has no alphanumerics.
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !out.is_empty() && !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').chars().take(40).collect()
+}
+
+/// The current git branch as a slug, unless it's a default trunk (master/main) or
+/// detached HEAD — those make poor review labels, so the caller falls back instead.
+fn branch_slug(root: &Path) -> Option<String> {
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+    if matches!(branch.as_str(), "" | "master" | "main" | "HEAD") {
+        return None;
+    }
+    let s = slugify(&branch);
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Pick the artifact slug for a `/review`: the user's label (slugified) if given,
+/// else the current feature branch, else "addition". Guarantees uniqueness by
+/// suffixing `-2`, `-3`, … when a REVIEW_<slug>_R1.md already exists, so repeated
+/// reviews are kept side by side rather than overwritten.
+pub fn addition_slug(root: &Path, label: &str) -> String {
+    let mut base = slugify(label);
+    if base.is_empty() {
+        base = branch_slug(root).unwrap_or_else(|| "addition".to_string());
+    }
+    let taken = |s: &str| reviews_dir(root).join(format!("REVIEW_{s}_R1.md")).exists();
+    if !taken(&base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// The instruction given to the coder to write an addition's review briefing before
+/// R1 runs. A lighter cousin of [`briefing_prompt`] — an addition isn't a planned
+/// phase, so there's no plan to cite or scope boundaries to enumerate.
+pub fn addition_briefing_prompt(slug: &str) -> String {
+    format!(
+        "Your recent work is about to be reviewed (an ad-hoc ADDITION, not a planned phase). Before the reviewer looks at it, write a short REVIEW BRIEFING explaining what you changed and WHY — the diff shows what changed, not the intent.\n\n\
+         Write it with your write_file tool to `REVIEW_{slug}_BRIEF.md` (repo root), with these sections:\n\n\
+         # {slug} — Addition Review Briefing\n\
+         ## What Changed\n\
+         Per file/area, the concrete changes. Be specific.\n\n\
+         ## Why\n\
+         The intent and any non-obvious design choices a reviewer might question.\n\n\
+         ## Test Coverage\n\
+         What you ran or added to verify it, with the exact command.\n\n\
+         ## Known Issues / Deferred\n\
+         Anything intentionally left out, so the reviewer doesn't flag it as a defect.\n\n\
+         Base every claim on what you ACTUALLY changed — read the diff if unsure. Keep it concise. Write ONLY the file; don't repeat it in chat."
+    )
+}
+
+/// Capture an ad-hoc addition's change set for review: the uncommitted working tree
+/// (`git diff HEAD` + untracked file contents), falling back to the most recent
+/// commit when the tree is clean. Unlike [`capture_git_diff`] this ignores any
+/// recorded phase base — an addition isn't a phase. Review/session artifacts are
+/// excluded so the reviewer sees only code.
+fn capture_addition_diff(root: &Path) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    // 1) Uncommitted changes (the common "I just made a change, review it" case).
+    let mut diff = git(&diff_args(&["diff", "HEAD"])).unwrap_or_default();
+    // 2) Clean tree → fall back to the most recent commit (the addition was committed).
+    if diff.trim().is_empty() {
+        if let Some(d) = git(&diff_args(&["diff", "HEAD~1", "HEAD"])) {
+            if !d.trim().is_empty() {
+                diff = format!("(working tree clean — showing the most recent commit)\n{d}");
+            }
+        }
+    }
+    append_untracked_files(root, &mut diff);
+    if diff.trim().is_empty() {
+        return "(nothing to review — the working tree is clean and there is no recent commit)"
+            .to_string();
+    }
+    if diff.len() > 120_000 {
+        diff.truncate(120_000);
+        diff.push_str("\n... [diff truncated for review]");
+    }
+    diff
+}
+
+/// Compose the reviewer input for an addition: the coder's briefing (intent) + the
+/// diff (ground truth). No plan is involved; the reviewer is told this is a small,
+/// ad-hoc change so findings stay proportionate.
+fn build_addition_diff_content(root: &Path, slug: &str) -> String {
+    let brief = fs::read_to_string(addition_brief_path(root, slug))
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| {
+            format!(
+                "--- CODER'S REVIEW BRIEFING (what changed and WHY, tests, and anything deferred) ---\n{}\n--- END BRIEFING ---\n\n",
+                crate::reality::cap(&b, 16_000)
+            )
+        })
+        .unwrap_or_else(|| {
+            "(no review briefing was written — review from the diff alone)\n\n".to_string()
+        });
+    let diff = capture_addition_diff(root);
+    format!(
+        "This is an ad-hoc ADDITION review (not a planned phase). Review the change below for \
+         correctness, bugs, risks, and obvious cleanups, verifying against the real files with your \
+         tools. Keep findings proportionate to a small addition.\n\n\
+         {brief}--- GIT DIFF (the addition under review) ---\n{diff}\n"
+    )
+}
+
+/// R1 of an addition: reviewer-a critiques the current diff. Writes REVIEW_<slug>_R1.md.
+pub fn run_addition_r1_diff(root: &Path, slug: &str) -> Result<String> {
+    load_local_env(root);
+    let cfg = load_config(root)?;
+    let client = LlmClient::new();
+    fs::create_dir_all(reviews_dir(root))?;
+    let content = build_addition_diff_content(root, slug);
+    let reviewer_a = cfg
+        .roles
+        .reviewer_a
+        .as_deref()
+        .ok_or_else(|| anyhow!("reviewer-a role not configured. Run `anvil setup`."))?;
+    crate::plan::run_single_review(&client, &cfg, reviewer_a, &content, "R1", root, slug)
+}
+
+/// R2 of an addition (the opt-in `--deep` second opinion): reviewer-b re-critiques
+/// after the R1 fixes. Writes REVIEW_<slug>_R2.md.
+pub fn run_addition_r2_diff(root: &Path, slug: &str) -> Result<String> {
+    load_local_env(root);
+    let cfg = load_config(root)?;
+    let client = LlmClient::new();
+    fs::create_dir_all(reviews_dir(root))?;
+    let content = build_addition_diff_content(root, slug);
+    let reviewer_b = cfg
+        .roles
+        .reviewer_b
+        .as_deref()
+        .ok_or_else(|| anyhow!("reviewer-b role not configured. Run `anvil setup`."))?;
+    crate::plan::run_single_review(&client, &cfg, reviewer_b, &content, "R2", root, slug)
 }
 
 pub(crate) fn extract_phase(plan: &str, id: &str) -> Option<String> {
@@ -1146,6 +1352,51 @@ mod tests {
         assert_eq!(after.phase_base, None);
         assert_eq!(after.accepted_plan_hash, None);
         assert_eq!(after.active_plan, None);
+    }
+
+    #[test]
+    fn slugify_produces_clean_ids() {
+        assert_eq!(slugify("Add /review command!"), "add-review-command");
+        assert_eq!(slugify("feat/tool-dialects"), "feat-tool-dialects");
+        assert_eq!(slugify("  spaced  out  "), "spaced-out");
+        assert_eq!(slugify("!!!"), "");
+        assert_eq!(slugify("CamelCase123"), "camelcase123");
+    }
+
+    #[test]
+    fn addition_slug_defaults_and_avoids_clobbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A label is slugified and used as-is when free.
+        assert_eq!(addition_slug(root, "My Addition"), "my-addition");
+        // No label, no git branch context → falls back to "addition".
+        let d = addition_slug(root, "");
+        assert!(d == "addition" || !d.is_empty(), "got {d}");
+        // Existing REVIEW_<slug>_R1.md forces a -2 suffix so reviews aren't overwritten.
+        std::fs::write(root.join("REVIEW_my-addition_R1.md"), "r1").unwrap();
+        assert_eq!(addition_slug(root, "My Addition"), "my-addition-2");
+    }
+
+    #[test]
+    fn build_addition_diff_includes_briefing_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Without a briefing the reviewer is told so.
+        let without = build_addition_diff_content(root, "x");
+        assert!(
+            without.contains("no review briefing was written"),
+            "{without}"
+        );
+        assert!(without.contains("ad-hoc ADDITION review"), "{without}");
+        // With a briefing its content reaches the reviewer.
+        std::fs::write(
+            addition_brief_path(root, "x"),
+            "# x — Addition Review Briefing\n## Why\nBecause.\n",
+        )
+        .unwrap();
+        let with = build_addition_diff_content(root, "x");
+        assert!(with.contains("CODER'S REVIEW BRIEFING"), "{with}");
+        assert!(with.contains("Because."), "{with}");
     }
 
     #[test]

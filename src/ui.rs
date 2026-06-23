@@ -144,6 +144,12 @@ enum WorkflowStage {
 enum GateArtifact {
     Plan,
     Phase(String), // phase id, e.g. "P0"
+    /// Ad-hoc `/review` of recent work (not a planned phase). `deep` adds the
+    /// opt-in R2 second opinion; otherwise the gate is R1-only.
+    Addition {
+        slug: String,
+        deep: bool,
+    },
 }
 
 /// Which review round.
@@ -205,6 +211,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/phase-start <id>", "Set the current phase (e.g. P0). Optional — you can also just tell the coder to start"),
     ("/accept-phase [id]", "Phase gate: coder writes review briefing → R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/ship-phase [id]", "Quench the phase — ship it after its reviews (run /accept-phase first)"),
+    ("/review [--deep] [label]", "Ad-hoc review of recent work (no plan needed): coder writes a briefing → R1 critiques the diff. Add --deep for a second cross-vendor R2 opinion"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Clinker the forge: fold the conversation into .anvil/working-memory.md and rake out older turns (alias /clinker)"),
     ("/context", "Show how full the coder's context window is (tokens used / budget / % · whether compaction is imminent)"),
@@ -2073,6 +2080,35 @@ impl App {
             return;
         }
 
+        // `/review [--deep] [label]` — ad-hoc review of recent work that doesn't
+        // warrant a whole plan. Coder writes a briefing → R1 critiques the diff;
+        // `--deep` adds the opt-in R2 second opinion. No ship/accept step.
+        if cmd == "/review" || cmd.starts_with("/review ") {
+            if self.gate_flow.is_some() {
+                self.push_system(
+                    "A review gate is already running. Let it finish (or /continue when paused).",
+                );
+                return;
+            }
+            if !self.is_configured() {
+                self.push_system("Reviewers not configured. Use /config.");
+                return;
+            }
+            let rest = cmd.strip_prefix("/review").unwrap_or("").trim();
+            let mut deep = false;
+            let mut label_parts: Vec<&str> = Vec::new();
+            for tok in rest.split_whitespace() {
+                match tok {
+                    "--deep" | "-d" => deep = true,
+                    _ => label_parts.push(tok),
+                }
+            }
+            let label = label_parts.join(" ");
+            let slug = crate::phase::addition_slug(&self.root, &label);
+            self.start_gate_flow(GateArtifact::Addition { slug, deep });
+            return;
+        }
+
         if cmd == "/continue" {
             if self.gate_flow.is_some() {
                 self.continue_gate();
@@ -3491,6 +3527,7 @@ impl App {
         match artifact {
             GateArtifact::Plan => "plan.md".to_string(),
             GateArtifact::Phase(id) => format!("phase {} diff", id),
+            GateArtifact::Addition { slug, .. } => format!("addition '{}'", slug),
         }
     }
 
@@ -3500,6 +3537,7 @@ impl App {
         let stem = match artifact {
             GateArtifact::Plan => "plan".to_string(),
             GateArtifact::Phase(id) => id.clone(),
+            GateArtifact::Addition { slug, .. } => slug.clone(),
         };
         reviews_dir(&self.root).join(format!("REVIEW_{}_{}.md", stem, r))
     }
@@ -3525,6 +3563,31 @@ impl App {
                 );
                 self.follow_bottom = true;
                 let prompt = crate::phase::briefing_prompt(&id);
+                self.gate_drive_coder(&prompt);
+            }
+            // Addition gate (`/review`): like the phase gate, the coder first writes
+            // a short briefing, then R1 critiques the diff. R2 is opt-in (`--deep`),
+            // handled later in the R1Fixing step — there's no ship/accept here.
+            GateArtifact::Addition { slug, deep } => {
+                let slug = slug.clone();
+                let rounds = if *deep {
+                    "R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"
+                } else {
+                    "R1 → coder fixes → summary"
+                };
+                self.gate_flow = Some(GateFlow {
+                    artifact: artifact.clone(),
+                    step: GateStep::BriefWriting,
+                });
+                self.push_system(&format!(
+                    "── Review gate started on {} ──  coder writes the review briefing → {}.",
+                    label, rounds
+                ));
+                self.push_system(
+                    "→ Coder writing the addition review briefing (what changed & why)…",
+                );
+                self.follow_bottom = true;
+                let prompt = crate::phase::addition_briefing_prompt(&slug);
                 self.gate_drive_coder(&prompt);
             }
             // Plan gate: reviews plan.md directly — no diff/briefing, start at R1.
@@ -3568,6 +3631,12 @@ impl App {
                         }
                         (GateArtifact::Phase(id), Round::R2) => {
                             crate::phase::run_phase_r2_diff(&root, &id)
+                        }
+                        (GateArtifact::Addition { slug, .. }, Round::R1) => {
+                            crate::phase::run_addition_r1_diff(&root, &slug)
+                        }
+                        (GateArtifact::Addition { slug, .. }, Round::R2) => {
+                            crate::phase::run_addition_r2_diff(&root, &slug)
                         }
                     })
                     .await
@@ -3617,6 +3686,13 @@ impl App {
                  --- {0} FINDINGS ---\n{2}\n--- END FINDINGS ---",
                 round_lbl, id, findings
             ),
+            GateArtifact::Addition { slug, .. } => format!(
+                "Review round {0} on the addition '{1}' returned the findings below. Apply fixes to \
+                 the code for the real issues they raised (edit files and run tests). Keep it tight — \
+                 this is a small addition, don't expand scope. When done, stop — do not summarize yet.\n\n\
+                 --- {0} FINDINGS ---\n{2}\n--- END FINDINGS ---",
+                round_lbl, slug, findings
+            ),
         };
 
         self.push_system(&format!("→ Coder addressing {} findings…", round_lbl));
@@ -3643,12 +3719,30 @@ impl App {
                 self.spawn_review(&flow.artifact, Round::R1);
             }
             GateStep::R1Fixing => {
-                self.set_gate_step(GateStep::PausedAfterR1);
-                self.push_system(
-                    "⏸  R1 complete and fixes applied. Review the changes above, then /continue \
-                     (or press Enter on an empty line) to run R2.",
-                );
-                self.follow_bottom = true;
+                // R1-only additions have no R2 — go straight to the wrap-up summary
+                // instead of pausing. Everything else (plan, phase, --deep addition)
+                // pauses so the user can run R2.
+                let r1_only_addition =
+                    matches!(&flow.artifact, GateArtifact::Addition { deep, .. } if !*deep);
+                if r1_only_addition {
+                    self.push_system("→ Coder summarizing the R1 review…");
+                    self.set_gate_step(GateStep::Summarizing);
+                    self.follow_bottom = true;
+                    let prompt =
+                        "You've had your addition reviewed (R1) and applied fixes. Summarize \
+                         concisely for the user: what the addition does, the key issues R1 raised, \
+                         and the fixes you applied. The change is already in the working tree — there \
+                         is no ship/accept step, so do NOT suggest a command."
+                            .to_string();
+                    self.gate_drive_coder(&prompt);
+                } else {
+                    self.set_gate_step(GateStep::PausedAfterR1);
+                    self.push_system(
+                        "⏸  R1 complete and fixes applied. Review the changes above, then /continue \
+                         (or press Enter on an empty line) to run R2.",
+                    );
+                    self.follow_bottom = true;
+                }
             }
             GateStep::R2Fixing => {
                 self.set_gate_step(GateStep::PausedAfterR2);
@@ -3660,14 +3754,28 @@ impl App {
             }
             GateStep::Summarizing => {
                 self.set_gate_step(GateStep::Done);
-                let accept = match &flow.artifact {
-                    GateArtifact::Plan => "/accept-plan".to_string(),
-                    GateArtifact::Phase(id) => format!("/ship-phase {}", id),
+                let done_msg = match &flow.artifact {
+                    GateArtifact::Plan => "✓ Review gate complete (R1 + R2, fixes applied both rounds) — the work is tempered. When you're happy, /accept-plan to quench it.".to_string(),
+                    GateArtifact::Phase(id) => format!(
+                        "✓ Review gate complete (R1 + R2, fixes applied both rounds) — the work is tempered. When you're happy, /ship-phase {} to quench it.",
+                        id
+                    ),
+                    GateArtifact::Addition { slug, deep } => {
+                        let rounds = if *deep { "R1 + R2" } else { "R1" };
+                        let mut m = format!(
+                            "✓ Addition review complete ({}, fixes applied) — the work is in your working tree; commit it when you're happy.",
+                            rounds
+                        );
+                        if !*deep {
+                            m.push_str(&format!(
+                                " For a second cross-vendor opinion, run /review --deep {}.",
+                                slug
+                            ));
+                        }
+                        m
+                    }
                 };
-                self.push_system(&format!(
-                    "✓ Review gate complete (R1 + R2, fixes applied both rounds) — the work is tempered. When you're happy, {} to quench it.",
-                    accept
-                ));
+                self.push_system(&done_msg);
                 self.gate_flow = None; // gate done; the accept/ship command checks files as before
                 self.reconcile_stage_from_disk();
                 self.update_status();
@@ -3691,18 +3799,31 @@ impl App {
             }
             GateStep::PausedAfterR2 => {
                 // Give the coder the EXACT proceed command so its summary can't invent
-                // one (it had been saying /lock-plan instead of /accept-plan).
-                let accept = match &flow.artifact {
-                    GateArtifact::Plan => "/accept-plan".to_string(),
-                    GateArtifact::Phase(id) => format!("/ship-phase {}", id),
+                // one (it had been saying /lock-plan instead of /accept-plan). Additions
+                // have no proceed command — the work is already in the tree.
+                let prompt = match &flow.artifact {
+                    GateArtifact::Addition { .. } => {
+                        "Both review rounds are done and you've applied fixes for each. Summarize \
+                         concisely for the user: what the addition does, the key issues R1 and R2 \
+                         raised, and the fixes you applied in each round. The change is already in \
+                         the working tree — there is no ship/accept step, so do NOT suggest a command."
+                            .to_string()
+                    }
+                    other => {
+                        let accept = match other {
+                            GateArtifact::Plan => "/accept-plan".to_string(),
+                            GateArtifact::Phase(id) => format!("/ship-phase {}", id),
+                            GateArtifact::Addition { .. } => unreachable!(),
+                        };
+                        format!(
+                            "Both review rounds are done and you've applied fixes for each. Summarize for \
+                             the user, concisely: what this plan/phase delivers, the key issues R1 and R2 \
+                             raised, and the fixes you applied in each round. If you mention how to proceed, \
+                             the exact command is `{}` — use it verbatim; do not suggest any other command.",
+                            accept
+                        )
+                    }
                 };
-                let prompt = format!(
-                    "Both review rounds are done and you've applied fixes for each. Summarize for \
-                     the user, concisely: what this plan/phase delivers, the key issues R1 and R2 \
-                     raised, and the fixes you applied in each round. If you mention how to proceed, \
-                     the exact command is `{}` — use it verbatim; do not suggest any other command.",
-                    accept
-                );
                 self.push_system("→ Coder summarizing the review rounds…");
                 self.set_gate_step(GateStep::Summarizing);
                 self.follow_bottom = true;

@@ -31,6 +31,7 @@ One Rust binary. Model-agnostic. Installs in one line and updates itself.
 
 - 🔨 **Two human gates, cross-vendor review** — the plan and each build phase are critiqued by two *different* model families. Exactly two reviews per gate; no R3+, no drift.
 - 🔁 **Sequential review loop** — R1 reviews → the coder applies fixes → you review → R2 reviews → the coder applies fixes → summary → you approve. R2 deliberately re-reviews *after* R1's fixes, catching bugs those fixes introduce.
+- 🔍 **Review anything, not just gates** — `/review` runs the same briefing → critical-review → fix loop on *any* ad-hoc change that doesn't warrant a whole plan (a quick fix, a refactor, a spike). One reviewer by default; `--deep` adds the cross-vendor second opinion.
 - 🤖 **A real agent coder** — reads, edits, and runs the repo through tools (including a reliable `apply_patch` diff format). No attaching files, no copy-pasting output to disk.
 - 🧠 **Doesn't lose the plot** — a persistent task anchor, automatic compaction into working memory, and a lightweight repo map keep the coder on-goal across long, tool-heavy sessions.
 - 🌐 **Any provider** — Ollama / local, OpenAI, xAI (Grok), Anthropic, Groq, Azure, AWS Bedrock, Google, OpenRouter, and any OpenAI-compatible gateway. Mix vendors freely — that's the whole point.
@@ -149,6 +150,50 @@ work, and you **quench** it to lock it in.
 
 **The invariant:** the human approves at each gate; the coder does the creative work and the file changes; two diverse reviewers supply a critical second opinion on the locked artifact (the plan, then each phase's diff). Because **R2 reviews after R1's fixes have been applied**, it catches problems the first round's fixes introduced — the part single-pass review misses.
 
+### Quick review (ad-hoc — no plan needed)
+
+Not every change deserves a whole plan, but every change should be reviewable. A quick
+fix, a refactor, a one-off addition (like this very README change) — **`/review`** runs a
+lighter version of the gate on whatever is currently changed in your working tree, with no
+plan and no phases:
+
+1. The coder writes a short **review briefing** — `REVIEW_<label>_BRIEF.md`: what changed
+   and *why*, how it was tested, anything deliberately deferred. (Same idea as the phase
+   briefing, so the reviewer gets intent, not just a diff.)
+2. **R1** critiques the **diff**, verifying against the real files with its read-only tools,
+   and writes `REVIEW_<label>_R1.md`.
+3. The coder applies the fixes and **summarizes**. That's it — there is **no ship/accept
+   step**, because the work is already in your working tree. Commit it when you're happy.
+
+**Why one reviewer by default?** The two-reviewer, cross-vendor gate exists to catch
+*drift at milestones* — the plan and each phase — where a wrong direction compounds across
+everything built on top of it. A small, self-contained addition doesn't carry that risk, and
+forcing a heavyweight two-round gate on every tweak would just push you to skip review
+altogether. So `/review` is **R1-only** by default. When you *do* want the second opinion —
+the change turned out bigger than expected, or R1 flagged something you want corroborated —
+**`/review --deep`** adds R2 (a different model family) in the same pause-between-rounds loop
+the gates use (`R1 → fix → ⏸ → R2 → fix → ⏸ → summary`).
+
+```
+/review                  R1-only review of your current changes
+/review --deep           …and add the cross-vendor R2 second opinion
+/review auth-refactor    label it → REVIEW_auth-refactor_{BRIEF,R1}.md
+/review --deep cleanup   flag + label together
+```
+
+A few details worth knowing:
+
+- **What gets reviewed** — your **uncommitted** changes (`git diff` against HEAD) *plus the
+  contents of any new/untracked files*. If your tree is clean (you already committed), it
+  falls back to your **most recent commit** — so it works whether you review before or after
+  committing.
+- **The label** keeps reviews side by side, which is handy when you review several additions
+  in one session. Omit it and Anvil names the review after your current **branch** (falling
+  back to `addition`); either way it auto-suffixes `-2`, `-3`, … so a new review never
+  overwrites an earlier one's files.
+- **Artifacts** live at the repo root like every other `REVIEW_*` file, and are excluded from
+  the diff the reviewer sees — so a prior review's text never pollutes the next one.
+
 ---
 
 ## The Coder (agent core)
@@ -254,6 +299,7 @@ Workflow
   /phase-start <id>   Set the current phase (e.g. P0)
   /accept-phase [id]  Phase gate: the same R1 → fix → R2 → fix → summary loop on the git diff
   /ship-phase [id]    Quench the phase — ship it after its reviews
+  /review [--deep] [label]   Ad-hoc review of your current changes (no plan): briefing → R1 → fix → summary; --deep adds R2
 
 Confirm a command
   /y  /a  /n          Yes once · Yes + allow this program for the session · No
@@ -305,7 +351,7 @@ All commands accept `--project <path>` (defaults to `.`).
 ## Files
 
 - **Global:** `<OS config dir>/anvil/anvil.toml` (providers, model bindings, roles) and `<OS config dir>/anvil/.env` (shared keys).
-- **Per repo:** `anvil.toml` (optional override), `.anvil/` (session ledger, working memory, context files, logs), and the gate artifacts at the repo root — `plan.md`, `REVIEW_plan_R{1,2}.md`, `REVIEW_P*_R{1,2}.md`.
+- **Per repo:** `anvil.toml` (optional override), `.anvil/` (session ledger, working memory, context files, logs), and the review artifacts at the repo root — `plan.md`, `REVIEW_plan_R{1,2}.md`, `REVIEW_P*_R{1,2}.md` (phases), and `REVIEW_<label>_{BRIEF,R1,R2}.md` (ad-hoc `/review`). When a plan's last phase ships, the plan is retired to `*_plan_closed.md` and its `REVIEW_plan_*` files are archived under `.anvil/plans/archive/`.
 
 `anvil status` is the quickest way to see where things stand.
 

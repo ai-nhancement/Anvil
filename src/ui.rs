@@ -243,6 +243,19 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/plans", "List the active plan and any archived plans"),
 ];
 
+/// The runnable part of a palette command's display string — the leading tokens up
+/// to the first usage placeholder (`[...]` / `<...>`). The palette shows usage hints
+/// like `/review [--deep] [label]` or `/ship-phase [id]`, but those bracketed tokens
+/// aren't literal input; inserting them verbatim made the command un-runnable. This
+/// strips them (→ `/review`, `/ship-phase`) while keeping any literal subcommand.
+fn command_token(display: &str) -> String {
+    display
+        .split_whitespace()
+        .take_while(|t| !t.starts_with('[') && !t.starts_with('<'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 const SPLASH_DURATION: u8 = 1; // any nonzero value; splash waits for keypress, not a timer
 
 /// Forge "heat pulse" spinner — a glowing ember that swells and fades while the
@@ -2100,7 +2113,10 @@ impl App {
             for tok in rest.split_whitespace() {
                 match tok {
                     "--deep" | "-d" => deep = true,
-                    _ => label_parts.push(tok),
+                    // Ignore usage-hint placeholders if they leak in (e.g. a pasted
+                    // "/review [--deep] [label]") instead of treating them as a label.
+                    t if t.starts_with('[') || t.starts_with('<') => {}
+                    t => label_parts.push(t),
                 }
             }
             let label = label_parts.join(" ");
@@ -6207,7 +6223,10 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
             }
             KeyCode::Enter => {
                 if let Some((cmd, _)) = filtered.get(app.command_selected) {
-                    app.input = (*cmd).to_string();
+                    // Insert only the runnable command, not the usage hint shown in
+                    // the palette (e.g. "/review [--deep] [label]" → "/review"). The
+                    // bracketed tokens are placeholders; the user types real args.
+                    app.input = command_token(cmd);
                 }
                 app.showing_command_palette = false;
                 app.handle_input();
@@ -7686,4 +7705,36 @@ fn render_approvals_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::
     let mut state = ListState::default();
     state.select(Some(ed.selected));
     f.render_stateful_widget(list, popup, &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_token_strips_usage_placeholders() {
+        // Bare commands are untouched.
+        assert_eq!(command_token("/review"), "/review");
+        // Bracketed/angle placeholders (and everything after) are dropped, so the
+        // palette inserts a runnable command rather than literal hint text.
+        assert_eq!(command_token("/review [--deep] [label]"), "/review");
+        assert_eq!(command_token("/ship-phase [id]"), "/ship-phase");
+        assert_eq!(command_token("/phase-start <id>"), "/phase-start");
+        assert_eq!(command_token("/new-plan <name>"), "/new-plan");
+        assert_eq!(command_token("/unload [model]"), "/unload");
+    }
+
+    #[test]
+    fn every_palette_command_is_runnable_after_token_extraction() {
+        // The inserted text must start with '/' and carry no placeholder characters,
+        // or the command would be un-runnable straight from the palette.
+        for (display, _desc) in SLASH_COMMANDS {
+            let token = command_token(display);
+            assert!(token.starts_with('/'), "{display} -> {token}");
+            assert!(
+                !token.contains('[') && !token.contains('<'),
+                "{display} -> {token} still has a placeholder"
+            );
+        }
+    }
 }

@@ -7518,7 +7518,9 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
             .border_style(Style::default().fg(Color::Cyan))
             .title(Span::styled(
                 " Commands (↑↓ pick, Enter run, Esc close, type to filter) ",
-                Style::default().fg(Color::DarkGray),
+                Style::default()
+                    .fg(FORGE_MOLTEN)
+                    .add_modifier(Modifier::BOLD),
             )),
     );
 
@@ -7585,7 +7587,9 @@ fn render_confirm_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
             .border_style(Style::default().fg(Color::Rgb(255, 170, 60)))
             .title(Span::styled(
                 " Run command? (↑↓ choose · Enter confirm · Esc = No) ",
-                Style::default().fg(Color::DarkGray),
+                Style::default()
+                    .fg(FORGE_MOLTEN)
+                    .add_modifier(Modifier::BOLD),
             )),
     );
     f.render_widget(para, popup);
@@ -7661,16 +7665,17 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
         })
         .collect();
 
-    // Color the wizard popup border + title for role assignment (and quick Ollama picks)
-    // so CODER/R1/R2 identity is visible (blue / purple / lime).
-    let (wiz_border, wiz_title_fg) = match &wizard.step {
-        WizardStep::QuickOllamaModelPick { role } if role == "coder" => (ROLE_CODER, ROLE_CODER),
-        WizardStep::QuickOllamaModelPick { role } if role == "reviewer_a" => (ROLE_R1, ROLE_R1),
-        WizardStep::QuickOllamaModelPick { role } if role == "reviewer_b" => (ROLE_R2, ROLE_R2),
-        WizardStep::RoleAssignment { role } if role == "coder" => (ROLE_CODER, ROLE_CODER),
-        WizardStep::RoleAssignment { role } if role == "reviewer_a" => (ROLE_R1, ROLE_R1),
-        WizardStep::RoleAssignment { role } if role == "reviewer_b" => (ROLE_R2, ROLE_R2),
-        _ => (Color::Yellow, Color::DarkGray),
+    // Color the wizard popup border for role assignment (and quick Ollama picks)
+    // so CODER/R1/R2 identity stays visible (blue / purple / lime). The title itself
+    // uses the Anvil brand color (shared by every popup header) so it stands out.
+    let wiz_border = match &wizard.step {
+        WizardStep::QuickOllamaModelPick { role } if role == "coder" => ROLE_CODER,
+        WizardStep::QuickOllamaModelPick { role } if role == "reviewer_a" => ROLE_R1,
+        WizardStep::QuickOllamaModelPick { role } if role == "reviewer_b" => ROLE_R2,
+        WizardStep::RoleAssignment { role } if role == "coder" => ROLE_CODER,
+        WizardStep::RoleAssignment { role } if role == "reviewer_a" => ROLE_R1,
+        WizardStep::RoleAssignment { role } if role == "reviewer_b" => ROLE_R2,
+        _ => Color::Yellow,
     };
 
     let list = List::new(items)
@@ -7680,7 +7685,9 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
                 .border_style(Style::default().fg(wiz_border))
                 .title(Span::styled(
                     format!(" {} ", wizard.list_title),
-                    Style::default().fg(wiz_title_fg),
+                    Style::default()
+                        .fg(FORGE_MOLTEN)
+                        .add_modifier(Modifier::BOLD),
                 )),
         )
         .highlight_style(
@@ -7725,7 +7732,7 @@ fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) 
                 .title(Span::styled(
                     format!(" {} (Esc to close) ", title),
                     Style::default()
-                        .fg(Color::White)
+                        .fg(FORGE_MOLTEN)
                         .add_modifier(Modifier::BOLD),
                 )),
         )
@@ -7781,7 +7788,7 @@ fn render_approvals_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::
                 .title(Span::styled(
                     title,
                     Style::default()
-                        .fg(Color::White)
+                        .fg(FORGE_MOLTEN)
                         .add_modifier(Modifier::BOLD),
                 )),
         )

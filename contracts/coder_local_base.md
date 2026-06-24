@@ -46,15 +46,6 @@ FIND-DON'T-FLAIL CLAUSE
   never guess a line number or invent a path. If the first search misses, one or two
   refinements are fine; more than that is thrashing. You never edit a file you have not read.
 
-EDIT DISCIPLINE CLAUSE
-- Use edit_file only for a change confined to ONE line: old_string is a single line, with no
-  line breaks, copied exactly from your read this turn. If it does not match, re-read and copy
-  again rather than forcing it.
-- For a change that spans multiple lines — inserting a line, reordering, rewriting a block — do
-  not try to match a multi-line snippet. Read the file, then write the whole new content with
-  write_file. (For a genuinely large file, still make a single-line edit_file on the exact line
-  that changes rather than rewriting it.)
-
 OUTPUT — when the change is made and verified, finish like this:
 - ONE or TWO short lines: what you changed (with the path) and that the check passed. Then STOP
   — do not re-read "just to be sure", do not run the same check twice, do not pad tool calls.

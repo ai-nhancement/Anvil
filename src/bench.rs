@@ -75,6 +75,9 @@ struct RunOutcome {
     /// Assistant text on turn 1 when it made NO tool call — diagnoses a model that
     /// answers in prose instead of driving the tools.
     no_call_text: Option<String>,
+    /// For a FAILED run: what the model actually produced vs. what was expected (or
+    /// the live check's failure output). Powers the "why did it fail?" diagnostic.
+    fail_detail: Option<String>,
 }
 
 // ── deterministic core (pure, unit-tested) ───────────────────────────────────
@@ -259,6 +262,36 @@ fn run_check(check_cmd: &str, scratch: &Path) -> String {
     }
 }
 
+/// Describe WHY a run failed: for a live fixture, the check's failure output; for a
+/// static one, each file that differs (got vs want) plus any stray files the model
+/// created. Newlines are shown escaped so each file is one readable line.
+fn describe_failure(fixture: &Fixture, scratch: &Path) -> String {
+    let cap = |s: &str| -> String {
+        let one: String = s.chars().take(120).collect();
+        format!("{:?}", one) // {:?} escapes newlines → one line
+    };
+    if let Some(cmd) = &fixture.check {
+        let out = run_check(cmd, scratch);
+        return format!("[{}] check failed:\n    {}", fixture.id, out.trim());
+    }
+    let want = collect_files(&fixture.dir.join("after"));
+    let got = collect_files(scratch);
+    let mut s = format!("[{}]", fixture.id);
+    for (path, w) in &want {
+        match got.get(path) {
+            Some(g) if g == w => {}
+            Some(g) => s.push_str(&format!("\n    {path}: got {} want {}", cap(g), cap(w))),
+            None => s.push_str(&format!("\n    {path}: MISSING, want {}", cap(w))),
+        }
+    }
+    for (path, g) in &got {
+        if !want.contains_key(path) {
+            s.push_str(&format!("\n    +{path} (unexpected): {}", cap(g)));
+        }
+    }
+    s
+}
+
 /// True if a live check's output reports a passing (exit 0) run.
 fn check_passed(output: &str) -> bool {
     output.starts_with("exit status: 0")
@@ -392,6 +425,9 @@ async fn run_one(
                     && (outcome.edit_landed || !expects_change)
             }
         };
+        if !outcome.correct {
+            outcome.fail_detail = Some(describe_failure(fixture, scratch));
+        }
     }
     outcome
 }
@@ -580,6 +616,27 @@ pub fn run_bench(
         println!("\nNO tool call on turn 1 — sample of what the model said instead:");
         for s in samples.iter().take(3) {
             println!("  - {}", s);
+        }
+    }
+
+    // Why did failing runs fail? Concrete got-vs-want samples — the fastest way to
+    // spot a SYSTEMATIC corruption (e.g. a contract that breaks a trivial insert).
+    let mut fails: Vec<String> = Vec::new();
+    for cells in &results {
+        for outcomes in cells {
+            for o in outcomes {
+                if let Some(d) = &o.fail_detail {
+                    if !fails.contains(d) {
+                        fails.push(d.clone());
+                    }
+                }
+            }
+        }
+    }
+    if !fails.is_empty() {
+        println!("\nFAILURES — what the model produced vs expected (deduped):");
+        for d in fails.iter().take(8) {
+            println!("  {}", d);
         }
     }
     Ok(())

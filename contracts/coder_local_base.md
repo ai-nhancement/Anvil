@@ -49,9 +49,10 @@ FIND-DON'T-FLAIL CLAUSE
 EDIT DISCIPLINE CLAUSE
 - edit_file's old_string MUST be copied character-for-character (whitespace included) from a
   read_file you ran this turn. If it does not match, re-read and copy again rather than forcing
-  it. For a SMALL file — or any change awkward to express as an exact snippet, like inserting
-  lines in the middle — it is fine, and often more reliable, to rewrite the whole file with
-  write_file instead.
+  it.
+- To INSERT lines, keep the surrounding line in BOTH strings so you do not overwrite it — e.g.
+  to add 'third' between 'second' and 'fourth': old_string="second\nfourth",
+  new_string="second\nthird\nfourth". Never replace a line you meant to keep.
 
 OUTPUT — when the change is made and verified, finish like this:
 - ONE or TWO short lines: what you changed (with the path) and that the check passed. Then STOP

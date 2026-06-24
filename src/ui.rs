@@ -6847,12 +6847,12 @@ fn render_header(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ),
             Span::styled(coder, Style::default().fg(Color::White)),
             Span::styled(
-                "   ◈ R1 ".to_string(),
+                "   🛡️ R1 ".to_string(),
                 Style::default().fg(ROLE_R1).add_modifier(Modifier::BOLD),
             ),
             Span::styled(r1, Style::default().fg(Color::White)),
             Span::styled(
-                "   ◈ R2 ".to_string(),
+                "   ⚖️ R2 ".to_string(),
                 Style::default().fg(ROLE_R2).add_modifier(Modifier::BOLD),
             ),
             Span::styled(r2, Style::default().fg(Color::White)),

@@ -146,6 +146,12 @@ enum Commands {
         /// approached each fixture (which edit tool, which snippet).
         #[arg(long)]
         trace: bool,
+
+        /// Path to the contract file the Generic arm is driven by (overrides the
+        /// default tier `contracts/coder_local_base.md`). Lets you A/B any contract
+        /// variant without touching the locked base.
+        #[arg(long, value_name = "FILE")]
+        contract: Option<String>,
     },
 }
 
@@ -279,6 +285,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             no_contract,
             fixture,
             trace,
+            contract,
         } => {
             let dialects: Vec<dialect::Dialect> = match dialects {
                 Some(list) => {
@@ -313,6 +320,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 !no_contract,
                 fixture.as_deref(),
                 trace,
+                contract.as_deref(),
             )
         }
     }

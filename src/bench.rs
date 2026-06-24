@@ -207,12 +207,10 @@ fn load_fixtures(fixtures_root: &Path) -> Result<Vec<Fixture>> {
 /// was net-harmful load for a small model, and real Anvil supplies orientation via the
 /// live reality snapshot). With `--no-contract`, every arm gets the neutral baseline
 /// (+ the dialect's addendum) — which isolates the tool surface from the contract.
-fn dialect_system(dialect: Dialect, root: &Path, use_contract: bool) -> String {
+fn dialect_system(dialect: Dialect, contract_path: &Path, use_contract: bool) -> String {
     if use_contract {
         if let Dialect::Generic = dialect {
-            let contract =
-                std::fs::read_to_string(root.join("contracts").join("coder_local_base.md"))
-                    .unwrap_or_default();
+            let contract = std::fs::read_to_string(contract_path).unwrap_or_default();
             if !contract.trim().is_empty() {
                 return contract.trim().to_string();
             }
@@ -365,15 +363,15 @@ async fn run_one(
     fixture: &Fixture,
     scratch: &Path,
     expects_change: bool,
-    root: &Path,
+    contract_path: &Path,
     use_contract: bool,
 ) -> RunOutcome {
     // Apply the dialect at the BENCH layer — production `chat_turn_stream` is left
     // untouched. The advertised tool surface and the per-dialect system prompt are
-    // what differ between arms (Generic is driven by our operational contract, unless
+    // what differ between arms (Generic is driven by the contract file, unless
     // --no-contract isolates the tool surface with the neutral prompt).
     let advertised = dialect.advertise(&crate::tools::tool_defs());
-    let system = dialect_system(dialect, root, use_contract);
+    let system = dialect_system(dialect, contract_path, use_contract);
     let mut history = vec![ChatMessage::user(fixture.instruction.clone())];
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let mut outcome = RunOutcome::default();
@@ -488,10 +486,17 @@ pub fn run_bench(
     use_contract: bool,
     fixture_filter: Option<&str>,
     trace: bool,
+    contract_file: Option<&str>,
 ) -> Result<()> {
     load_local_env(root);
     let cfg = load_config(root)?;
     let client = LlmClient::new();
+
+    // Which contract file the Generic arm is driven by — `--contract <path>` overrides
+    // the default tier, so we can A/B any variant without touching the locked base.
+    let contract_path = contract_file
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join("contracts").join("coder_local_base.md"));
 
     // Resolve the target. Normally a role keyword or binding name; but a
     // `<provider>/<model>` spec (e.g. `local-ollama/gemma4:e2b`) targets a raw model
@@ -540,9 +545,10 @@ pub fn run_bench(
             .collect::<Vec<_>>()
             .join(", "),
         if use_contract {
-            "ON (Generic arm uses the operational contract)"
+            format!("ON — {}", contract_path.display())
         } else {
             "OFF (--no-contract: all arms use the neutral baseline — isolates the tool surface)"
+                .to_string()
         }
     );
 
@@ -570,7 +576,7 @@ pub fn run_bench(
                             fixture,
                             scratch.path(),
                             expects_change,
-                            root,
+                            &contract_path,
                             use_contract,
                         )
                         .await,

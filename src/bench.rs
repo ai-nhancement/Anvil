@@ -34,6 +34,10 @@ const BENCH_SYSTEM: &str = "You are a coding agent operating on a small project 
 struct TaskToml {
     edit_type: String,
     instruction: String,
+    /// LIVE fixture: a command the harness actually runs in the scratch tree so the
+    /// model can verify (and so we score by whether the tests pass, not exact text).
+    #[serde(default)]
+    check: Option<String>,
 }
 
 /// One benchmark case: an instruction plus a `before/` tree to mutate and an
@@ -43,6 +47,11 @@ pub struct Fixture {
     pub edit_type: String,
     pub instruction: String,
     pub dir: PathBuf,
+    /// When set, this is a LIVE (multi-step) fixture: the harness runs `check` in the
+    /// scratch on every run_command, and scores by whether it passes — see `run_one`.
+    /// `after/` then holds only the PROTECTED files (e.g. the test) that must stay
+    /// byte-intact; the edited code's exact text is unconstrained (the test judges it).
+    pub check: Option<String>,
 }
 
 /// Outcome of a single run of one fixture under one dialect.
@@ -83,6 +92,12 @@ fn collect_files(base: &Path) -> BTreeMap<String, String> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip build/cache artifacts a live `check` may create (e.g. Python's
+            // __pycache__/*.pyc) so they never count as a tree difference.
+            if name == "__pycache__" || name == ".pytest_cache" || name.ends_with(".pyc") {
+                continue;
+            }
             if path.is_dir() {
                 walk(base, &path, out);
             } else if let Ok(bytes) = std::fs::read(&path) {
@@ -168,6 +183,7 @@ fn load_fixtures(fixtures_root: &Path) -> Result<Vec<Fixture>> {
             edit_type: task.edit_type,
             instruction: task.instruction,
             dir,
+            check: task.check,
         });
     }
     if fixtures.is_empty() {
@@ -204,6 +220,57 @@ fn dialect_system(dialect: Dialect, root: &Path, use_contract: bool) -> String {
     } else {
         format!("{}\n\n{}", BENCH_SYSTEM, add)
     }
+}
+
+/// Actually run a LIVE fixture's `check` command in the scratch tree and return its
+/// real combined output + exit status (capped). The command is FIXTURE-defined, never
+/// the model's arbitrary input, so this is safe — the model can only ever trigger this
+/// one predefined check.
+fn run_check(check_cmd: &str, scratch: &Path) -> String {
+    let output = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .args(["/C", check_cmd])
+            .current_dir(scratch)
+            .output()
+    } else {
+        std::process::Command::new("sh")
+            .args(["-c", check_cmd])
+            .current_dir(scratch)
+            .output()
+    };
+    match output {
+        Ok(o) => {
+            let code = o.status.code().unwrap_or(-1);
+            let mut s = format!("exit status: {code}\n");
+            let out = String::from_utf8_lossy(&o.stdout);
+            let err = String::from_utf8_lossy(&o.stderr);
+            if !out.trim().is_empty() {
+                s.push_str(out.trim_end());
+                s.push('\n');
+            }
+            if !err.trim().is_empty() {
+                s.push_str("[stderr] ");
+                s.push_str(err.trim_end());
+                s.push('\n');
+            }
+            s.chars().take(4000).collect()
+        }
+        Err(e) => format!("ERROR: could not run check `{check_cmd}`: {e}"),
+    }
+}
+
+/// True if a live check's output reports a passing (exit 0) run.
+fn check_passed(output: &str) -> bool {
+    output.starts_with("exit status: 0")
+}
+
+/// True if every file in `after/` (the PROTECTED set for a live fixture — e.g. the
+/// test) is present and byte-identical in the scratch tree. Doesn't require the
+/// scratch to contain ONLY those files, so the edited code is unconstrained.
+fn protected_files_intact(after: &Path, scratch: &Path) -> bool {
+    let want = collect_files(after);
+    let have = collect_files(scratch);
+    want.iter().all(|(k, v)| have.get(k) == Some(v))
 }
 
 /// Execute a tool call against the scratch tree. `delegate` is disabled (the bench
@@ -291,7 +358,13 @@ async fn run_one(
             // Normalize the model-emitted call to canonical before executing
             // (identity for Codex/Generic today; the Anthropic native arm will map).
             let canonical = dialect.to_canonical(call.clone());
-            let result = bench_execute(&canonical, scratch);
+            // On a LIVE fixture, a run_command means "verify" — actually run the
+            // fixture's check and hand back the real pass/fail, so the model can see
+            // its mistake and fix it (the whole point of the multi-step fixtures).
+            let result = match (&fixture.check, canonical.name.as_str()) {
+                (Some(cmd), "run_command") => run_check(cmd, scratch),
+                _ => bench_execute(&canonical, scratch),
+            };
             let is_err = result.starts_with("ERROR");
             outcome.tool_events.push((canonical.name.clone(), is_err));
             if is_edit_tool(&canonical.name) && !is_err {
@@ -303,10 +376,22 @@ async fn run_one(
     }
 
     if !outcome.errored {
-        // Correct = matches after/, AND (for a fixture that expects a change) an
-        // edit actually landed — so "did nothing" can't pass a no-op-looking diff.
-        outcome.correct = dirs_equal(scratch, &fixture.dir.join("after"))
-            && (outcome.edit_landed || !expects_change);
+        outcome.correct = match &fixture.check {
+            // LIVE fixture: the test is the oracle. Correct = the check PASSES on the
+            // final tree AND the protected files (everything in after/, i.e. the test)
+            // are byte-intact — so a model can't "pass" by editing the test away. The
+            // edited code's exact text is irrelevant; the test judges it.
+            Some(cmd) => {
+                check_passed(&run_check(cmd, scratch))
+                    && protected_files_intact(&fixture.dir.join("after"), scratch)
+            }
+            // Static fixture: exact match to after/, AND (when a change is expected) an
+            // edit actually landed — so "did nothing" can't pass a no-op-looking diff.
+            None => {
+                dirs_equal(scratch, &fixture.dir.join("after"))
+                    && (outcome.edit_landed || !expects_change)
+            }
+        };
     }
     outcome
 }
@@ -645,6 +730,38 @@ mod tests {
         // A real content difference still fails.
         std::fs::write(b.join("f.txt"), "line ONE\nline two\n").unwrap();
         assert!(!dirs_equal(&a, &b));
+    }
+
+    #[test]
+    fn live_fixture_loads_check_and_protects_test_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("bench/fixtures/live");
+        write(
+            &root.join("task.toml"),
+            "edit_type = \"fix\"\ninstruction = \"fix it\"\ncheck = \"python -B check.py\"\n",
+        );
+        write(&root.join("before/check.py"), "assert False\n");
+        write(&root.join("after/check.py"), "assert False\n");
+
+        let fixtures = load_fixtures(&tmp.path().join("bench/fixtures")).unwrap();
+        assert_eq!(fixtures[0].check.as_deref(), Some("python -B check.py"));
+
+        // protected_files_intact: only the after/ files must match; extra scratch files
+        // (the edited code, __pycache__) are allowed.
+        let scratch = tmp.path().join("scratch");
+        write(&scratch.join("check.py"), "assert False\n");
+        write(&scratch.join("stats.py"), "whatever\n");
+        assert!(protected_files_intact(&root.join("after"), &scratch));
+        // Tampering with the protected test file is caught.
+        std::fs::write(scratch.join("check.py"), "assert True\n").unwrap();
+        assert!(!protected_files_intact(&root.join("after"), &scratch));
+    }
+
+    #[test]
+    fn check_passed_reads_exit_status() {
+        assert!(check_passed("exit status: 0\nall tests passed\n"));
+        assert!(!check_passed("exit status: 1\n[stderr] AssertionError\n"));
+        assert!(!check_passed("ERROR: could not run check"));
     }
 
     #[test]

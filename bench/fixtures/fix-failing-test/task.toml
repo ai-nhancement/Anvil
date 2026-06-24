@@ -1,0 +1,7 @@
+edit_type = "fix-failing-test"
+instruction = "The tests in check.py are failing. Find and fix the bug in stats.py so that all the tests pass. Do not edit check.py."
+# A `check` command makes this a LIVE fixture: the harness actually runs it in the
+# scratch tree (so the model can verify), and scores by whether it PASSES — not by
+# exact text. The protected test file (check.py, the only thing in after/) must be
+# left intact. `-B` keeps Python from writing __pycache__ into the tree.
+check = "python -B check.py"

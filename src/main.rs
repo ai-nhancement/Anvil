@@ -137,6 +137,15 @@ enum Commands {
         /// surface ALONE — separating the tool-surface effect from the contract.
         #[arg(long)]
         no_contract: bool,
+
+        /// Only run the fixture with this id (e.g. insert-middle) — focuses a diagnostic.
+        #[arg(long, value_name = "ID")]
+        fixture: Option<String>,
+
+        /// Print the full tool-call sequence per run, so you can see HOW the model
+        /// approached each fixture (which edit tool, which snippet).
+        #[arg(long)]
+        trace: bool,
     },
 }
 
@@ -268,6 +277,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             dialects,
             delay_ms,
             no_contract,
+            fixture,
+            trace,
         } => {
             let dialects: Vec<dialect::Dialect> = match dialects {
                 Some(list) => {
@@ -300,6 +311,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 model.as_deref(),
                 delay_ms,
                 !no_contract,
+                fixture.as_deref(),
+                trace,
             )
         }
     }

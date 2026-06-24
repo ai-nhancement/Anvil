@@ -78,6 +78,9 @@ struct RunOutcome {
     /// For a FAILED run: what the model actually produced vs. what was expected (or
     /// the live check's failure output). Powers the "why did it fail?" diagnostic.
     fail_detail: Option<String>,
+    /// The ordered tool calls this run made (name + a short arg summary). Captured so
+    /// `--trace` can show HOW two arms approach the same fixture differently.
+    trace: Vec<String>,
 }
 
 // ── deterministic core (pure, unit-tested) ───────────────────────────────────
@@ -262,6 +265,30 @@ fn run_check(check_cmd: &str, scratch: &Path) -> String {
     }
 }
 
+/// A compact one-line summary of a tool call for the `--trace` view — shows the args
+/// that matter (which edit tool, which path, the old→new snippet), so two arms' edit
+/// strategies are directly comparable.
+fn summarize_call(call: &ToolCall) -> String {
+    let a = &call.arguments;
+    let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let cap = |x: &str| -> String {
+        let t: String = x.chars().take(50).collect();
+        format!("{:?}", t) // escape newlines → one line
+    };
+    match call.name.as_str() {
+        "edit_file" => format!(
+            "edit_file {} old={} new={}",
+            s("path"),
+            cap(&s("old_string")),
+            cap(&s("new_string"))
+        ),
+        "write_file" => format!("write_file {} content={}", s("path"), cap(&s("content"))),
+        "read_file" => format!("read_file {}", s("path")),
+        "run_command" => format!("run_command {}", cap(&s("command"))),
+        other => format!("{} {}", other, cap(&a.to_string())),
+    }
+}
+
 /// Describe WHY a run failed: for a live fixture, the check's failure output; for a
 /// static one, each file that differs (got vs want) plus any stray files the model
 /// created. Newlines are shown escaped so each file is one readable line.
@@ -399,6 +426,11 @@ async fn run_one(
                 _ => bench_execute(&canonical, scratch),
             };
             let is_err = result.starts_with("ERROR");
+            outcome.trace.push(format!(
+                "{}{}",
+                summarize_call(&canonical),
+                if is_err { "  -> ERROR" } else { "" }
+            ));
             outcome.tool_events.push((canonical.name.clone(), is_err));
             if is_edit_tool(&canonical.name) && !is_err {
                 outcome.edit_landed = true;
@@ -453,6 +485,8 @@ pub fn run_bench(
     binding_key: Option<&str>,
     delay_ms: u64,
     use_contract: bool,
+    fixture_filter: Option<&str>,
+    trace: bool,
 ) -> Result<()> {
     load_local_env(root);
     let cfg = load_config(root)?;
@@ -486,7 +520,13 @@ pub fn run_bench(
         }
     };
 
-    let fixtures = load_fixtures(&root.join("bench").join("fixtures"))?;
+    let mut fixtures = load_fixtures(&root.join("bench").join("fixtures"))?;
+    if let Some(only) = fixture_filter {
+        fixtures.retain(|f| f.id == only);
+        if fixtures.is_empty() {
+            bail!("no fixture named '{}' under bench/fixtures/", only);
+        }
+    }
 
     println!(
         "Dialect benchmark — target '{}' (model {}), {} run(s)/cell\nDialects: {}\nContract: {}\n",
@@ -637,6 +677,38 @@ pub fn run_bench(
         println!("\nFAILURES — what the model produced vs expected (deduped):");
         for d in fails.iter().take(8) {
             println!("  {}", d);
+        }
+    }
+
+    // --trace: the full tool-call sequence per run, so two arms' strategies on the
+    // same fixture are directly comparable (e.g. write_file rewrite vs edit_file snippet).
+    if trace {
+        println!("\nTRACE — tool calls per run:");
+        for (fi, fixture) in fixtures.iter().enumerate() {
+            for (di, dialect) in dialects.iter().enumerate() {
+                for (ri, o) in results[fi][di].iter().enumerate() {
+                    let status = if o.errored {
+                        "ERRORED"
+                    } else if o.correct {
+                        "ok"
+                    } else {
+                        "FAIL"
+                    };
+                    println!(
+                        "  [{} / {:?} / run {}] {}",
+                        fixture.id,
+                        dialect,
+                        ri + 1,
+                        status
+                    );
+                    if o.trace.is_empty() {
+                        println!("      (no tool calls)");
+                    }
+                    for line in &o.trace {
+                        println!("      {}", line);
+                    }
+                }
+            }
         }
     }
     Ok(())

@@ -52,5 +52,7 @@ thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
 
-[dev-dependencies]
+# Scratch dirs for the dialect benchmark (also used in tests)
 tempfile = "3"
+
+[dev-dependencies]

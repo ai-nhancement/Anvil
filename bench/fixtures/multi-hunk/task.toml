@@ -1,0 +1,2 @@
+edit_type = "multi-hunk"
+instruction = "In config.js, set the timeout value to 60 and the retries value to 10. Do not change any other field."

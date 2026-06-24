@@ -25,10 +25,13 @@ dialect.
 - Resolve the dialect in `src/ui.rs` where the logical binding is known (~`3036`) and thread the
   resolved `Dialect` to the transport — **not** derived inside `Agent::new` from the raw model id
   (finding #3).
-- Thread `Dialect` into `src/llm.rs`: outbound `advertise()` in `openai_turn_stream` /
-  `anthropic_turn_stream`; outbound `format_call()` in `build_openai_messages` /
-  `build_anthropic_messages` (`1563`/`1608`); inbound `to_canonical()` in `handle_openai_tool_stream`
-  / `handle_anthropic_tool_stream` (`1316`/`1469`).
+- Thread `Dialect` into `src/llm.rs` at the gateway (`chat_turn_stream`): outbound `advertise()`
+  (tool set) + `prompt_addendum()` spliced into the system prompt; inbound `to_canonical()` on the
+  returned calls. All three dialect mutations live in one place, so the Agent stays
+  dialect-agnostic. (`format_call()` — per-dialect history re-rendering — is only needed by the
+  Anthropic native arm; deferred to Phase 3. Caveat: the addendum is spliced at the gateway, so the
+  agent's `[prompt-log]` shows the base system prompt without it — fine while Codex's is empty;
+  Phase 1 should weigh whether the Generic addendum needs to appear in the log.)
 
 **Verify:** existing tests green; a real phase build under `Codex` behaves byte-identically to today,
 **and** the ledger (`.anvil/session.json`) contains only canonical tool names.
@@ -43,8 +46,9 @@ No change to `agent.rs` gates, `tools.rs` exec, or the ledger schema.
 The agnostic floor: after this, Anvil works with any function-calling model.
 
 - `Dialect::Generic`: `advertise()` = canonical set **minus `apply_patch`**, with the
-  "PREFER apply_patch" framing stripped from `edit_file`; identity `to_canonical()` / `format_call()`
-  (canonical already *is* the generic shape); a short neutral prompt addendum.
+  "PREFER apply_patch" framing stripped from `edit_file`; identity `to_canonical()` (canonical
+  already *is* the generic shape); supply Generic's `prompt_addendum` text — the splice site is
+  already wired at the gateway (Phase 0).
 - Selection: per-binding `dialect = "..."` override → family inference (Anthropic→Anthropic,
   OpenAI/Codex→Codex) → **`Generic` fallback**.
 

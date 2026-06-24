@@ -1,0 +1,2 @@
+edit_type = "single-line"
+instruction = "In app.py, change the value of MAX_RETRIES from 3 to 5. Leave everything else exactly as it is."

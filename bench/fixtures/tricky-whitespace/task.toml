@@ -1,0 +1,2 @@
+edit_type = "tricky-whitespace"
+instruction = "In main.rs, change the message printed inside the if block from \"hi\" to \"bye\". Keep all indentation exactly as it is and change nothing else."

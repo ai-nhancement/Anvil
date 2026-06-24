@@ -14,8 +14,10 @@
 //! live at repo root. Designed explicitly to kill the drift that kills vibe coding projects.
 
 mod agent;
+mod bench;
 mod cli;
 mod config;
+mod dialect;
 mod git;
 mod llm;
 mod modelsdev;
@@ -108,6 +110,28 @@ enum Commands {
 
     /// Update anvil to the latest release (downloads a prebuilt binary and replaces this one)
     Update,
+
+    /// Benchmark how well a model drives each tool dialect — sweeps a model across
+    /// dialects over the edit fixtures and reports tool-use fidelity. Dev tool: run
+    /// from the Anvil source tree, where `bench/fixtures/` and `contracts/` live.
+    Bench {
+        /// Runs per (fixture × dialect) cell — model output is stochastic.
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+
+        /// Role keyword or binding name to benchmark (defaults to the coder role).
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Comma-separated dialects to sweep (default: generic,codex — contract vs baseline).
+        #[arg(long, value_name = "LIST")]
+        dialects: Option<String>,
+
+        /// Milliseconds to sleep between trials. Raise it on large sweeps to avoid
+        /// exhausting a provider's per-minute quota (a cascade of errored runs).
+        #[arg(long, default_value_t = 0)]
+        delay_ms: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -231,6 +255,38 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 );
             }
             Ok(())
+        }
+        Commands::Bench {
+            runs,
+            model,
+            dialects,
+            delay_ms,
+        } => {
+            let dialects: Vec<dialect::Dialect> = match dialects {
+                Some(list) => {
+                    let mut out = vec![];
+                    for part in list.split(',') {
+                        let p = part.trim();
+                        if p.is_empty() {
+                            continue;
+                        }
+                        match dialect::Dialect::parse_override(p) {
+                            Some(d) => out.push(d),
+                            None => anyhow::bail!(
+                                "unknown dialect '{}' (valid: codex, anthropic, generic)",
+                                p
+                            ),
+                        }
+                    }
+                    if out.is_empty() {
+                        anyhow::bail!("no dialects given");
+                    }
+                    out
+                }
+                // Default: contract (Generic) vs baseline (Codex), WITHIN the model.
+                None => vec![dialect::Dialect::Generic, dialect::Dialect::Codex],
+            };
+            bench::run_bench(&cli.project, runs, &dialects, model.as_deref(), delay_ms)
         }
     }
 }

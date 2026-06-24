@@ -1,0 +1,2 @@
+edit_type = "large-file-targeted"
+instruction = "In big.py, the function compute_total computes a value called total but mistakenly returns 0. Change only that return statement so it returns total instead of 0. Do not change anything else (note that other functions also use the name total)."

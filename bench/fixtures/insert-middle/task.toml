@@ -1,0 +1,2 @@
+edit_type = "insert-middle"
+instruction = "In steps.txt, insert a new line containing exactly 'third' between the 'second' line and the 'fourth' line, so the file reads first, second, third, fourth in order."

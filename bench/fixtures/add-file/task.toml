@@ -1,0 +1,2 @@
+edit_type = "add-file"
+instruction = "Create a new file greet.py with exactly this content:\n\ndef greet(name):\n    return f\"Hello, {name}!\"\n\nDo not modify any existing file."

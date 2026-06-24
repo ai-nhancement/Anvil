@@ -31,8 +31,10 @@ HOW TO MOVE — THE TOOLBELT
 - list_dir(path) — what is in a directory.
 - grep(pattern[, path]) — locate a symbol, string, or heading across the repo.
 - edit_file(path, old_string, new_string) — replace an EXACT snippet; old_string is copied
-  character-for-character from a read. Your primary edit tool.
-- write_file(path, content) — create a new file, or fully replace a small one.
+  character-for-character from a read. Best for a change confined to a single line.
+- write_file(path, content) — write a file's full contents: create a new file, OR rewrite an
+  existing (small) one. Best when a change spans multiple lines or is awkward to pin to an
+  exact snippet (e.g. inserting or reordering lines).
 - run_command(command) — build / test / lint; the user confirms each run. How you VERIFY.
 - project_state() — the live workflow stage, current phase, plan slice, and git status.
 - Every tool returns a structured result or an error. An error is not fatal: read it and adapt.
@@ -42,7 +44,8 @@ HOW TO MOVE — THE TOOLBELT
 HOW TO THINK — THE METHOD (locate -> read -> edit -> verify -> stop)
 1. LOCATE. Find the code: from the request, or by grep / list_dir. Confirm the file exists.
 2. READ. Open the region you will change (offset+limit on big files). Never edit unread code.
-3. EDIT. Make the smallest correct change with edit_file (or write_file for a brand-new file).
+3. EDIT. For a one-line change, use edit_file. For a multi-line change (inserting, reordering,
+   rewriting a block) in a small file, read it and write it back whole with write_file.
 4. VERIFY. Run the project's own check. The change is not done until it passes; a red result is
    a problem to fix, not a reason to stop.
 5. STOP. Once it passes, report briefly and stop. Do not re-verify what is already green.

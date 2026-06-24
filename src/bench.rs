@@ -113,6 +113,7 @@ fn collect_files(base: &Path) -> BTreeMap<String, String> {
                     // Leading indentation (the tricky-whitespace signal) is kept.
                     let norm = String::from_utf8_lossy(&bytes)
                         .replace("\r\n", "\n")
+                        .replace('\r', "\n") // lone CR too — line endings must never score a miss
                         .lines()
                         .map(|l| l.trim_end())
                         .collect::<Vec<_>>()

@@ -112,8 +112,10 @@ fn collect_files(base: &Path) -> BTreeMap<String, String> {
                     // stray trailing space on an edited line isn't a false failure.
                     // Leading indentation (the tricky-whitespace signal) is kept.
                     let norm = String::from_utf8_lossy(&bytes)
-                        .replace("\r\n", "\n")
-                        .replace('\r', "\n") // lone CR too — line endings must never score a miss
+                        // Strip ALL carriage returns outright — line endings (CRLF, lone CR,
+                        // doubled CR) must never score a miss, and removing rather than
+                        // converting avoids creating phantom blank lines.
+                        .replace('\r', "")
                         .lines()
                         .map(|l| l.trim_end())
                         .collect::<Vec<_>>()
@@ -200,24 +202,21 @@ fn load_fixtures(fixtures_root: &Path) -> Result<Vec<Fixture>> {
 }
 
 /// The system prompt for a dialect arm. When `use_contract` is set, Generic is driven
-/// by Anvil's operational CONTRACT (the shared system map + the slim coder contract
-/// from `contracts/`). With `--no-contract`, every arm gets the neutral baseline (+ the
-/// dialect's addendum) — which ISOLATES the tool-surface effect from the contract
-/// effect: a Generic arm run neutral is "slim tools + neutral prompt", directly
-/// comparable to the contract arm to see which variable moved the score.
+/// by Anvil's operational CONTRACT (the self-contained slim coder contract in
+/// `contracts/coder_local_base.md` — no separate system map; benching proved the map
+/// was net-harmful load for a small model, and real Anvil supplies orientation via the
+/// live reality snapshot). With `--no-contract`, every arm gets the neutral baseline
+/// (+ the dialect's addendum) — which isolates the tool surface from the contract.
 fn dialect_system(dialect: Dialect, root: &Path, use_contract: bool) -> String {
     if use_contract {
         if let Dialect::Generic = dialect {
-            let map = std::fs::read_to_string(root.join("contracts").join("system_map.md"))
-                .unwrap_or_default();
             let contract =
                 std::fs::read_to_string(root.join("contracts").join("coder_local_base.md"))
                     .unwrap_or_default();
             if !contract.trim().is_empty() {
-                // The map is "prepended to" the contract, per the contract's own pointer.
-                return format!("{}\n\n{}", map.trim(), contract.trim());
+                return contract.trim().to_string();
             }
-            // Contract files missing (running outside the source tree) — fall through
+            // Contract file missing (running outside the source tree) — fall through
             // to the baseline so the sweep still produces numbers.
         }
     }

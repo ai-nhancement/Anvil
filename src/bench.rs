@@ -422,18 +422,39 @@ pub fn run_bench(
     let cfg = load_config(root)?;
     let client = LlmClient::new();
 
+    // Resolve the target. Normally a role keyword or binding name; but a
+    // `<provider>/<model>` spec (e.g. `local-ollama/gemma4:e2b`) targets a raw model
+    // directly, so any pulled model can be benched without first configuring a binding.
     let key = binding_key.unwrap_or("coder");
-    let (binding_name, binding, provider) = cfg
-        .resolve_role_or_binding(key)
-        .map_err(|_| anyhow!("'{}' is not a configured role or model binding", key))?;
-    let api_key = client.get_credential(&binding.provider, provider)?;
-    let model = binding.model.clone();
+    let (label, model, provider, api_key) = match key.split_once('/') {
+        Some((prov, raw_model)) if cfg.providers.contains_key(prov) => {
+            let provider = &cfg.providers[prov];
+            let api_key = client.get_credential(prov, provider)?;
+            (key.to_string(), raw_model.to_string(), provider, api_key)
+        }
+        _ => {
+            let (binding_name, binding, provider) =
+                cfg.resolve_role_or_binding(key).map_err(|_| {
+                    anyhow!(
+                        "'{}' is not a configured role/binding (or a <provider>/<model> spec)",
+                        key
+                    )
+                })?;
+            let api_key = client.get_credential(&binding.provider, provider)?;
+            (
+                binding_name.to_string(),
+                binding.model.clone(),
+                provider,
+                api_key,
+            )
+        }
+    };
 
     let fixtures = load_fixtures(&root.join("bench").join("fixtures"))?;
 
     println!(
-        "Dialect benchmark — binding '{}' (model {}), {} run(s)/cell\nDialects: {}\nContract: {}\n",
-        binding_name,
+        "Dialect benchmark — target '{}' (model {}), {} run(s)/cell\nDialects: {}\nContract: {}\n",
+        label,
         model,
         runs,
         dialects

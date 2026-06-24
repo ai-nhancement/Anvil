@@ -300,6 +300,48 @@ fn heat_color(h: f32) -> Color {
     )
 }
 
+/// A forged blade used as the live "is it working?" indicator. Anatomy:
+/// `--{====>` — `--` grip, `{` crossguard, `====` blade, `>` tip.
+/// While the smith works the whole blade glows in the live heat color and grows
+/// from a stub to full length, then repeats (a forge pulse). When the forge is
+/// idle (`ready`) it rests as a finished, cooled sword in its true colors:
+/// brown grip, dark-gray guard, steel blade. The rendered width is constant in
+/// both states so trailing text never jitters frame to frame.
+const SWORD_BLADE_MAX: usize = 8;
+const SWORD_GRIP_COLOR: Color = Color::Rgb(139, 90, 43); // brown
+const SWORD_GUARD_COLOR: Color = Color::Rgb(90, 90, 90); // dark gray
+const SWORD_BLADE_COLOR: Color = Color::Rgb(205, 205, 205); // steel / light gray
+
+fn forge_sword_spans(tick: u64, heat: f32, ready: bool) -> Vec<Span<'static>> {
+    let bold = Modifier::BOLD;
+    if ready {
+        // Finished, cooled blade at full length, in its true colors.
+        let blade = format!("{}>", "=".repeat(SWORD_BLADE_MAX));
+        vec![
+            Span::styled(
+                "--",
+                Style::default().fg(SWORD_GRIP_COLOR).add_modifier(bold),
+            ),
+            Span::styled(
+                "{",
+                Style::default().fg(SWORD_GUARD_COLOR).add_modifier(bold),
+            ),
+            Span::styled(
+                blade,
+                Style::default().fg(SWORD_BLADE_COLOR).add_modifier(bold),
+            ),
+        ]
+    } else {
+        // Forge pulse: blade grows 1..=MAX then repeats, whole sword glowing hot.
+        let n = 1 + (tick / 3) as usize % SWORD_BLADE_MAX;
+        let pad = " ".repeat(SWORD_BLADE_MAX - n);
+        vec![Span::styled(
+            format!("--{{{}>{}", "=".repeat(n), pad),
+            Style::default().fg(heat_color(heat)).add_modifier(bold),
+        )]
+    }
+}
+
 /// The blacksmith's name for a heat level — shown in the title bar.
 fn heat_name(h: f32) -> &'static str {
     match h {
@@ -7201,29 +7243,28 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let is_streaming = app.llm_rx.is_some() || app.gate_rx.is_some();
     let status_line: Line = if is_streaming {
         let ember = heat_color(app.forge_heat);
-        let sp = FORGE_SPINNER[(app.anim_tick as usize / 2) % FORGE_SPINNER.len()];
         let verb = if app.tool_active {
-            "forging… "
+            "forging "
         } else {
-            "smithing… "
+            "smithing "
         };
-        Line::from(vec![
-            Span::styled(
-                format!(" {} ", sp),
-                Style::default().fg(ember).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                verb,
-                Style::default().fg(ember).add_modifier(Modifier::BOLD),
-            ),
-        ])
+        let mut spans = vec![Span::styled(
+            format!(" {}", verb),
+            Style::default().fg(ember).add_modifier(Modifier::BOLD),
+        )];
+        // The blade grows while the smith works, glowing in the live heat color.
+        spans.extend(forge_sword_spans(app.anim_tick, app.forge_heat, false));
+        Line::from(spans)
     } else {
-        Line::from(Span::styled(
-            "Ready.",
+        // Idle: "Ready" + the finished, cooled sword in its true colors.
+        let mut spans = vec![Span::styled(
+            " Ready ",
             Style::default()
                 .fg(FORGE_MOLTEN)
                 .add_modifier(Modifier::BOLD),
-        ))
+        )];
+        spans.extend(forge_sword_spans(app.anim_tick, app.forge_heat, true));
+        Line::from(spans)
     };
 
     let chat_block = Block::default()

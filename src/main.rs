@@ -131,6 +131,12 @@ enum Commands {
         /// exhausting a provider's per-minute quota (a cascade of errored runs).
         #[arg(long, default_value_t = 0)]
         delay_ms: u64,
+
+        /// Isolation mode: drive every arm with the neutral baseline prompt instead
+        /// of the operational contract. A Generic arm then measures the slim tool
+        /// surface ALONE — separating the tool-surface effect from the contract.
+        #[arg(long)]
+        no_contract: bool,
     },
 }
 
@@ -261,6 +267,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             model,
             dialects,
             delay_ms,
+            no_contract,
         } => {
             let dialects: Vec<dialect::Dialect> = match dialects {
                 Some(list) => {
@@ -286,7 +293,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 // Default: contract (Generic) vs baseline (Codex), WITHIN the model.
                 None => vec![dialect::Dialect::Generic, dialect::Dialect::Codex],
             };
-            bench::run_bench(&cli.project, runs, &dialects, model.as_deref(), delay_ms)
+            bench::run_bench(
+                &cli.project,
+                runs,
+                &dialects,
+                model.as_deref(),
+                delay_ms,
+                !no_contract,
+            )
         }
     }
 }

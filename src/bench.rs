@@ -176,22 +176,27 @@ fn load_fixtures(fixtures_root: &Path) -> Result<Vec<Fixture>> {
     Ok(fixtures)
 }
 
-/// The system prompt for a dialect arm. Generic is driven by Anvil's operational
-/// CONTRACT (the shared system map + the slim coder contract from `contracts/`) — the
-/// thing under test for local models. The other arms get the neutral baseline (+ the
-/// dialect's own addendum), so a sweep is contract-vs-baseline WITHIN one model.
-fn dialect_system(dialect: Dialect, root: &Path) -> String {
-    if let Dialect::Generic = dialect {
-        let map = std::fs::read_to_string(root.join("contracts").join("system_map.md"))
-            .unwrap_or_default();
-        let contract = std::fs::read_to_string(root.join("contracts").join("coder_local_base.md"))
-            .unwrap_or_default();
-        if !contract.trim().is_empty() {
-            // The map is "prepended to" the contract, per the contract's own pointer.
-            return format!("{}\n\n{}", map.trim(), contract.trim());
+/// The system prompt for a dialect arm. When `use_contract` is set, Generic is driven
+/// by Anvil's operational CONTRACT (the shared system map + the slim coder contract
+/// from `contracts/`). With `--no-contract`, every arm gets the neutral baseline (+ the
+/// dialect's addendum) — which ISOLATES the tool-surface effect from the contract
+/// effect: a Generic arm run neutral is "slim tools + neutral prompt", directly
+/// comparable to the contract arm to see which variable moved the score.
+fn dialect_system(dialect: Dialect, root: &Path, use_contract: bool) -> String {
+    if use_contract {
+        if let Dialect::Generic = dialect {
+            let map = std::fs::read_to_string(root.join("contracts").join("system_map.md"))
+                .unwrap_or_default();
+            let contract =
+                std::fs::read_to_string(root.join("contracts").join("coder_local_base.md"))
+                    .unwrap_or_default();
+            if !contract.trim().is_empty() {
+                // The map is "prepended to" the contract, per the contract's own pointer.
+                return format!("{}\n\n{}", map.trim(), contract.trim());
+            }
+            // Contract files missing (running outside the source tree) — fall through
+            // to the baseline so the sweep still produces numbers.
         }
-        // Contract files missing (running outside the source tree) — fall through to
-        // the baseline so the sweep still produces numbers.
     }
     let add = dialect.prompt_addendum();
     if add.is_empty() {
@@ -234,12 +239,14 @@ async fn run_one(
     scratch: &Path,
     expects_change: bool,
     root: &Path,
+    use_contract: bool,
 ) -> RunOutcome {
     // Apply the dialect at the BENCH layer — production `chat_turn_stream` is left
     // untouched. The advertised tool surface and the per-dialect system prompt are
-    // what differ between arms (Generic is driven by our operational contract).
+    // what differ between arms (Generic is driven by our operational contract, unless
+    // --no-contract isolates the tool surface with the neutral prompt).
     let advertised = dialect.advertise(&crate::tools::tool_defs());
-    let system = dialect_system(dialect, root);
+    let system = dialect_system(dialect, root, use_contract);
     let mut history = vec![ChatMessage::user(fixture.instruction.clone())];
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let mut outcome = RunOutcome::default();
@@ -324,6 +331,7 @@ pub fn run_bench(
     dialects: &[Dialect],
     binding_key: Option<&str>,
     delay_ms: u64,
+    use_contract: bool,
 ) -> Result<()> {
     load_local_env(root);
     let cfg = load_config(root)?;
@@ -339,7 +347,7 @@ pub fn run_bench(
     let fixtures = load_fixtures(&root.join("bench").join("fixtures"))?;
 
     println!(
-        "Dialect benchmark — binding '{}' (model {}), {} run(s)/cell\nDialects: {}\n",
+        "Dialect benchmark — binding '{}' (model {}), {} run(s)/cell\nDialects: {}\nContract: {}\n",
         binding_name,
         model,
         runs,
@@ -347,7 +355,12 @@ pub fn run_bench(
             .iter()
             .map(|d| format!("{:?}", d))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        if use_contract {
+            "ON (Generic arm uses the operational contract)"
+        } else {
+            "OFF (--no-contract: all arms use the neutral baseline — isolates the tool surface)"
+        }
     );
 
     // results[fixture_index][dialect_index] = Vec<RunOutcome>
@@ -375,6 +388,7 @@ pub fn run_bench(
                             scratch.path(),
                             expects_change,
                             root,
+                            use_contract,
                         )
                         .await,
                     );

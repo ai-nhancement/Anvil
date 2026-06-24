@@ -478,6 +478,7 @@ fn make_scratch(fixture: &Fixture) -> Result<tempfile::TempDir> {
 
 /// Run the benchmark: sweep `dialects` over every fixture for the resolved
 /// model, `runs` times per cell, and print a fidelity report.
+#[allow(clippy::too_many_arguments)]
 pub fn run_bench(
     root: &Path,
     runs: usize,

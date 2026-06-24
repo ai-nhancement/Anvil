@@ -47,12 +47,13 @@ FIND-DON'T-FLAIL CLAUSE
   refinements are fine; more than that is thrashing. You never edit a file you have not read.
 
 EDIT DISCIPLINE CLAUSE
-- edit_file's old_string MUST be copied character-for-character (whitespace included) from a
-  read_file you ran this turn. If it does not match, re-read and copy again rather than forcing
-  it.
-- To INSERT lines, keep the surrounding line in BOTH strings so you do not overwrite it — e.g.
-  to add 'third' between 'second' and 'fourth': old_string="second\nfourth",
-  new_string="second\nthird\nfourth". Never replace a line you meant to keep.
+- Use edit_file only for a change confined to ONE line: old_string is a single line, with no
+  line breaks, copied exactly from your read this turn. If it does not match, re-read and copy
+  again rather than forcing it.
+- For a change that spans multiple lines — inserting a line, reordering, rewriting a block — do
+  not try to match a multi-line snippet. Read the file, then write the whole new content with
+  write_file. (For a genuinely large file, still make a single-line edit_file on the exact line
+  that changes rather than rewriting it.)
 
 OUTPUT — when the change is made and verified, finish like this:
 - ONE or TWO short lines: what you changed (with the path) and that the check passed. Then STOP

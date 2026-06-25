@@ -1,0 +1,3 @@
+title = "transposed rates in shipping_cost()"
+briefing = "shipping_cost(weight, distance) returns the base fee 5.0 plus weight * per_kg (0.5) plus distance * per_km (0.1)."
+bug = "shipping_cost transposes the two rates: it computes `weight * PER_KM + distance * PER_KG`, multiplying weight by the per-KILOMETER rate and distance by the per-KILOGRAM rate — the opposite of the spec in the briefing. The output is plausible-looking but wrong. A subtle transposition / wrong-variable bug that requires cross-checking the formula against the briefing."

@@ -1,0 +1,11 @@
+--- a/shipping.py
++++ b/shipping.py
+@@ -1,1 +1,9 @@
+ BASE_FEE = 5.0
++PER_KG = 0.5
++PER_KM = 0.1
++
++
++def shipping_cost(weight, distance):
++    # base fee + weight charge + distance charge
++    return BASE_FEE + weight * PER_KM + distance * PER_KG

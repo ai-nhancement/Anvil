@@ -1,0 +1,9 @@
+--- a/users.py
++++ b/users.py
+@@ -3,3 +3,7 @@ def display_name(user):
+ def display_name(user):
+     return user.get("name", "anonymous")
++
++
++def is_adult(age):
++    return age > 18

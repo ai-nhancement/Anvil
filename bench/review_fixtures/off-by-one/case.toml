@@ -1,0 +1,4 @@
+title = "off-by-one in average()"
+briefing = "Added an `average(nums)` helper to stats.py that returns the arithmetic mean of a list of numbers."
+# `bug` is the ground-truth defect the LLM-judge checks the review against.
+bug = "average() computes `sum(nums) / len(nums) - 1`, subtracting 1 from the mean. Every result is wrong by one — an incorrect-arithmetic / off-by-one bug. The `- 1` should not be there."

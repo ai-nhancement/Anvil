@@ -1,0 +1,3 @@
+title = "boundary error in is_adult()"
+briefing = "Added `is_adult(age)` returning whether someone qualifies as an adult (18 and over)."
+bug = "is_adult uses `age > 18`, which excludes exactly 18 — but 18 should qualify. The comparison should be `>= 18`. A boundary / wrong-operator (off-by-one on the threshold) bug."

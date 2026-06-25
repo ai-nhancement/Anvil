@@ -1,0 +1,9 @@
+--- a/basket.py
++++ b/basket.py
+@@ -1,2 +1,6 @@
+ ITEMS = []
++
++
++def add_item(item, basket=[]):
++    basket.append(item)
++    return basket

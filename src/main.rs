@@ -25,6 +25,7 @@ mod phase;
 mod plan;
 mod reality;
 mod repomap;
+mod review_bench;
 mod specialist;
 mod state;
 mod talk;
@@ -152,6 +153,29 @@ enum Commands {
         /// variant without touching the locked base.
         #[arg(long, value_name = "FILE")]
         contract: Option<String>,
+    },
+
+    /// Reviewer-role benchmark: how well a model performs R1/R2 review. Each case is
+    /// a diff with a planted bug (plus decoys); the model reviews it and a strong
+    /// `--judge` model scores the catch. Run from the Anvil source tree (where
+    /// `bench/review_fixtures/` lives).
+    ReviewBench {
+        /// Model under test (role/binding name, or a `<provider>/<model>` spec).
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Strong judge model that scores each review (role/binding or `<provider>/<model>`).
+        /// Use a capable model — the judge's verdict is the score.
+        #[arg(long)]
+        judge: String,
+
+        /// Runs per case — model output is stochastic.
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+
+        /// Only run the case with this id (e.g. off-by-one) — focuses a diagnostic.
+        #[arg(long, value_name = "ID")]
+        case: Option<String>,
     },
 }
 
@@ -323,5 +347,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 contract.as_deref(),
             )
         }
+        Commands::ReviewBench {
+            model,
+            judge,
+            runs,
+            case,
+        } => review_bench::run_review_bench(
+            &cli.project,
+            model.as_deref(),
+            &judge,
+            runs,
+            case.as_deref(),
+        ),
     }
 }

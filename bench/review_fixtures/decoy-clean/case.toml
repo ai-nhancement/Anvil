@@ -1,0 +1,5 @@
+title = "clean clamp() — no real defect (decoy)"
+briefing = "Added `clamp(x, lo, hi)` to constrain a value to the inclusive range [lo, hi]."
+# A decoy: the diff is CORRECT. `bug` starting with "NONE" tells the judge this is a
+# false-positive test — a good reviewer should NOT invent a defect here.
+bug = "NONE — this diff is correct. clamp() returns max(lo, min(x, hi)), which properly bounds x to [lo, hi]. There is no real defect; flagging a substantive bug here is a false positive."

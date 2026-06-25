@@ -1,0 +1,3 @@
+title = "no empty-list guard in average()"
+briefing = "Added `average(nums)` to compute the mean of a list."
+bug = "average() does `sum(nums) / len(nums)` with no guard for an empty list, so average([]) raises ZeroDivisionError. It is missing an empty/edge-case check for the len == 0 case."

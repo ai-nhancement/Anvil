@@ -1,0 +1,3 @@
+title = "mutable default argument in add_item()"
+briefing = "add_item(item, basket=None) appends item to a basket and returns it — a FRESH empty basket each call when none is passed."
+bug = "add_item uses `basket=[]` as a mutable default argument. In Python that list is created ONCE and shared across every call that doesn't pass a basket, so items leak between independent calls. The briefing promises a fresh basket each time; the code does not deliver it. Classic mutable-default-argument bug (the fix is `basket=None` then `if basket is None: basket = []`)."

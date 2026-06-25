@@ -1,0 +1,3 @@
+title = "silent failure in load_config()"
+briefing = "Added `load_config(path)` that reads and parses a JSON config file and returns the parsed dict."
+bug = "load_config catches `except Exception` and returns None, silently swallowing ALL errors — a missing file, a JSON syntax error, a permissions problem all become a silent None instead of surfacing. The overly-broad except masks real failures and will cause confusing downstream bugs."

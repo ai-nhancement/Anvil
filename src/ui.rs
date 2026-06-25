@@ -375,6 +375,11 @@ const ROLE_CODER: Color = Color::LightBlue;
 const ROLE_R1: Color = Color::Magenta;
 const ROLE_R2: Color = Color::Rgb(50, 255, 127);
 
+/// Wizard amethyst — the setup wizard's signature color (🪄 title + default
+/// border). Deliberately purple/magical and distinct from the molten-orange
+/// brand color the other popups share.
+const WIZARD_PURPLE: Color = Color::Rgb(168, 120, 240);
+
 /// Color for [system] messages (e.g. "Work in this Repo: C:\Anvil", gate instructions,
 /// confirmations after /save-*/critical-*, "✓ ... complete" notices, etc.).
 /// Distinct from normal chat, [you] (green), [coder] (light blue), reviewer findings (cyan), etc.
@@ -7698,8 +7703,8 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
         .collect();
 
     // Color the wizard popup border for role assignment (and quick Ollama picks)
-    // so CODER/R1/R2 identity stays visible (blue / purple / lime). The title itself
-    // uses the Anvil brand color (shared by every popup header) so it stands out.
+    // so CODER/R1/R2 identity stays visible (blue / purple / lime). Every other
+    // step gets the wizard's signature amethyst border to match the 🪄 title.
     let wiz_border = match &wizard.step {
         WizardStep::QuickOllamaModelPick { role } if role == "coder" => ROLE_CODER,
         WizardStep::QuickOllamaModelPick { role } if role == "reviewer_a" => ROLE_R1,
@@ -7707,7 +7712,7 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
         WizardStep::RoleAssignment { role } if role == "coder" => ROLE_CODER,
         WizardStep::RoleAssignment { role } if role == "reviewer_a" => ROLE_R1,
         WizardStep::RoleAssignment { role } if role == "reviewer_b" => ROLE_R2,
-        _ => Color::Yellow,
+        _ => WIZARD_PURPLE,
     };
 
     let list = List::new(items)
@@ -7716,9 +7721,9 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(wiz_border))
                 .title(Span::styled(
-                    format!(" {} ", wizard.list_title),
+                    format!(" 🪄 {} ", wizard.list_title),
                     Style::default()
-                        .fg(FORGE_MOLTEN)
+                        .fg(WIZARD_PURPLE)
                         .add_modifier(Modifier::BOLD),
                 )),
         )

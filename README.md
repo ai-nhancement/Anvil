@@ -35,6 +35,7 @@ One Rust binary. Model-agnostic. Installs in one line and updates itself.
 - 🤖 **A real agent coder** — reads, edits, and runs the repo through tools (including a reliable `apply_patch` diff format). No attaching files, no copy-pasting output to disk.
 - 🧠 **Doesn't lose the plot** — a persistent task anchor, automatic compaction into working memory, and a lightweight repo map keep the coder on-goal across long, tool-heavy sessions.
 - 🌐 **Any provider** — Ollama / local, OpenAI, xAI (Grok), Anthropic, Groq, Azure, AWS Bedrock, Google, OpenRouter, and any OpenAI-compatible gateway. Mix vendors freely — that's the whole point.
+- 🧪 **Local models that punch above their weight** — a bench-validated library of per-model, per-role *operational contracts*, plus the `bench` / `review-bench` / `judge-check` tools to tune and *prove* them. Bring any local model; Anvil tells you — measured, not promised — which role it's good for and the contract that gets it there. See [`contracts/MODEL_FINDINGS.md`](contracts/MODEL_FINDINGS.md).
 - 🧩 **One config for every repo** — set up providers, models, and roles once (globally); override per-repo only when you want to.
 - 📦 **One-line install + self-update** — prebuilt binaries for macOS, Linux, and Windows; `anvil update` swaps the binary in place.
 - 🖥️ **A forge-themed TUI** — live streaming and tool activity, a selectable command-approval prompt, and break-in-anytime interrupt.
@@ -215,6 +216,56 @@ Between the gates it's an ordinary, capable coding agent — built to stay on ta
 
 ---
 
+## Local models: bench-tuned contracts
+
+Local models (via Ollama) are capable but uneven — the right *prompt* makes or breaks them, and the
+right prompt differs by model **and** by role. Anvil ships a small **library of bench-validated
+contracts** and the **benchmark to validate them**, so "use a local model" becomes a lookup with
+receipts instead of trial and error.
+
+**Per-capability coder tiers.** A weak (~2B) model needs a structured contract to act and verify
+reliably; a capable (≥4B) model is *hurt* by the extra scaffolding and does better with a minimal
+one (measured across gemma 2B/4B and a 30B qwen coder — the crossover is real):
+- `full` (`contracts/coder_local_base.md`) — role + ACT / VERIFY / TRUTH / PERSISTENCE clauses (~2B).
+- `minimal` (`contracts/coder_local_base_v4.md`) — role + the edit/write tool line, nothing else (≥4B).
+
+**Reviewer contracts too.** Reviewing is a separate skill from coding — a great coder can be a noisy
+reviewer. The `reviewer` contract keeps Anvil's investigate-with-read-only-tools behavior and adds a
+no-false-alarm clause for models that over-flag.
+
+**Configure per binding.** Set `contract` on a model binding — a tier alias or a path to a `.md`.
+Omit it for frontier/cloud models; they keep Anvil's built-in prompts. A name that doesn't resolve
+falls back to the built-in prompt (so a typo can't leave a role prompt-less).
+
+```toml
+[model_bindings.my-local-coder]
+provider = "local-ollama"
+model    = "gemma4:e4b"
+contract = "minimal"        # "full" | "minimal" | a path to a .md
+
+[model_bindings.my-local-reviewer]
+provider = "local-ollama"
+model    = "gemma4:e4b"
+contract = "reviewer"
+```
+
+**The benchmark is the moat.** A contract is only as good as its validation, and the bench ships in
+the box so you — or a contributor — can tune and *prove* a contract, even beat the ones here:
+- `anvil bench --model <provider>/<model> --contract <file>` — scores a **coder** contract over edit
+  fixtures, including multi-step ones (multi-file, cross-file bug hunt, verify-and-iterate).
+- `anvil review-bench --model <model> --judge <model> --contract <file>` — scores a **reviewer**:
+  catch-rate (bugs flagged) and clean-rate (no false alarms), graded by a judge model.
+- `anvil judge-check --judge <model>` — the reviewer bench is only as good as its judge, so calibrate
+  any judge against a gold answer key first (**≥90%** to trust it). A free local judge that passes:
+  `qwen3-coder:30b`.
+
+Validated per-model results and the recommended role for each model live in
+**[`contracts/MODEL_FINDINGS.md`](contracts/MODEL_FINDINGS.md)**. Bringing a new model? The recipe
+there walks you through bench → tune → record — and clearly marks the models that *can't* do a role
+(e.g. one that emits tool calls as text and can't drive the coder loop at all).
+
+---
+
 ## One config for every repo
 
 Provider/model/role setup lives in a **global config** shared by every repo, so you
@@ -346,6 +397,11 @@ Commands:
   update   Update Anvil to the latest release (download + self-replace)
   ui       Launch the full interactive TUI (the default when no subcommand is given)
   talk | plan | phase   Legacy text-only / one-shot paths (the agentic flow lives in the TUI)
+
+  # Contract dev tools (run from the Anvil source tree):
+  bench          Score a coder contract for a model over the edit fixtures
+  review-bench   Score a reviewer (catch / clean), graded by a --judge model
+  judge-check    Calibrate a judge against the gold answer key before trusting it
 ```
 
 All commands accept `--project <path>` (defaults to `.`).
@@ -354,6 +410,7 @@ All commands accept `--project <path>` (defaults to `.`).
 
 - **Global:** `<OS config dir>/anvil/anvil.toml` (providers, model bindings, roles) and `<OS config dir>/anvil/.env` (shared keys).
 - **Per repo:** `anvil.toml` (optional override), `.anvil/` (session ledger, working memory, context files, logs), and the review artifacts at the repo root — `plan.md`, `REVIEW_plan_R{1,2}.md`, `REVIEW_P*_R{1,2}.md` (phases), and `REVIEW_<label>_{BRIEF,R1,R2}.md` (ad-hoc `/review`). When a plan's last phase ships, the plan is retired to `*_plan_closed.md` and its `REVIEW_plan_*` files are archived under `.anvil/plans/archive/`.
+- **Contract library** (in the source tree): `contracts/` — the bench-validated coder/reviewer contracts and the model→role findings ([`MODEL_FINDINGS.md`](contracts/MODEL_FINDINGS.md)); `bench/` — the coder fixtures, reviewer cases, and judge calibration set. Shipped contracts are also embedded in the binary, so a configured `contract` works without the source tree.
 
 `anvil status` is the quickest way to see where things stand.
 

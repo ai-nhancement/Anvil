@@ -1,0 +1,6 @@
+edit_type = "cross-file-bug"
+instruction = "format_name() returns the wrong result and check.py fails. Find and fix the underlying bug. It is not in check.py — trace where format_name actually goes wrong. Do not edit check.py."
+# LIVE cross-file bug hunt: the symptom is in formatting.py's format_name, but the
+# real bug is in the helper it calls in text_utils.py. The model must trace the call
+# chain to the true cause. Scored by the check passing.
+check = "python -B check.py"

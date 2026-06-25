@@ -1,0 +1,5 @@
+edit_type = "multi-file-feature"
+instruction = "check.py fails. Add an `apply_tax(amount)` function to pricing.py that applies TAX_RATE, and a `total()` method to the Cart class in cart.py that returns the subtotal of the item prices with tax applied (call apply_tax). Make check.py pass without editing it."
+# LIVE: requires editing TWO files (pricing.py + cart.py) and reading a third
+# (check.py) to learn the expected behavior. Scored by the check passing.
+check = "python -B check.py"

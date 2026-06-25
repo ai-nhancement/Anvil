@@ -1,0 +1,6 @@
+edit_type = "preserve-behavior"
+instruction = "Add an optional `excited` parameter to greet() in greet.py: when excited=True, end the greeting with '!!!' instead of '!'. Existing calls like greet('Sam') must keep working unchanged. Make check.py pass without editing it."
+# LIVE: extends an existing function while preserving backward compatibility. A
+# careless rewrite breaks the existing-call assert, so the model must keep the
+# default behavior intact. Scored by the check passing.
+check = "python -B check.py"

@@ -7,18 +7,21 @@ model? The recipe at the bottom tells you how to slot it in.
 
 > Numbers from `anvil bench` (coder: 10 fixtures incl. multi-step ones, n=10 → /100, scored by a
 > real check passing) and `anvil review-bench` (6 planted-bug cases → catch /30, + 1 decoy →
-> clean /5, scored by claude-sonnet-4-6 as judge). Run on 2026-06-25.
+> clean /5, judge = claude-sonnet-4-6). Run on 2026-06-25. Reviewer numbers in the table are under
+> the *built-in* reviewer prompt; "Reviewer contracts" below shows the gains from a real reviewer
+> contract. Validate any judge first with `anvil judge-check` (see "Choosing a judge").
 
 ## Summary
 
 | model | size / family | coder contract | coder | reviewer (catch / clean) | best role |
 |---|---|---|---|---|---|
 | gemma4:e2b | 2B / gemma | **full** (`coder_local_base.md`) | 83/100 | 28/30 · 3/5 | light coder (simple edits) |
-| gemma4:e4b | 4B / gemma | **minimal** (`coder_local_base_v4.md`) | **94/100** | 30/30 · **1/5** | **coder** (not reviewer — noisy) |
+| gemma4:e4b | 4B / gemma | **minimal** (`coder_local_base_v4.md`) | **94/100** | 30/30 · 1/5 → **4/5**ᴾ | **coder** (+ reviewer ᴾ) |
 | qwen2.5-coder:7b | 7B / qwen2.5 | — (cannot drive tools) | **0/100** | 14/30 · **5/5** | **reviewer only** (high-precision) |
 | qwen3-coder:30b | 30B / qwen3 | **minimal** (`coder_local_base_v4.md`) | 93/100 | **30/30 · 5/5** | **coder + reviewer** (all-rounder) |
 
 *catch = planted bugs flagged (recall); clean = decoys left alone (precision / no false alarms).*
+*ᴾ = under the precision reviewer contract (`reviewer_local_precision.md`); built-in-prompt clean is 1/5. See "Reviewer contracts".*
 
 ## What discriminates (and what doesn't)
 
@@ -50,9 +53,11 @@ would have called e2b and qwen3-30b both "~100%"; the faithful bench shows 1 vs 
 ### gemma4:e4b — 4B, gemma → coder
 - **Coder 94/100 (minimal v4) — best coder tested.** Handles the multi-step work far better than
   e2b (`multi-file-feature` 6/10, `fix-failing-test` 10/10). Adding clauses *hurts* it.
-- **Reviewer 30/30 catch but only 1/5 clean.** Catches every planted bug — and also "finds" bugs
-  in correct code 4 times out of 5. **Too noisy to trust as a reviewer.**
-- **Role: coder.** It's the strongest small coder here; keep it off the review gate.
+- **Reviewer: 30/30 catch, but 1/5 clean under the *built-in* prompt** — it "finds" bugs in correct
+  code 4 of 5 times. The fix is a contract, not a different model: under `reviewer_local_precision.md`
+  (minimal base + a NO-FALSE-ALARM clause) clean jumps to **4/5** with catch unchanged at 30/30.
+- **Role: coder — and a viable reviewer *with the precision contract*.** On the built-in prompt,
+  keep it off the gate; with the precision contract it's usable. (See "Reviewer contracts".)
 
 ### qwen2.5-coder:7b — 7B, qwen2.5 → reviewer only
 - **Coder 0/100 — cannot drive Anvil's loop.** It emits tool calls as fenced-JSON *text* instead
@@ -75,9 +80,57 @@ would have called e2b and qwen3-30b both "~100%"; the faithful bench shows 1 vs 
 ## How this maps to Anvil's two-gate review
 
 Anvil wants a strong **coder** plus a **different-family reviewer**. The data says: code with
-**e4b** or **qwen3-coder:30b**; review with **qwen3-coder:30b** (best) or **qwen2.5-coder:7b** (a
-free precision reviewer that can't code but reads well). **Don't** review with **e4b** — it's a
-great coder but a noisy reviewer. Coding skill ≠ reviewing skill; pick per role, not per model.
+**e4b** or **qwen3-coder:30b**; review with **qwen3-coder:30b** (best), **qwen2.5-coder:7b** (a
+free precision reviewer that can't code but reads well), or **e4b under the precision reviewer
+contract**. The headline: coding skill ≠ reviewing skill, *and* a model's reviewer behavior is
+itself contract-shaped — e4b goes from "too noisy to gate" to "usable" on one clause. Pick per
+role, and give each role its contract.
+
+## Reviewer contracts
+
+The reviewer is a role, so it gets a contract too — same method as the coder. Two tiers so far in
+`contracts/`:
+- `reviewer_local_base.md` — minimal: role + output, nothing else.
+- `reviewer_local_precision.md` — base + a **NO-FALSE-ALARM clause** ("report a defect only when you
+  can name the line and say why; if the diff is clean, pass it").
+
+A/B on e4b (n=5, claude judge) — catch held at 30/30 throughout; the lever is precision:
+
+| reviewer prompt | catch | clean |
+|---|---|---|
+| built-in generic | 30/30 | 1/5 |
+| base contract | 30/30 | 2/5 |
+| **+ NO-FALSE-ALARM clause** | 30/30 | **4/5** |
+
+Structure alone helps a little (1→2); the one clause is the real lever (2→4), at zero cost to
+recall — the same lesson as the coder side. Bench reviewer contracts with
+`anvil review-bench --model X --judge Y --contract <file>`.
+
+(Caveat: clean-rate rests on a single decoy case — directional, not precise. More decoy cases
+would firm it up, and full re-validation of every model under the precision contract is pending.)
+
+## Choosing a judge (the bench is only as good as it)
+
+`review-bench` scores a reviewer with a **judge** model — so a lenient judge would silently inflate
+every reviewer number. Validate any candidate against the gold answer key first:
+
+`anvil judge-check --judge <provider>/<model>` scores it on 12 fixed (review, correct-verdict)
+cases; **≥90% means it's trustworthy.** The gold set's MISSED / FALSE_POSITIVE cases are the real
+test — a rubber-stamp judge fails them.
+
+Calibration results (n=2):
+
+| judge | access | score |
+|---|---|---|
+| claude-sonnet-4-6 | paid | 24/24 |
+| **qwen3-coder:30b** | **free, local** | **24/24** |
+| nim-qwen3.5-397b | free (slow) | 22/22 |
+| nim-glm-5.1 | free (slow) | 23/23 |
+
+**Recommended: `qwen3-coder:30b` (local)** — perfect calibration, no API key, no rate limits. Use
+claude (or any strong paid model) for speed. All four cleared the bar, so the set validates
+competence and catches lenient judges but doesn't *rank* capable ones — add borderline cases to
+discriminate further.
 
 ## Bringing a new model
 
@@ -87,9 +140,11 @@ great coder but a noisy reviewer. Coding skill ≠ reviewing skill; pick per rol
    multi-step fixtures, not just the easy ones.
 2. If it scores ~0 with valid-looking prose, it's emitting tool calls as text (like
    qwen2.5-coder:7b) — it needs a tool-dialect, not a contract. Consider it for reviewing instead.
-3. Rate it as a reviewer:
-   `anvil review-bench --model <provider>/<model> --judge reviewer-a` — watch BOTH catch (recall)
-   and clean (precision); a high catch with low clean is a *noisy* reviewer.
+3. Rate it as a reviewer — first confirm your judge is trustworthy with
+   `anvil judge-check --judge <your-judge>` (≥90%), then
+   `anvil review-bench --model <provider>/<model> --judge <judge>`. Watch BOTH catch (recall) and
+   clean (precision); a high catch with low clean is *noisy* — try
+   `--contract contracts/reviewer_local_precision.md` to fix it.
 4. Record the result here and the role it earned.
 
 ## Configuring a model's contract

@@ -1,0 +1,117 @@
+# Gold calibration set for the reviewer-bench JUDGE.
+#
+# Each case is a fixed (bug, review) pair with the verdict a human would clearly give.
+# `anvil judge-check --judge <model>` feeds these to a candidate judge and reports how
+# often it matches `gold` — so "bring your own judge" is safe: calibrate it first.
+#
+# bug starting with "NONE" => decoy (correct code); gold is CLEAN or FALSE_POSITIVE.
+# otherwise => a planted bug; gold is CAUGHT or MISSED.
+# These are deliberately UNAMBIGUOUS — a good judge should get them all.
+
+[[case]]
+id = "off-by-one-caught"
+bug = "average() computes sum(nums) / len(nums) - 1, subtracting 1 from the mean — an off-by-one bug; the - 1 should not be there."
+review = """## Verdict: Needs Work
+## Issues
+- stats.py: `average()` returns `sum(nums) / len(nums) - 1` — the trailing `- 1` makes every result one too low. Remove it.
+## Risks: none"""
+gold = "CAUGHT"
+
+[[case]]
+id = "off-by-one-missed"
+bug = "average() computes sum(nums) / len(nums) - 1, subtracting 1 from the mean — an off-by-one bug; the - 1 should not be there."
+review = """## Verdict: Pass
+## Issues
+- none — `average()` cleanly sums the list and divides by its length to get the mean.
+## Risks: none"""
+gold = "MISSED"
+
+[[case]]
+id = "empty-check-caught"
+bug = "average() divides by len(nums) with no guard for an empty list, so average([]) raises ZeroDivisionError — a missing edge-case check."
+review = """## Verdict: Needs Work
+## Issues
+- stats.py: `average([])` divides by zero (`len(nums)` is 0) and raises ZeroDivisionError — needs an empty-list guard.
+## Risks: crash on empty input."""
+gold = "CAUGHT"
+
+[[case]]
+id = "empty-check-missed"
+bug = "average() divides by len(nums) with no guard for an empty list, so average([]) raises ZeroDivisionError — a missing edge-case check."
+review = """## Verdict: Pass
+## Issues
+- none. The implementation is the standard mean formula and reads clearly.
+## Risks: none"""
+gold = "MISSED"
+
+[[case]]
+id = "wrong-operator-caught"
+bug = "is_adult uses `age > 18`, which excludes exactly 18; it should be `>= 18`. A boundary / wrong-operator bug."
+review = """## Verdict: Needs Work
+## Issues
+- users.py: `is_adult` uses `age > 18`, so an 18-year-old returns False. Should be `age >= 18`.
+## Risks: none"""
+gold = "CAUGHT"
+
+[[case]]
+id = "swallowed-exception-caught"
+bug = "load_config catches `except Exception` and returns None, silently swallowing all errors (missing file, bad JSON, permissions) instead of surfacing them."
+review = """## Verdict: Needs Work
+## Issues
+- config_loader.py: the bare `except Exception: return None` hides real failures — a missing file or malformed JSON becomes a silent None. Narrow the except and let real errors surface.
+## Risks: silent misconfiguration downstream."""
+gold = "CAUGHT"
+
+[[case]]
+id = "swallowed-exception-missed-unrelated"
+bug = "load_config catches `except Exception` and returns None, silently swallowing all errors (missing file, bad JSON, permissions) instead of surfacing them."
+review = """## Verdict: Needs Work
+## Issues
+- config_loader.py: consider adding a type hint to the return value and a docstring describing the path argument.
+## Risks: none"""
+gold = "MISSED"
+
+[[case]]
+id = "mutable-default-caught"
+bug = "add_item uses `basket=[]` as a mutable default argument — shared across calls, so items leak between independent calls. Should be `basket=None`."
+review = """## Verdict: Needs Work
+## Issues
+- basket.py: `def add_item(item, basket=[])` uses a mutable default — the list is created once and shared across calls, so items leak between calls. Use `basket=None` then create a new list inside.
+## Risks: state leaking between unrelated calls."""
+gold = "CAUGHT"
+
+[[case]]
+id = "transposed-rates-caught"
+bug = "shipping_cost computes `weight * PER_KM + distance * PER_KG`, transposing the two rates — weight should use PER_KG and distance PER_KM."
+review = """## Verdict: Needs Work
+## Issues
+- shipping.py: the rates are swapped — `weight * PER_KM + distance * PER_KG` multiplies weight by the per-km rate and distance by the per-kg rate. Per the briefing it should be `weight * PER_KG + distance * PER_KM`.
+## Risks: wrong charges."""
+gold = "CAUGHT"
+
+[[case]]
+id = "transposed-rates-missed"
+bug = "shipping_cost computes `weight * PER_KM + distance * PER_KG`, transposing the two rates — weight should use PER_KG and distance PER_KM."
+review = """## Verdict: Pass
+## Issues
+- none — the function adds the base fee to the weight and distance charges as described.
+## Risks: none"""
+gold = "MISSED"
+
+[[case]]
+id = "decoy-clean-with-nit"
+bug = "NONE — this diff is correct. clamp() returns max(lo, min(x, hi)), which properly bounds x to [lo, hi]. There is no real defect."
+review = """## Verdict: Pass
+## Issues
+- none. `clamp(x, lo, hi)` correctly bounds x to [lo, hi]. (Minor: a one-line docstring would be nice, but not required.)
+## Risks: none"""
+gold = "CLEAN"
+
+[[case]]
+id = "decoy-false-positive"
+bug = "NONE — this diff is correct. clamp() returns max(lo, min(x, hi)), which properly bounds x to [lo, hi]. There is no real defect."
+review = """## Verdict: Needs Work
+## Issues
+- math_utils.py: `clamp` returns the wrong result when x is within range — it returns `min(x, hi)` instead of x. This is a correctness bug.
+## Risks: incorrect clamping."""
+gold = "FALSE_POSITIVE"

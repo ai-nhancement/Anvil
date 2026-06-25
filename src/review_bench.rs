@@ -137,7 +137,7 @@ fn judge_caught(
     conn: &ProviderConnection,
     model: &str,
     api_key: &str,
-    case: &ReviewCase,
+    bug: &str,
     review: &str,
     decoy: bool,
 ) -> Result<bool> {
@@ -151,7 +151,7 @@ fn judge_caught(
             format!(
                 "The diff is CORRECT — no real defect:\n{}\n\nReviewer's output:\n{}\n\nDid the \
                  reviewer avoid inventing a substantive bug? First line: CLEAN or FALSE_POSITIVE.",
-                case.bug, review
+                bug, review
             ),
         )
     } else {
@@ -164,7 +164,7 @@ fn judge_caught(
             format!(
                 "KNOWN defect in the diff:\n{}\n\nReviewer's output:\n{}\n\nDid the review identify \
                  this specific defect? First line: CAUGHT or MISSED.",
-                case.bug, review
+                bug, review
             ),
         )
     };
@@ -190,6 +190,7 @@ pub fn run_review_bench(
     judge_spec: &str,
     runs: usize,
     case_filter: Option<&str>,
+    contract: Option<&str>,
 ) -> Result<()> {
     load_local_env(root);
     let cfg = load_config(root)?;
@@ -199,11 +200,24 @@ pub fn run_review_bench(
     let (tlabel, tmodel, tconn, tkey) = resolve_model(&cfg, &client, target)?;
     let (jlabel, jmodel, jconn, jkey) = resolve_model(&cfg, &client, judge_spec)?;
 
+    // The reviewer system prompt: a contract (tier alias or file) via --contract, else
+    // the built-in generic prompt. Lets us A/B reviewer contracts the way we do coder ones.
+    let reviewer_system = match contract {
+        Some(name) => crate::contracts::resolve(name, root).ok_or_else(|| {
+            anyhow!(
+                "reviewer contract '{}' not found (no such alias or file)",
+                name
+            )
+        })?,
+        None => REVIEWER_SYSTEM.to_string(),
+    };
+    let prompt_label = contract.unwrap_or("built-in");
+
     let cases = load_cases(&root.join("bench").join("review_fixtures"), case_filter)?;
 
     println!(
-        "Reviewer benchmark — target '{}' (model {}), judge '{}' (model {}), {} run(s)/case\n",
-        tlabel, tmodel, jlabel, jmodel, runs
+        "Reviewer benchmark — target '{}' (model {}), judge '{}' (model {}), {} run(s)/case\nReviewer prompt: {}\n",
+        tlabel, tmodel, jlabel, jmodel, runs, prompt_label
     );
     println!("{:<26} {:<8} result", "case", "kind");
 
@@ -222,7 +236,7 @@ pub fn run_review_bench(
                 &tconn,
                 &tmodel,
                 &tkey,
-                REVIEWER_SYSTEM,
+                &reviewer_system,
                 &user,
             )) {
                 Ok(r) => r,
@@ -231,7 +245,7 @@ pub fn run_review_bench(
                     continue;
                 }
             };
-            match judge_caught(&client, &jconn, &jmodel, &jkey, case, &review, decoy) {
+            match judge_caught(&client, &jconn, &jmodel, &jkey, &case.bug, &review, decoy) {
                 Ok(good) => {
                     done += 1;
                     if good {
@@ -265,5 +279,99 @@ pub fn run_review_bench(
     println!(
         "\n(catch-rate = bugs the reviewer flagged; clean-rate = decoys it correctly left alone)"
     );
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct CalibFile {
+    case: Vec<CalibCase>,
+}
+
+#[derive(Deserialize)]
+struct CalibCase {
+    id: String,
+    bug: String,
+    review: String,
+    gold: String,
+}
+
+/// Score a candidate JUDGE against the gold calibration set: feed each fixed
+/// (bug, review) pair to the judge and check its verdict matches `gold`. The
+/// reviewer bench is only as trustworthy as its judge — a judge that scores well
+/// here can be trusted; a lenient one that rubber-stamps everything is exposed.
+pub fn run_judge_check(root: &Path, judge_spec: &str, runs: usize) -> Result<()> {
+    load_local_env(root);
+    let cfg = load_config(root)?;
+    let client = LlmClient::new();
+
+    let (jlabel, jmodel, jconn, jkey) = resolve_model(&cfg, &client, judge_spec)?;
+
+    let path = root.join("bench").join("judge_calibration.toml");
+    let parsed: CalibFile = toml::from_str(&std::fs::read_to_string(&path).map_err(|e| {
+        anyhow!(
+            "cannot read {} — run from the Anvil source tree: {}",
+            path.display(),
+            e
+        )
+    })?)?;
+    if parsed.case.is_empty() {
+        bail!("no calibration cases in {}", path.display());
+    }
+
+    println!(
+        "Judge calibration — judge '{}' (model {}), {} case(s), {} run(s) each\n",
+        jlabel,
+        jmodel,
+        parsed.case.len(),
+        runs
+    );
+    println!("{:<34} {:<16} judge", "case", "gold");
+
+    let (mut correct, mut total) = (0usize, 0usize);
+    for c in &parsed.case {
+        let decoy = is_decoy(&c.bug);
+        // Gold must be consistent with whether this is a decoy or a planted bug.
+        let expected = match (decoy, c.gold.trim().to_ascii_uppercase().as_str()) {
+            (false, "CAUGHT") => true,
+            (false, "MISSED") => false,
+            (true, "CLEAN") => true,
+            (true, "FALSE_POSITIVE") => false,
+            _ => bail!(
+                "case '{}': gold '{}' is invalid for a {} case",
+                c.id,
+                c.gold,
+                if decoy { "decoy" } else { "bug" }
+            ),
+        };
+        let (mut agree, mut done) = (0usize, 0usize);
+        for _ in 0..runs {
+            match judge_caught(&client, &jconn, &jmodel, &jkey, &c.bug, &c.review, decoy) {
+                Ok(v) => {
+                    done += 1;
+                    if v == expected {
+                        agree += 1;
+                    }
+                }
+                Err(e) => eprintln!("  [{}] judge call failed: {}", c.id, e),
+            }
+        }
+        correct += agree;
+        total += done;
+        let mark = if done > 0 && agree == done {
+            "ok"
+        } else {
+            "<-- MISS"
+        };
+        println!("{:<34} {:<16} {}/{} {}", c.id, c.gold, agree, done, mark);
+    }
+
+    println!("{}", "-".repeat(56));
+    let pct = if total > 0 {
+        100.0 * correct as f64 / total as f64
+    } else {
+        0.0
+    };
+    println!("judge accuracy: {correct}/{total} ({pct:.0}%)");
+    println!("\n(>=90% on this set means the judge is trustworthy for `anvil review-bench`.)");
     Ok(())
 }

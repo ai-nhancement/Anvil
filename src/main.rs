@@ -177,6 +177,26 @@ enum Commands {
         /// Only run the case with this id (e.g. off-by-one) — focuses a diagnostic.
         #[arg(long, value_name = "ID")]
         case: Option<String>,
+
+        /// Reviewer contract to drive the model under test — a tier alias or a path to
+        /// a contract file. Omit to use the built-in generic reviewer prompt. Lets you
+        /// A/B reviewer contracts the way `bench --contract` does for the coder.
+        #[arg(long, value_name = "FILE")]
+        contract: Option<String>,
+    },
+
+    /// Calibrate a JUDGE against the gold answer key (bench/judge_calibration.toml).
+    /// The reviewer bench is only as good as its judge — verify a candidate scores
+    /// well (>=90%) before trusting its reviewer numbers, so "bring your own judge"
+    /// is safe. Run from the Anvil source tree.
+    JudgeCheck {
+        /// The candidate judge model (role/binding or `<provider>/<model>`).
+        #[arg(long)]
+        judge: String,
+
+        /// Runs per calibration case — judges have some variance.
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
     },
 }
 
@@ -353,12 +373,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             judge,
             runs,
             case,
+            contract,
         } => review_bench::run_review_bench(
             &cli.project,
             model.as_deref(),
             &judge,
             runs,
             case.as_deref(),
+            contract.as_deref(),
         ),
+        Commands::JudgeCheck { judge, runs } => {
+            review_bench::run_judge_check(&cli.project, &judge, runs)
+        }
     }
 }

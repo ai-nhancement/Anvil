@@ -92,6 +92,23 @@ great coder but a noisy reviewer. Coding skill ≠ reviewing skill; pick per rol
    and clean (precision); a high catch with low clean is a *noisy* reviewer.
 4. Record the result here and the role it earned.
 
+## Configuring a model's contract
+
+Set `contract` on the coder model's binding in `anvil.toml` — a tier alias (`"full"` or
+`"minimal"`) or a path to a contract file. The live coder then runs under that contract
+instead of the built-in prompt:
+
+```toml
+[model_bindings.my-local-coder]
+provider = "local-ollama"
+model    = "gemma4:e4b"
+contract = "minimal"   # "full" for ~2B, "minimal" for >=4B, or a path to a .md
+```
+
+Leave `contract` unset for frontier/cloud models — they keep Anvil's built-in coder prompt.
+A name that doesn't resolve warns and falls back to the built-in prompt, so a typo can't
+leave the coder prompt-less.
+
 ## What the bench does NOT yet replicate (caveats)
 
 - **The Anvil workflow gates** — writing a plan/brief, committing per phase, following a plan —

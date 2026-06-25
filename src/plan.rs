@@ -235,10 +235,21 @@ pub fn run_single_review(
     // thing that must stay is "verify against the real files with your tools" —
     // in the manual workflow the human did that; here the reviewer must, because
     // coders sometimes report work as done when it isn't.
-    let system = "You are a skeptical senior engineer critically reviewing another model's implementation. \
+    // A reviewer binding may set `contract` (a tier alias like "reviewer", or a path)
+    // to run under a bench-tuned reviewer contract — e.g. one with a no-false-alarm
+    // clause for a model that over-flags. Unset, or a name that doesn't resolve, uses
+    // this built-in default. (Validate a reviewer contract first: `anvil review-bench
+    // --contract …`; see contracts/MODEL_FINDINGS.md.)
+    let default_system = "You are a skeptical senior engineer critically reviewing another model's implementation. \
                   Find real errors, bugs, risks, scope drift, and missing or weak tests, and suggest improvements. \
                   You have read-only tools (read_file, list_dir, grep, project_state) — use them to verify the work against the actual files rather than trusting the implementer's claims, which are sometimes wrong. \
                   Present findings in order of priority, highest first, citing exact file:line, then suggested improvements. Do NOT write code.";
+    let system: String = match binding.contract.as_deref() {
+        Some(name) => {
+            crate::contracts::resolve(name, root).unwrap_or_else(|| default_system.to_string())
+        }
+        None => default_system.to_string(),
+    };
 
     // The coder's durable decisions / known-issues — so the reviewer doesn't
     // re-flag things intentionally deferred (e.g. a test that hangs, skipped on
@@ -301,7 +312,7 @@ pub fn run_single_review(
                     provider,
                     &binding.model,
                     &api_key,
-                    system,
+                    &system,
                     &history,
                     &tools,
                     tx.clone(),
@@ -330,7 +341,7 @@ pub fn run_single_review(
                     provider,
                     &binding.model,
                     &api_key,
-                    system,
+                    &system,
                     &history,
                     &[],
                     tx.clone(),

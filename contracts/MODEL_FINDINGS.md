@@ -106,8 +106,16 @@ Structure alone helps a little (1→2); the one clause is the real lever (2→4)
 recall — the same lesson as the coder side. Bench reviewer contracts with
 `anvil review-bench --model X --judge Y --contract <file>`.
 
-(Caveat: clean-rate rests on a single decoy case — directional, not precise. More decoy cases
-would firm it up, and full re-validation of every model under the precision contract is pending.)
+**In the live gate**, a reviewer binding can set `contract` too (same field as the coder). The
+`"reviewer"` alias = `reviewer_local_live.md`, which keeps Anvil's investigate-with-read-only-tools
+framing AND adds the no-false-alarm clause — so a reviewer that over-flags (e.g. e4b) can be calmed
+without losing the verify-against-files behavior.
+
+(Caveats: clean-rate rests on a single decoy case — directional, not precise; more decoys would
+firm it up. And the no-false-alarm *clause* is bench-validated **pure-diff** — a conservative proxy,
+since the live reviewer also has tools to verify with, which can only reduce false positives
+further. Validating the full live contract under an *agentic* bench, and re-validating every model
+under the precision contract, are both pending.)
 
 ## Choosing a judge (the bench is only as good as it)
 
@@ -163,6 +171,16 @@ contract = "minimal"   # "full" for ~2B, "minimal" for >=4B, or a path to a .md
 Leave `contract` unset for frontier/cloud models — they keep Anvil's built-in coder prompt.
 A name that doesn't resolve warns and falls back to the built-in prompt, so a typo can't
 leave the coder prompt-less.
+
+The same field works on a **reviewer** binding — use the `"reviewer"` alias for the live reviewer
+contract (tool-verify + no-false-alarm). Unset keeps the built-in reviewer prompt:
+
+```toml
+[model_bindings.my-local-reviewer]
+provider = "local-ollama"
+model    = "gemma4:e4b"
+contract = "reviewer"
+```
 
 ## What the bench does NOT yet replicate (caveats)
 

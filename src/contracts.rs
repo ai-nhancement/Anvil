@@ -18,12 +18,18 @@ const FULL: &str = include_str!("../contracts/coder_local_base.md");
 /// hurt by extra scaffolding, so this is deliberately minimal.
 const MINIMAL: &str = include_str!("../contracts/coder_local_base_v4.md");
 
+/// The live REVIEWER contract: Anvil's investigate-with-read-only-tools framing plus a
+/// no-false-alarm clause (which took gemma4:e4b from 1/5 to 4/5 clean on the bench).
+/// For a reviewer binding that over-flags correct code.
+const REVIEWER: &str = include_str!("../contracts/reviewer_local_live.md");
+
 /// Resolve a tier alias to embedded contract text. Recognized: "full" (~2B) and
 /// "minimal" (>=4B), plus the file stems as aliases. None for an unknown name.
 pub fn embedded(name: &str) -> Option<&'static str> {
     match name.trim() {
         "full" | "coder_local_base" | "coder_local_base.md" => Some(FULL),
         "minimal" | "v4" | "coder_local_base_v4" | "coder_local_base_v4.md" => Some(MINIMAL),
+        "reviewer" | "reviewer_local_live" | "reviewer_local_live.md" => Some(REVIEWER),
         _ => None,
     }
 }
@@ -61,6 +67,7 @@ mod tests {
         assert!(!minimal.trim().is_empty());
         // The full tier carries clauses the minimal one drops, so it is the larger.
         assert!(full.len() > minimal.len());
+        assert!(embedded("reviewer").is_some_and(|s| !s.trim().is_empty()));
         assert!(embedded("nope").is_none());
     }
 

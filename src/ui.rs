@@ -256,6 +256,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/quit", "Exit the TUI"),
     ("/view-plan", "Open the active plan in a focused review popup"),
     ("/view-reviews", "Open the REVIEW_* files (plan + current phase) in a focused popup"),
+    ("/readme", "Open the Anvil README in a scrollable popup (↑/↓/PgUp/PgDn, Esc to close)"),
     ("/new-plan <name>", "Start a fresh feature-named plan (e.g. frontpage_plan.md); archives the current plan + its reviews"),
     ("/plans", "List the active plan and any archived plans"),
 ];
@@ -992,6 +993,7 @@ struct App {
     // Gives a focused "card" experience for inspecting gate artifacts (plan + the two reviews)
     // before the explicit accept step — inspired by deliberate plan/approve flows.
     viewing_doc: Option<(String, String)>, // (title, full_content)
+    doc_scroll: u16,                       // vertical scroll offset (rows) for the doc viewer popup
 
     // Live GPU stats (NVIDIA etc.) polled for the top-right header display.
     // Useful when running local models via Ollama / LM Studio / etc.
@@ -1072,6 +1074,7 @@ impl App {
             pending_pastes: Vec::new(),
             ollama_available_cached: None,
             viewing_doc: None,
+            doc_scroll: 0,
             gpu_stats: vec![],
             current_turn_id: None,
             current_role: None,
@@ -1121,7 +1124,7 @@ impl App {
             .as_ref()
             .is_some_and(|c| c.roles.reviewer_a.is_some() && c.roles.reviewer_b.is_some());
 
-        app.push_system("Welcome to Anvil TUI.");
+        app.push_system("Welcome");
         app.push_system("Type to chat with your coder. Real streaming to your configured model. /plan /phase-done /status /help /quit");
         if !has_reviewers {
             app.first_run = true;
@@ -1588,12 +1591,24 @@ impl App {
         match std::fs::read_to_string(path) {
             Ok(content) => {
                 self.viewing_doc = Some((title.to_string(), content));
+                self.doc_scroll = 0;
                 self.push_system(&format!("Opened '{}' — Esc to close the card. (Content also available in your editor for deep review.)", path.display()));
             }
             Err(e) => {
                 self.push_system(&format!("Could not open {}: {}", path.display(), e));
             }
         }
+    }
+
+    /// Open the doc viewer with in-memory content (e.g. a compile-time embedded
+    /// document) rather than a file on disk. Used by /readme.
+    fn open_doc_content(&mut self, title: &str, content: &str) {
+        self.viewing_doc = Some((title.to_string(), content.to_string()));
+        self.doc_scroll = 0;
+        self.push_system(&format!(
+            "Opened '{}' — ↑/↓/PgUp/PgDn to scroll, Esc to close.",
+            title
+        ));
     }
 
     /// Production-quality message renderer for the main chat log.
@@ -1608,10 +1623,14 @@ impl App {
     /// Used by both the main chat Paragraph and the document viewer popups.
     fn render_message_as_lines(m: &str) -> Vec<Line<'static>> {
         let (base_style, body) = if m.starts_with("[system]") {
-            (
-                Style::default().fg(SYSTEM_COLOR),
-                m.strip_prefix("[system] ").unwrap_or(m),
-            )
+            let body = m.strip_prefix("[system] ").unwrap_or(m);
+            // The greeting renders white; all other system notes use SYSTEM_COLOR.
+            let color = if body == "Welcome" {
+                Color::White
+            } else {
+                SYSTEM_COLOR
+            };
+            (Style::default().fg(color), body)
         } else if m.starts_with("[you]") {
             (
                 Style::default().fg(Color::Green),
@@ -2512,6 +2531,12 @@ impl App {
         if cmd == "/view-plan" {
             let plan_path = self.plan_path();
             self.open_doc_viewer("Plan (read before accept)", &plan_path);
+            return;
+        }
+        if cmd == "/readme" {
+            // The README is embedded at compile time — Anvil ships as a single binary,
+            // so it is not guaranteed to exist on disk wherever the user runs anvil.
+            self.open_doc_content("Anvil README", include_str!("../README.md"));
             return;
         }
         if cmd == "/view-reviews" {
@@ -6468,12 +6493,35 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<bool> {
     // Document viewer ( /view-plan /view-reviews "card" popups for deliberate plan + R1/R2 review before approve).
     // Esc closes the card without quitting the TUI (consistent with wizard and palette).
     if app.viewing_doc.is_some() {
-        if key.code == KeyCode::Esc {
-            app.viewing_doc = None;
-            return Ok(false);
+        match key.code {
+            KeyCode::Esc => {
+                app.viewing_doc = None;
+                app.doc_scroll = 0;
+                return Ok(false);
+            }
+            KeyCode::Up => {
+                app.doc_scroll = app.doc_scroll.saturating_sub(1);
+                return Ok(false);
+            }
+            KeyCode::Down => {
+                app.doc_scroll = app.doc_scroll.saturating_add(1);
+                return Ok(false);
+            }
+            KeyCode::PageUp => {
+                app.doc_scroll = app.doc_scroll.saturating_sub(10);
+                return Ok(false);
+            }
+            KeyCode::PageDown => {
+                app.doc_scroll = app.doc_scroll.saturating_add(10);
+                return Ok(false);
+            }
+            KeyCode::Home => {
+                app.doc_scroll = 0;
+                return Ok(false);
+            }
+            _ => {}
         }
-        // For now the viewer is read-only display (content is also in the main chat log with rich code blocks).
-        // Future: internal scroll offset per viewer if needed.
+        // Read-only display otherwise; the content is also in the main chat log.
         return Ok(false);
     }
 
@@ -6766,14 +6814,14 @@ fn render_splash(f: &mut Frame, app: &App) {
             .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(Span::styled(
-        "  Talk  →  Plan (R1+R2)  →  Build  →  Ship  ".to_string(),
+        "  Talk  →  Plan  →  Code  →  Review  →  Ship  ".to_string(),
         Style::default().fg(Color::Rgb(150, 200, 255)),
     )));
 
     lines.push(Line::from(Span::raw("".to_string())));
 
     let ver_line = format!(
-        "  v{}  —  model-agnostic, cross-provider  ",
+        "  v{}  —  Model-agnostic, Cross-provider  ",
         env!("CARGO_PKG_VERSION")
     );
     lines.push(Line::from(Span::styled(
@@ -7295,7 +7343,7 @@ fn render_chat(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     } else {
         // Idle: "Ready" + the finished, cooled sword in its true colors.
         let mut spans = vec![Span::styled(
-            " Ready ",
+            "Ready. ",
             Style::default()
                 .fg(FORGE_MOLTEN)
                 .add_modifier(Modifier::BOLD),
@@ -7740,9 +7788,17 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
     f.render_stateful_widget(list, popup, &mut state);
 }
 
-fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
-    let (title, content) = match &app.viewing_doc {
-        Some(pair) => pair,
+fn render_doc_popup(f: &mut Frame, app: &mut App, chat_area: ratatui::layout::Rect) {
+    // Pull out the title and pre-render the body lines (owned, 'static) so the
+    // immutable borrow of `viewing_doc` ends before we clamp `doc_scroll` below.
+    let (title, lines) = match &app.viewing_doc {
+        Some((title, content)) => {
+            let lines: Vec<Line> = content
+                .lines()
+                .flat_map(|l| App::render_message_as_lines(&format!("[doc] {}", l)))
+                .collect();
+            (title.clone(), lines)
+        }
         None => return,
     };
 
@@ -7756,24 +7812,28 @@ fn render_doc_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) 
 
     f.render_widget(Clear, popup);
 
-    let lines: Vec<Line> = content
-        .lines()
-        .flat_map(|l| App::render_message_as_lines(&format!("[doc] {}", l)))
-        .collect();
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
 
-    let viewer = Paragraph::new(lines)
+    // Clamp the scroll offset to the actual wrapped content so PgDn/↓ can't run
+    // off the end of the document (and ↑ brings the top back into view).
+    let inner_w = popup.width.saturating_sub(2).max(1);
+    let inner_h = popup.height.saturating_sub(2);
+    let total = para.line_count(inner_w) as u16;
+    app.doc_scroll = app.doc_scroll.min(total.saturating_sub(inner_h));
+
+    let viewer = para
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Magenta))
                 .title(Span::styled(
-                    format!(" {} (Esc to close) ", title),
+                    format!(" {} (↑/↓/PgUp/PgDn · Esc to close) ", title),
                     Style::default()
                         .fg(FORGE_MOLTEN)
                         .add_modifier(Modifier::BOLD),
                 )),
         )
-        .wrap(Wrap { trim: false });
+        .scroll((app.doc_scroll, 0));
     f.render_widget(viewer, popup);
 }
 

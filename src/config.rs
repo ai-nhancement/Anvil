@@ -138,6 +138,14 @@ pub struct ModelBinding {
     /// Optional short human note (e.g. "fast local", "strong at reviews")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+
+    /// Coder contract for a LOCAL model: a tier alias — "full" (~2B) or "minimal"
+    /// (>=4B) — or a path to a contract file. When set, the coder runs under THIS
+    /// contract instead of Anvil's built-in prompt. Bench-validate before setting
+    /// (see contracts/MODEL_FINDINGS.md). Omit for frontier/cloud models; they keep
+    /// the built-in coder prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -552,6 +560,7 @@ mod tests {
                 provider: "local-ollama".to_string(),
                 model: binding.to_string(),
                 note: None,
+                contract: None,
             },
         );
         cfg.roles.reviewer_a = Some(binding.to_string());

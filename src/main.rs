@@ -17,6 +17,7 @@ mod agent;
 mod bench;
 mod cli;
 mod config;
+mod contracts;
 mod dialect;
 mod git;
 mod llm;

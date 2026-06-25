@@ -249,6 +249,7 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
                 provider,
                 model,
                 note,
+                contract: None,
             },
         );
         println!("  {} Added binding '{}'", "✓".green(), name);

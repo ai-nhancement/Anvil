@@ -88,7 +88,22 @@ const DEFAULT_BADGE_PNG: &[u8] = include_bytes!("../tag.png");
 /// System prompt for the coder agent. Short and agentic: the model has real
 /// tools and works directly on the repo. Structure is imposed at exactly two
 /// human gates (lock the plan, accept a phase); everything else is free-form.
-fn coder_system_prompt() -> String {
+/// The coder's system prompt. When the coder's binding configures a `contract`
+/// (a local-model tier — see `contracts/MODEL_FINDINGS.md`), the model runs under
+/// that bench-validated contract instead of the built-in prompt below. A name that
+/// resolves to nothing falls back to the built-in prompt (with a warning at the call
+/// site), so a typo can never leave the coder prompt-less. Frontier/cloud bindings
+/// leave `contract` unset and get the built-in prompt.
+fn coder_system_prompt(contract: Option<&str>, root: &std::path::Path) -> String {
+    if let Some(name) = contract {
+        if let Some(text) = crate::contracts::resolve(name, root) {
+            return text;
+        }
+    }
+    coder_builtin_prompt()
+}
+
+fn coder_builtin_prompt() -> String {
     "You are Anvil's coder: an autonomous, hands-on software engineer working directly in the user's project.\n\
 \n\
 You have tools, scoped to the project root:\n\
@@ -3125,6 +3140,7 @@ impl App {
         // immutable borrow on self.cfg / binding / provider).
         let binding_name = binding_name.to_string();
         let model = binding.model.clone();
+        let contract_for_agent = binding.contract.clone();
         let conn_for_task = provider.clone();
         let key_for_task = api_key.clone();
         // Effective config for the agent (specialist delegation needs it). Cloned
@@ -3160,13 +3176,26 @@ impl App {
         // history + tool context persist across turns. The agent reads/writes
         // the repo itself via tools — no manual /include, no /save-* needed.
         if self.agent.is_none() {
+            // A LOCAL model can run under a bench-validated contract tier (set per
+            // binding). Resolve it; a configured-but-unresolvable name warns and
+            // falls back to the built-in prompt rather than silently mis-running.
+            let system_prompt = coder_system_prompt(contract_for_agent.as_deref(), &self.root);
+            if let Some(name) = contract_for_agent.as_deref() {
+                if crate::contracts::resolve(name, &self.root).is_some() {
+                    self.push_system(&format!("Coder contract: {name}"));
+                } else {
+                    self.push_system(&format!(
+                        "(config) coder contract '{name}' not found (unknown tier or missing file) — using the built-in prompt"
+                    ));
+                }
+            }
             let (confirm_tx, confirm_rx) = mpsc::unbounded_channel::<bool>();
             let agent = Agent::new(
                 self.llm.clone(),
                 conn_for_task,
                 model.clone(),
                 key_for_task,
-                coder_system_prompt(),
+                system_prompt,
                 self.root.clone(),
                 cfg_for_agent,
                 ConfirmHandle::Channel(confirm_rx),
@@ -5060,6 +5089,7 @@ impl App {
                             provider: "local-ollama".to_string(),
                             model: model.to_string(),
                             note: Some("quick-ollama".to_string()),
+                            contract: None,
                         },
                     );
                     match role.as_str() {
@@ -5494,6 +5524,7 @@ impl App {
                 provider: prov.clone(),
                 model: model.clone(),
                 note,
+                contract: None,
             },
         );
 
@@ -5787,6 +5818,7 @@ impl App {
                         provider: prov.clone(),
                         model: model.clone(),
                         note: Some("from role assignment".to_string()),
+                        contract: None,
                     },
                 );
                 did_auto_register = true;

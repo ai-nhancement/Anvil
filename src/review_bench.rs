@@ -205,7 +205,7 @@ pub fn run_review_bench(
         "Reviewer benchmark — target '{}' (model {}), judge '{}' (model {}), {} run(s)/case\n",
         tlabel, tmodel, jlabel, jmodel, runs
     );
-    println!("{:<26} {:<8} {}", "case", "kind", "result");
+    println!("{:<26} {:<8} result", "case", "kind");
 
     let (mut bug_pass, mut bug_done) = (0usize, 0usize);
     let (mut decoy_pass, mut decoy_done) = (0usize, 0usize);

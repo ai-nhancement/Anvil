@@ -221,6 +221,24 @@ fn context_file_block(path: &Path, title: &str, note: &str, cap: usize) -> Optio
     ))
 }
 
+/// A delimited block listing the configured read-only reference repos, or None when
+/// none are set. Surfaced to the coder/reviewer so the model knows the `@name/...`
+/// paths it can read with read_file/list_dir/grep — it can never write to them.
+pub(crate) fn references_block(cfg: &crate::config::AnvilConfig) -> Option<String> {
+    let refs = cfg.reference_roots();
+    if refs.is_empty() {
+        return None;
+    }
+    let mut s = String::from(
+        "--- REFERENCE REPOS (read-only; address as @name/path with read_file/list_dir/grep — you CANNOT write to or run commands in these) ---\n",
+    );
+    for (name, path) in &refs {
+        s.push_str(&format!("- @{name}/  →  {}\n", path.display()));
+    }
+    s.push_str("--- END REFERENCE REPOS ---\n");
+    Some(s)
+}
+
 /// Read working memory as a delimited, bounded block — or None if empty/missing.
 /// Past a halflife since the last compaction, prepends a staleness note so the
 /// agent treats aging memory with appropriate suspicion (temporal decay).
@@ -794,6 +812,12 @@ impl Agent {
             preamble.push_str(&b);
             preamble.push('\n');
         }
+        // Read-only reference repos (e.g. a predecessor codebase to study). Listed
+        // so the coder knows they exist and how to address them; reads only.
+        if let Some(b) = references_block(&self.cfg) {
+            preamble.push_str(&b);
+            preamble.push('\n');
+        }
         // Lightweight repo map: a ranked, budgeted guide to the project's symbols
         // so the coder reads fewer whole files and stops guessing where things are.
         if let Some(map) = crate::repomap::build(&self.root, self.current_task.as_deref(), 3500) {
@@ -913,12 +937,12 @@ impl Agent {
                 } else if tools::requires_confirmation(&call.name) {
                     let cmd = tools::command_string(call);
                     if self.confirm.confirm(&tx, &cmd).await {
-                        tools::execute(call, &self.root)
+                        tools::execute_with_refs(call, &self.root, &self.cfg.reference_roots())
                     } else {
                         "ERROR: command was declined by the user".to_string()
                     }
                 } else {
-                    tools::execute(call, &self.root)
+                    tools::execute_with_refs(call, &self.root, &self.cfg.reference_roots())
                 };
 
                 // Track read-only calls for dedup; any other (effectful) call may

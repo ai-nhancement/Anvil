@@ -34,6 +34,25 @@ pub struct AnvilConfig {
     /// Command-approval policy (which shell commands skip the y/n prompt).
     #[serde(default)]
     pub approvals: ApprovalSettings,
+
+    /// Read-only reference repos: `name -> path`. The coder and reviewers may READ
+    /// files from these (addressed as `@name/sub/path`) but can never write to them
+    /// or run commands in them — useful for studying a predecessor/sibling codebase
+    /// (e.g. AiMe) while building this one. Edited by hand in `[references]`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub references: BTreeMap<String, String>,
+}
+
+impl AnvilConfig {
+    /// The configured read-only reference repos as `(name, path)` pairs. Empty when
+    /// no `[references]` block is present. Passed to the tool layer so reads under
+    /// `@name/...` resolve against these roots (writes never do).
+    pub fn reference_roots(&self) -> Vec<(String, PathBuf)> {
+        self.references
+            .iter()
+            .map(|(name, path)| (name.clone(), PathBuf::from(path)))
+            .collect()
+    }
 }
 
 /// `[web_search]` block: which backend the `researcher` specialist uses. The API

@@ -265,6 +265,12 @@ pub fn run_single_review(
         })
         .unwrap_or_default();
 
+    // Read-only reference repos the reviewer may consult to verify the work against
+    // a predecessor/sibling codebase (addressed as @name/path).
+    let references_block = crate::agent::references_block(cfg)
+        .map(|b| format!("{b}\n"))
+        .unwrap_or_default();
+
     // Reviewer memory: the earlier review findings from previous phases/rounds, so
     // the reviewer has continuity (what was already raised, accepted, or fixed) the
     // way a retained chat thread would — instead of starting blind each time.
@@ -325,13 +331,16 @@ pub fn run_single_review(
         String::new()
     };
     let user = format!(
-        "{decisions_block}{prior_reviews}{review_instruction}{round_note}\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---{prior_round_block}",
+        "{decisions_block}{references_block}{prior_reviews}{review_instruction}{round_note}\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---{prior_round_block}",
     );
 
     // Agentic read-only loop: the reviewer may read/grep/list the repo to confirm
     // claims, then writes its findings. Runs inside the TUI alternate screen, so no
     // stdout here; the header shows live "R1/R2 reviewing — <model>" status.
     let tools = crate::tools::read_only_tool_defs();
+    // Read-only reference repos the reviewer may consult (e.g. verify the work
+    // against a predecessor codebase). Same `@name/...` addressing as the coder.
+    let refs = cfg.reference_roots();
     let findings = LlmClient::block_on(async {
         // Sink for streamed deltas — kept in scope so sends don't fail; the gate
         // surfaces progress via the header, not this stream.
@@ -359,7 +368,7 @@ pub fn run_single_review(
                 break;
             }
             for call in &turn.tool_calls {
-                let result = crate::tools::execute(call, root);
+                let result = crate::tools::execute_with_refs(call, root, &refs);
                 history.push(ChatMessage::tool_result(call.id.clone(), result));
             }
         }

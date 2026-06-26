@@ -63,7 +63,7 @@ pub fn tool_defs() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path relative to the project root, e.g. src/llm.rs"},
+                    "path": {"type": "string", "description": "Path relative to the project root, e.g. src/llm.rs. To read a configured read-only reference repo, prefix with its name as @<name>/<path> (e.g. @aime/src/memory.rs); reference repos are listed in your context when any are configured."},
                     "offset": {"type": "integer", "description": "Optional: 1-based line number to start reading from"},
                     "limit": {"type": "integer", "description": "Optional: maximum number of lines to return"}
                 },
@@ -112,18 +112,18 @@ pub fn tool_defs() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory path relative to the project root. Omit or use \".\" for the root."}
+                    "path": {"type": "string", "description": "Directory path relative to the project root. Omit or use \".\" for the root. Use @<name>/<path> to list inside a configured read-only reference repo."}
                 }
             }),
         },
         ToolDef {
             name: "grep".into(),
-            description: "Search the project tree for a literal substring. Returns matching lines as `path:line: text`. Optionally restrict to a subdirectory or a single file.".into(),
+            description: "Search the project tree for a literal substring. Returns matching lines as `path:line: text`. Optionally restrict to a subdirectory or a single file. To search a read-only reference repo, pass its path as @<name>/<subpath>; those matches come back tagged with the same @<name>/ prefix so you can read them.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Literal substring to search for"},
-                    "path": {"type": "string", "description": "Optional path to limit the search (relative to root) — a subdirectory OR a single file"}
+                    "path": {"type": "string", "description": "Optional path to limit the search — a subdirectory OR a single file (relative to root), or @<name>/<subpath> for a reference repo"}
                 },
                 "required": ["pattern"]
             }),
@@ -412,16 +412,24 @@ fn truncate_one_line(s: &str) -> String {
 /// Execute a tool call against `root`. Always returns a string to feed back to
 /// the model — errors are returned as `ERROR: ...` rather than propagated.
 pub fn execute(call: &ToolCall, root: &Path) -> String {
-    match run(call, root) {
+    execute_with_refs(call, root, &[])
+}
+
+/// Like [`execute`], but the read tools (read_file, list_dir, grep) may also read
+/// from the configured read-only reference repos via `@name/...` paths. Write tools
+/// and run_command stay scoped to `root` regardless.
+pub fn execute_with_refs(call: &ToolCall, root: &Path, refs: &[(String, PathBuf)]) -> String {
+    match run(call, root, refs) {
         Ok(s) => s,
         Err(e) => format!("ERROR: {}", e),
     }
 }
 
-fn run(call: &ToolCall, root: &Path) -> Result<String> {
+fn run(call: &ToolCall, root: &Path, refs: &[(String, PathBuf)]) -> Result<String> {
     match call.name.as_str() {
         "read_file" => read_file(
             root,
+            refs,
             &arg_str(call, "path")?,
             arg_usize(call, "offset"),
             arg_usize(call, "limit"),
@@ -434,8 +442,17 @@ fn run(call: &ToolCall, root: &Path) -> Result<String> {
             &arg_str(call, "new_string")?,
         ),
         "apply_patch" => apply_patch(root, &arg_str(call, "patch")?),
-        "list_dir" => list_dir(root, &arg_str(call, "path").unwrap_or_else(|_| ".".into())),
-        "grep" => grep(root, &arg_str(call, "pattern")?, arg_opt(call, "path")),
+        "list_dir" => list_dir(
+            root,
+            refs,
+            &arg_str(call, "path").unwrap_or_else(|_| ".".into()),
+        ),
+        "grep" => grep(
+            root,
+            refs,
+            &arg_str(call, "pattern")?,
+            arg_opt(call, "path"),
+        ),
         "project_state" => Ok(crate::reality::snapshot(root)),
         "flag_risk" => record_risk(root, &arg_str(call, "note")?),
         "run_command" => run_command(root, &arg_str(call, "command")?),
@@ -447,11 +464,12 @@ fn run(call: &ToolCall, root: &Path) -> Result<String> {
 
 fn read_file(
     root: &Path,
+    refs: &[(String, PathBuf)],
     rel: &str,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<String> {
-    let path = resolve(root, rel)?;
+    let path = resolve_read(root, rel, refs)?;
     let bytes = std::fs::read(&path).map_err(|e| anyhow!("could not read {}: {}", rel, e))?;
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
 
@@ -764,8 +782,8 @@ fn apply_patch(root: &Path, patch: &str) -> Result<String> {
     Ok(format!("apply_patch ok — {}", summaries.join(", ")))
 }
 
-fn list_dir(root: &Path, rel: &str) -> Result<String> {
-    let dir = resolve(root, rel)?;
+fn list_dir(root: &Path, refs: &[(String, PathBuf)], rel: &str) -> Result<String> {
+    let dir = resolve_read(root, rel, refs)?;
     let mut entries: Vec<String> = vec![];
     let read = std::fs::read_dir(&dir).map_err(|e| anyhow!("could not list {}: {}", rel, e))?;
     for entry in read.flatten() {
@@ -788,11 +806,33 @@ fn list_dir(root: &Path, rel: &str) -> Result<String> {
     }
 }
 
-fn grep(root: &Path, pattern: &str, sub: Option<String>) -> Result<String> {
-    let base = match sub {
-        Some(s) if !s.trim().is_empty() && s != "." => resolve(root, &s)?,
-        _ => root.to_path_buf(),
+fn grep(
+    root: &Path,
+    refs: &[(String, PathBuf)],
+    pattern: &str,
+    sub: Option<String>,
+) -> Result<String> {
+    // Resolve the search base. A `@name/...` sub searches a read-only reference repo;
+    // its matches render relative to that repo, tagged with the `@name/` prefix so
+    // the path can be read back with read_file. Project searches are unchanged.
+    let (base, display_root, prefix): (PathBuf, PathBuf, String) = match &sub {
+        Some(s) if s.starts_with('@') => {
+            let base = resolve_read(root, s, refs)?;
+            let name = s[1..].split(['/', '\\']).next().unwrap_or("");
+            let ref_root = refs
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, p)| normalize(p))
+                .ok_or_else(|| anyhow!("unknown reference repo '@{}'", name))?;
+            (base, ref_root, format!("@{name}/"))
+        }
+        Some(s) if !s.trim().is_empty() && s != "." => {
+            (resolve(root, s)?, root.to_path_buf(), String::new())
+        }
+        _ => (root.to_path_buf(), root.to_path_buf(), String::new()),
     };
+    let root = display_root.as_path();
+    let prefix = prefix.as_str();
     // Fresh interrupt state so Ctrl+B during this search stops it (mirrors
     // run_command). A grep whose pattern is rare/absent has no early-out from the
     // 200-hit cap, so it walks the ENTIRE tree — that must be cancellable and
@@ -806,26 +846,16 @@ fn grep(root: &Path, pattern: &str, sub: Option<String>) -> Result<String> {
     // `path` may be a single file (search it directly) or a directory (recurse).
     // Without this, grepping an explicit file path read_dir'd it, failed, and
     // wrongly returned "no matches".
+    let walk = GrepWalk {
+        root,
+        prefix,
+        pattern,
+        deadline,
+    };
     if base.is_file() {
-        search_file(
-            root,
-            &base,
-            pattern,
-            &mut out,
-            &mut hits,
-            deadline,
-            &mut stopped,
-        );
+        search_file(&walk, &base, &mut out, &mut hits, &mut stopped);
     } else {
-        collect_matches(
-            root,
-            &base,
-            pattern,
-            &mut out,
-            &mut hits,
-            deadline,
-            &mut stopped,
-        );
+        collect_matches(&walk, &base, &mut out, &mut hits, &mut stopped);
     }
     if stopped {
         out.push(
@@ -857,20 +887,28 @@ fn grep_should_stop(deadline: Instant) -> bool {
     COMMAND_INTERRUPT.load(Ordering::SeqCst) || Instant::now() >= deadline
 }
 
-/// Search a single file's lines for `pattern`, appending `rel:line: text` hits.
+/// Immutable context threaded through the grep walk (keeps the recursive helpers
+/// under clippy's argument limit). `root` is the path matches render relative to;
+/// `prefix` tags each hit (e.g. `@aime/`) so reference-repo matches stay addressable.
+struct GrepWalk<'a> {
+    root: &'a Path,
+    prefix: &'a str,
+    pattern: &'a str,
+    deadline: Instant,
+}
+
+/// Search a single file's lines for the pattern, appending `prefix+rel:line: text` hits.
 fn search_file(
-    root: &Path,
+    walk: &GrepWalk,
     path: &Path,
-    pattern: &str,
     out: &mut Vec<String>,
     hits: &mut usize,
-    deadline: Instant,
     stopped: &mut bool,
 ) {
     if *hits >= MAX_GREP_HITS {
         return;
     }
-    if grep_should_stop(deadline) {
+    if grep_should_stop(walk.deadline) {
         *stopped = true;
         return;
     }
@@ -885,14 +923,14 @@ fn search_file(
         return;
     };
     let rel = path
-        .strip_prefix(root)
+        .strip_prefix(walk.root)
         .unwrap_or(path)
         .display()
         .to_string()
         .replace('\\', "/");
     for (i, line) in content.lines().enumerate() {
-        if line.contains(pattern) {
-            out.push(format!("{}:{}: {}", rel, i + 1, line.trim()));
+        if line.contains(walk.pattern) {
+            out.push(format!("{}{}:{}: {}", walk.prefix, rel, i + 1, line.trim()));
             *hits += 1;
             if *hits >= MAX_GREP_HITS {
                 out.push("... [more matches truncated]".into());
@@ -903,18 +941,16 @@ fn search_file(
 }
 
 fn collect_matches(
-    root: &Path,
+    walk: &GrepWalk,
     dir: &Path,
-    pattern: &str,
     out: &mut Vec<String>,
     hits: &mut usize,
-    deadline: Instant,
     stopped: &mut bool,
 ) {
     if *hits >= MAX_GREP_HITS {
         return;
     }
-    if grep_should_stop(deadline) {
+    if grep_should_stop(walk.deadline) {
         *stopped = true;
         return;
     }
@@ -928,7 +964,7 @@ fn collect_matches(
         if *hits >= MAX_GREP_HITS {
             return;
         }
-        if grep_should_stop(deadline) {
+        if grep_should_stop(walk.deadline) {
             *stopped = true;
             return;
         }
@@ -940,14 +976,14 @@ fn collect_matches(
             if SKIP_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name)) {
                 continue;
             }
-            collect_matches(root, &path, pattern, out, hits, deadline, stopped);
+            collect_matches(walk, &path, out, hits, stopped);
         } else {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if SKIP_EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
                     continue;
                 }
             }
-            search_file(root, &path, pattern, out, hits, deadline, stopped);
+            search_file(walk, &path, out, hits, stopped);
         }
     }
 }
@@ -1194,6 +1230,15 @@ fn kill_tree(pid: u32) {
 /// Normalizes `.`/`..` logically (without touching the filesystem) so it also
 /// works for not-yet-existing files (e.g. `write_file` to a new path).
 pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf> {
+    // `@name/...` addresses a read-only reference repo; it must never reach a write
+    // tool. Reject it here so write_file/edit_file/apply_patch give a clear error
+    // instead of silently creating a literal `@name` directory under the project.
+    if rel.starts_with('@') {
+        bail!(
+            "'{}' is a read-only reference repo path — references cannot be written to or modified",
+            rel
+        );
+    }
     let candidate = Path::new(rel);
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
@@ -1204,6 +1249,43 @@ pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf> {
     let root_norm = normalize(root);
     if !normalized.starts_with(&root_norm) {
         bail!("path '{}' is outside the project root", rel);
+    }
+    Ok(normalized)
+}
+
+/// Read-path resolution. Like [`resolve`], but additionally allows reading from the
+/// configured read-only reference repos, addressed as `@name/sub/path` (or bare
+/// `@name` for the repo root). A non-`@` path resolves against the project root
+/// exactly as before. Only the read tools (read_file, list_dir, grep) use this;
+/// writes always go through [`resolve`], which rejects `@` paths.
+pub fn resolve_read(root: &Path, rel: &str, refs: &[(String, PathBuf)]) -> Result<PathBuf> {
+    let Some(rest) = rel.strip_prefix('@') else {
+        return resolve(root, rel);
+    };
+    // Split "name/sub/path" — the name runs to the first slash (forward or back).
+    let (name, sub) = match rest.find(['/', '\\']) {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, ""),
+    };
+    let ref_root = refs
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, p)| p)
+        .ok_or_else(|| {
+            anyhow!(
+                "unknown reference repo '@{}' — add it under [references] in anvil.toml",
+                name
+            )
+        })?;
+    let joined = if sub.is_empty() {
+        ref_root.clone()
+    } else {
+        ref_root.join(sub)
+    };
+    let normalized = normalize(&joined);
+    let ref_norm = normalize(ref_root);
+    if !normalized.starts_with(&ref_norm) {
+        bail!("path '{}' escapes reference repo '@{}'", rel, name);
     }
     Ok(normalized)
 }
@@ -1259,6 +1341,33 @@ mod tests {
             name: name.into(),
             arguments: args,
         }
+    }
+
+    #[test]
+    fn reference_repo_read_resolves_and_writes_are_rejected() {
+        let proj = tempfile::tempdir().unwrap();
+        let refrepo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(refrepo.path().join("src")).unwrap();
+        std::fs::write(refrepo.path().join("src/memory.rs"), "fn recall() {}\n").unwrap();
+        let refs = vec![("aime".to_string(), refrepo.path().to_path_buf())];
+
+        // Read via @name/ resolves into the reference repo.
+        let got = read_file(proj.path(), &refs, "@aime/src/memory.rs", None, None).unwrap();
+        assert!(got.contains("fn recall()"));
+
+        // grep tags matches with the @name/ prefix.
+        let g = grep(proj.path(), &refs, "recall", Some("@aime".into())).unwrap();
+        assert!(g.contains("@aime/src/memory.rs:"), "got: {g}");
+
+        // Unknown reference name is a clear error, not a silent project read.
+        assert!(resolve_read(proj.path(), "@nope/x", &refs).is_err());
+
+        // Escaping the reference root with .. is blocked.
+        assert!(resolve_read(proj.path(), "@aime/../secret", &refs).is_err());
+
+        // Writes never resolve an @ path — the read-only guarantee.
+        assert!(resolve(proj.path(), "@aime/src/memory.rs").is_err());
+        assert!(write_file(proj.path(), "@aime/x.rs", "nope").is_err());
     }
 
     #[test]

@@ -793,15 +793,44 @@ fn grep(root: &Path, pattern: &str, sub: Option<String>) -> Result<String> {
         Some(s) if !s.trim().is_empty() && s != "." => resolve(root, &s)?,
         _ => root.to_path_buf(),
     };
+    // Fresh interrupt state so Ctrl+B during this search stops it (mirrors
+    // run_command). A grep whose pattern is rare/absent has no early-out from the
+    // 200-hit cap, so it walks the ENTIRE tree — that must be cancellable and
+    // self-limiting or it blocks the whole agent turn for minutes (a big
+    // unskipped data file read fully into memory was enough to hang it).
+    COMMAND_INTERRUPT.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + GREP_TIME_BUDGET;
     let mut out: Vec<String> = vec![];
     let mut hits = 0usize;
+    let mut stopped = false;
     // `path` may be a single file (search it directly) or a directory (recurse).
     // Without this, grepping an explicit file path read_dir'd it, failed, and
     // wrongly returned "no matches".
     if base.is_file() {
-        search_file(root, &base, pattern, &mut out, &mut hits);
+        search_file(
+            root,
+            &base,
+            pattern,
+            &mut out,
+            &mut hits,
+            deadline,
+            &mut stopped,
+        );
     } else {
-        collect_matches(root, &base, pattern, &mut out, &mut hits);
+        collect_matches(
+            root,
+            &base,
+            pattern,
+            &mut out,
+            &mut hits,
+            deadline,
+            &mut stopped,
+        );
+    }
+    if stopped {
+        out.push(
+            "... [search stopped early — interrupted or time budget reached; narrow it with a path argument]".into(),
+        );
     }
     if out.is_empty() {
         Ok(format!("no matches for '{}'", pattern))
@@ -812,10 +841,45 @@ fn grep(root: &Path, pattern: &str, sub: Option<String>) -> Result<String> {
 
 const MAX_GREP_HITS: usize = 200;
 
+/// Skip files larger than this when grepping. A multi-MB data/log/JSON file read
+/// fully into memory is what let a zero-match search hang the agent; real source
+/// files are far smaller, and scanning a huge data dump inline isn't worth it.
+const MAX_GREP_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Wall-clock cap on a single grep walk, so a rare pattern over a large tree
+/// returns partial results with a note instead of blocking the turn.
+const GREP_TIME_BUDGET: Duration = Duration::from_secs(15);
+
+/// True when the in-flight grep should stop NOW — either Ctrl+B asked to
+/// interrupt (`COMMAND_INTERRUPT`) or the time budget is exhausted. Checked
+/// throughout the walk so a synchronous search can't run away.
+fn grep_should_stop(deadline: Instant) -> bool {
+    COMMAND_INTERRUPT.load(Ordering::SeqCst) || Instant::now() >= deadline
+}
+
 /// Search a single file's lines for `pattern`, appending `rel:line: text` hits.
-fn search_file(root: &Path, path: &Path, pattern: &str, out: &mut Vec<String>, hits: &mut usize) {
+fn search_file(
+    root: &Path,
+    path: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+    hits: &mut usize,
+    deadline: Instant,
+    stopped: &mut bool,
+) {
     if *hits >= MAX_GREP_HITS {
         return;
+    }
+    if grep_should_stop(deadline) {
+        *stopped = true;
+        return;
+    }
+    // Don't pull a huge file into memory just to substring-scan it — that read is
+    // what blocked the agent. Skip anything over the cap.
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_GREP_FILE_BYTES {
+            return;
+        }
     }
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
@@ -844,8 +908,14 @@ fn collect_matches(
     pattern: &str,
     out: &mut Vec<String>,
     hits: &mut usize,
+    deadline: Instant,
+    stopped: &mut bool,
 ) {
     if *hits >= MAX_GREP_HITS {
+        return;
+    }
+    if grep_should_stop(deadline) {
+        *stopped = true;
         return;
     }
     let read = match std::fs::read_dir(dir) {
@@ -858,6 +928,10 @@ fn collect_matches(
         if *hits >= MAX_GREP_HITS {
             return;
         }
+        if grep_should_stop(deadline) {
+            *stopped = true;
+            return;
+        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -866,14 +940,14 @@ fn collect_matches(
             if SKIP_DIRS.iter().any(|d| d.eq_ignore_ascii_case(&name)) {
                 continue;
             }
-            collect_matches(root, &path, pattern, out, hits);
+            collect_matches(root, &path, pattern, out, hits, deadline, stopped);
         } else {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if SKIP_EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
                     continue;
                 }
             }
-            search_file(root, &path, pattern, out, hits);
+            search_file(root, &path, pattern, out, hits, deadline, stopped);
         }
     }
 }
@@ -1418,6 +1492,29 @@ mod tests {
         .unwrap();
         let g = execute(&call("grep", json!({"pattern": "needle"})), root);
         assert!(g.contains("code.rs:2:"), "{}", g);
+    }
+
+    #[test]
+    fn grep_skips_oversized_files() {
+        // A file over the size cap must not be read into memory (that exhaustive
+        // read of a huge data file is what hung the agent). The match in it is
+        // intentionally skipped; a normal-sized file with the same pattern hits.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut big = String::with_capacity((MAX_GREP_FILE_BYTES as usize) + 64);
+        big.push_str("needle\n");
+        while big.len() <= MAX_GREP_FILE_BYTES as usize {
+            big.push_str("padding padding padding padding\n");
+        }
+        std::fs::write(root.join("huge.txt"), &big).unwrap();
+        std::fs::write(root.join("small.txt"), "needle\n").unwrap();
+        let g = execute(&call("grep", json!({"pattern": "needle"})), root);
+        assert!(g.contains("small.txt:1:"), "{}", g);
+        assert!(
+            !g.contains("huge.txt"),
+            "oversized file should be skipped: {}",
+            g
+        );
     }
 
     #[test]

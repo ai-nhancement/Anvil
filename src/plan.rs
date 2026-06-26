@@ -270,21 +270,53 @@ pub fn run_single_review(
     // way a retained chat thread would — instead of starting blind each time.
     let prior_reviews = prior_reviews_digest(root, artifact, 10_000);
 
-    // R2 is the SECOND pass: R1 already reviewed and the coder applied fixes. Tell
-    // R2 to judge the work as a whole and hand it R1's findings as a checklist. The
-    // content already carries the FULL change (the diff spans the phase base to the
-    // current tree, so it includes the R1 fixes).
+    // A plan review and a phase review judge fundamentally different things, and the
+    // framing must match the artifact:
+    //   - a *plan* review judges a DOCUMENT describing work that is NOT yet built —
+    //     nothing is supposed to exist on disk, so "verify the work / no regressions"
+    //     is wrong and pushes the reviewer to flag the absent build as defects.
+    //   - a *phase* review judges a CODE DIFF (phase base → current tree), where
+    //     verifying the work against the real files and checking for regressions is
+    //     exactly right.
+    // Conflating the two made an R2 reviewer report a sound plan as "every acceptance
+    // criterion unmet" because no code was built yet — so branch on the artifact.
     let is_r2 = round.eq_ignore_ascii_case("R2");
-    let round_note = if is_r2 {
-        " This is the SECOND pass — R1 already reviewed and the coder applied fixes. Judge the work as a whole: confirm R1's points were actually fixed, that the fixes caused no regressions, and flag anything R1 missed (R1's findings are below)."
+    let is_plan = artifact.eq_ignore_ascii_case("plan");
+
+    // Base instruction: for a plan, point the reviewer at the document's soundness and
+    // explicitly forbid treating the unbuilt repo as a defect (tools are still useful
+    // for cross-checking the plan against referenced docs). For a phase, keep the
+    // verify-against-the-files framing.
+    let review_instruction = if is_plan {
+        format!(
+            "Critically review the {round} of the plan \"{artifact}\" below. It describes work that is NOT yet implemented — review the plan's soundness (scope, phasing, acceptance criteria, internal consistency, terminology), NOT the repo's build state. Use your read-only tools to cross-check the plan against referenced docs and existing files, but do NOT treat unbuilt phases, missing crates/files, or unrun commands as defects — nothing is supposed to be built yet. Give your findings, highest priority first."
+        )
     } else {
-        ""
+        format!(
+            "Critically review the {round} of \"{artifact}\" below — verify it against the real files with your tools, then give your findings, highest priority first."
+        )
+    };
+
+    // R2 is the SECOND pass. For a plan, R2 re-reads the (possibly revised) plan text
+    // and confirms R1's points were addressed in the document. For a phase, R2 judges
+    // the full change (the diff spans the phase base to the current tree, so it already
+    // carries the R1 fixes) and checks for regressions.
+    let round_note = match (is_r2, is_plan) {
+        (true, true) => " This is the SECOND pass — R1 already reviewed the plan (it may since have been revised). Re-review the plan DOCUMENT: confirm R1's points were actually addressed in the plan text, and flag anything R1 missed (R1's findings are below). Do not look for implemented code — this is still a plan, not a build.",
+        (true, false) => " This is the SECOND pass — R1 already reviewed and the coder applied fixes. Judge the work as a whole: confirm R1's points were actually fixed, that the fixes caused no regressions, and flag anything R1 missed (R1's findings are below).",
+        _ => "",
     };
     let prior_round_block = if is_r2 {
         let r1_path = reviews_dir(root).join(format!("REVIEW_{}_R1.md", artifact));
+        let label = if is_plan {
+            "R1 FINDINGS (confirm each was addressed in the revised plan)"
+        } else {
+            "R1 FINDINGS (verify each was fixed and caused no regressions)"
+        };
         match std::fs::read_to_string(&r1_path) {
             Ok(f) if !f.trim().is_empty() => format!(
-                "\n\n--- R1 FINDINGS (verify each was fixed and caused no regressions) ---\n{}\n---",
+                "\n\n--- {} ---\n{}\n---",
+                label,
                 crate::reality::cap(&f, 8000)
             ),
             _ => String::new(),
@@ -293,7 +325,7 @@ pub fn run_single_review(
         String::new()
     };
     let user = format!(
-        "{decisions_block}{prior_reviews}Critically review the {round} of \"{artifact}\" below — verify it against the real files with your tools, then give your findings, highest priority first.{round_note}\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---{prior_round_block}",
+        "{decisions_block}{prior_reviews}{review_instruction}{round_note}\n\n--- CONTENT ---\n{content}\n--- END CONTENT ---{prior_round_block}",
     );
 
     // Agentic read-only loop: the reviewer may read/grep/list the repo to confirm

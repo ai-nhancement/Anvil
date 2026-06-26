@@ -238,6 +238,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/context", "Show how full the coder's context window is (tokens used / budget / % · whether compaction is imminent)"),
     ("/memory", "Inspect the coder's memory + context files (ledger, history window, working memory, decisions, assumptions, token estimate)"),
     ("/clear-memory", "Reset the in-session history + working memory (the append-only ledger is kept)"),
+    ("/remember", "Save a durable note to .anvil/decisions.md (injected every turn) — e.g. /remember always run cargo fmt before release"),
+    ("/forget", "Remove a remembered note from .anvil/decisions.md — /forget <text> drops matches; /forget alone lists them"),
     ("/decisions", "View .anvil/decisions.md — durable preferences + verification commands (injected each turn)"),
     ("/assumptions", "View .anvil/assumptions.md — the coder's unverified working hypotheses (injected each turn)"),
     ("/scratch", "View .anvil/scratch.md — disposable notes (never injected)"),
@@ -2385,6 +2387,107 @@ impl App {
             );
             return;
         }
+
+        // /remember <text> — deterministically append a durable note to
+        // .anvil/decisions.md (injected into the coder every turn). Unlike asking the
+        // coder to remember something in chat, this writes the line itself, so it can
+        // never be skipped. /forget removes notes again.
+        if cmd == "/remember" || cmd.starts_with("/remember ") {
+            // Parse from `trimmed` so the note keeps the user's original casing.
+            let note = trimmed
+                .split_once(char::is_whitespace)
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim();
+            if note.is_empty() {
+                self.push_system(
+                    "Usage: /remember <thing to remember> — saves it to .anvil/decisions.md (injected every turn). /forget <text> removes it.",
+                );
+                return;
+            }
+            crate::agent::ensure_context_files(&self.root);
+            let path = crate::agent::decisions_path(&self.root);
+            let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(&format!("- {note}\n"));
+            match std::fs::write(&path, &content) {
+                Ok(()) => self.push_system(&format!(
+                    "Remembered (in .anvil/decisions.md, injected every turn): {note}"
+                )),
+                Err(e) => self.push_system(&format!("Couldn't write decisions.md: {e}")),
+            }
+            self.follow_bottom = true;
+            return;
+        }
+
+        // /forget [text] — remove remembered bullet(s) from .anvil/decisions.md. With
+        // text: drop every list item containing it (case-insensitive), leaving headers
+        // and comments untouched. Without text: list the current bullets so the user
+        // can see what's there to forget.
+        if cmd == "/forget" || cmd.starts_with("/forget ") {
+            let path = crate::agent::decisions_path(&self.root);
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let needle = trimmed
+                .split_once(char::is_whitespace)
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim();
+            if needle.is_empty() {
+                let bullets: Vec<&str> = content
+                    .lines()
+                    .filter(|l| l.trim_start().starts_with('-'))
+                    .collect();
+                if bullets.is_empty() {
+                    self.push_system(
+                        "Nothing remembered in .anvil/decisions.md yet. Add one with /remember <text>.",
+                    );
+                } else {
+                    self.push_system(
+                        "Remembered notes (.anvil/decisions.md) — /forget <text> removes any that match:",
+                    );
+                    for b in bullets {
+                        self.push(b.to_string());
+                    }
+                    self.follow_bottom = true;
+                }
+                return;
+            }
+            let needle_lc = needle.to_lowercase();
+            let mut removed = 0usize;
+            let kept: Vec<&str> = content
+                .lines()
+                .filter(|l| {
+                    // Only ever drop list items, never headers/comments/structure.
+                    if l.trim_start().starts_with('-') && l.to_lowercase().contains(&needle_lc) {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            if removed == 0 {
+                self.push_system(&format!(
+                    "No remembered note matched \"{needle}\". Use /forget with no text to list them."
+                ));
+                return;
+            }
+            let mut new_content = kept.join("\n");
+            if content.ends_with('\n') {
+                new_content.push('\n');
+            }
+            match std::fs::write(&path, &new_content) {
+                Ok(()) => self.push_system(&format!(
+                    "Forgot {removed} note{} matching \"{needle}\".",
+                    if removed == 1 { "" } else { "s" }
+                )),
+                Err(e) => self.push_system(&format!("Couldn't write decisions.md: {e}")),
+            }
+            self.follow_bottom = true;
+            return;
+        }
         if cmd == "/assumptions" {
             self.show_context_file(
                 crate::agent::assumptions_path(&self.root),
@@ -2573,7 +2676,7 @@ impl App {
                 "Memory layers:\n  ledger (.anvil/session.json): {} entries (append-only, full record)\n  in-session history: {} messages (recent window sent to the coder)\n  working memory (.anvil/working-memory.md): {} bytes\n  reality snapshot: {} bytes (rebuilt every turn)\nProject context files:\n{}\n  ≈ {}k tokens sent next turn (window + working memory + decisions + assumptions + snapshot)",
                 ledger_lines, hist_len, wm_bytes, snap_chars, ctx_files, est_tokens / 1000
             ));
-            self.push_system("  /decisions /assumptions /scratch /architecture to view · /compact folds chat into working memory · /clear-memory resets the session (ledger kept)");
+            self.push_system("  /decisions /assumptions /scratch /architecture to view · /remember <text> saves a durable note (/forget removes it) · /compact folds chat into working memory · /clear-memory resets the session (ledger kept)");
             return;
         }
 

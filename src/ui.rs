@@ -6402,6 +6402,39 @@ impl App {
     }
 }
 
+/// Drain a fast burst of character/Enter key events — a paste on terminals that don't
+/// deliver a bracketed-paste `Event::Paste` (notably the Windows console). Starts from
+/// `first` (the char that opened the burst) and greedily consumes every key event that's
+/// already queued, turning plain chars into text and Enter into newlines. Stops at the
+/// first event that isn't part of the burst (a control key, resize, mouse, etc.) and hands
+/// it back so the caller can dispatch it — nothing is dropped. A real `Event::Paste` that
+/// shows up mid-burst is folded straight into the buffer.
+fn drain_paste_burst(first: char) -> std::io::Result<(String, Option<Event>)> {
+    let mut buf = String::new();
+    buf.push(first);
+    while event::poll(std::time::Duration::from_millis(0))? {
+        let ev = event::read()?;
+        match &ev {
+            Event::Key(k) if matches!(k.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                match k.code {
+                    KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => buf.push(c),
+                    KeyCode::Enter if !k.modifiers.contains(KeyModifiers::SHIFT) => buf.push('\n'),
+                    // Anything else (Ctrl+X, arrows, Esc…) ends the burst.
+                    _ => return Ok((buf, Some(ev))),
+                }
+            }
+            Event::Paste(text) => buf.push_str(text),
+            // Resize / focus / mouse / key-release: not part of a paste burst.
+            _ => return Ok((buf, Some(ev))),
+        }
+        // Backstop against a stuck key flooding input forever.
+        if buf.len() > 8_000_000 {
+            break;
+        }
+    }
+    Ok((buf, None))
+}
+
 /// The main event/draw loop. Returns on quit or error.
 fn run_app_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
@@ -6433,6 +6466,59 @@ fn run_app_loop<B: ratatui::backend::Backend>(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
+                    // Fallback paste collapse. On terminals that don't emit a bracketed-paste
+                    // Event::Paste (notably the Windows console, where delivery is flaky), a
+                    // paste arrives as a flood of individual key events. If this is a plain
+                    // character and more input is already queued, it's a paste burst: drain
+                    // the run of chars/newlines and route it through the same handle_paste
+                    // collapse used for real paste events. Human typing never has input queued
+                    // at sub-millisecond latency, so this can't fire on genuine keystrokes.
+                    let plain_char = match key.code {
+                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            Some(c)
+                        }
+                        _ => None,
+                    };
+                    if let Some(c) = plain_char {
+                        if event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+                            let (burst, leftover) = drain_paste_burst(c)?;
+                            app.handle_paste(burst);
+                            // Mirror the live-palette behavior of normal typing: a burst that
+                            // collapses to a placeholder won't start with '/', so this closes
+                            // the palette; a small inline burst of "/cmd…" keeps it open.
+                            if app.input.starts_with('/') && app.config_wizard.is_none() {
+                                app.showing_command_palette = true;
+                                app.command_selected = 0;
+                            } else {
+                                app.showing_command_palette = false;
+                            }
+                            // The event that ended the burst was already consumed — dispatch
+                            // it so nothing is lost.
+                            match leftover {
+                                Some(Event::Key(k))
+                                    if matches!(
+                                        k.kind,
+                                        KeyEventKind::Press | KeyEventKind::Repeat
+                                    ) =>
+                                {
+                                    if handle_key(app, k)? {
+                                        break;
+                                    }
+                                }
+                                Some(Event::Paste(text)) => {
+                                    app.handle_paste(text);
+                                    if !app.input.starts_with('/') || app.config_wizard.is_some() {
+                                        app.showing_command_palette = false;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            if app.should_quit {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
                     if handle_key(app, key)? {
                         break;
                     }

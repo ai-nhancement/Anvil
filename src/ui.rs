@@ -162,10 +162,13 @@ enum GateArtifact {
     Plan,
     Phase(String), // phase id, e.g. "P0"
     /// Ad-hoc `/review` of recent work (not a planned phase). `deep` adds the
-    /// opt-in R2 second opinion; otherwise the gate is R1-only.
+    /// opt-in R2 second opinion; otherwise the gate is R1-only. `commit` targets a
+    /// specific commit (`--last` = HEAD, `--commit <ref>`) so the review is isolated
+    /// from the working tree; `None` = the default scope (uncommitted, else HEAD).
     Addition {
         slug: String,
         deep: bool,
+        commit: Option<String>,
     },
 }
 
@@ -228,8 +231,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/phase-start <id>", "Set the current phase (e.g. P0). Optional — you can also just tell the coder to start"),
     ("/accept-phase [id]", "Phase gate: coder writes review briefing → R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/ship-phase [id]", "Quench the phase — ship it after its reviews (run /accept-phase first)"),
-    ("/review [--deep] [label]", "Ad-hoc review of recent work (no plan needed): coder writes a briefing → R1 critiques the diff. Add --deep for a second cross-vendor R2 opinion"),
-    ("/debug <description>", "Bug-hunt mode (no plan needed): describe the bug and the coder reproduces it, finds the root cause, makes the minimal fix + a regression test, and leaves it uncommitted — then run /review to gate it (alias /fix)"),
+    ("/review [--deep] [--last|--commit <ref>] [label]", "Ad-hoc review of recent work (no plan needed): coder writes a briefing → R1 critiques the diff. --deep adds a cross-vendor R2; --last reviews just the most recent commit (--commit <ref> any commit), isolated from the working tree"),
+    ("/debug <description>", "Bug-hunt mode (no plan needed): describe the bug and the coder reproduces it, finds the root cause, makes the minimal fix + a regression test, and commits it on its own — then run /review --last to gate that commit (alias /fix)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Clinker the forge: fold the conversation into .anvil/working-memory.md and rake out older turns (alias /clinker)"),
     ("/context", "Show how full the coder's context window is (tokens used / budget / % · whether compaction is imminent)"),
@@ -2198,49 +2201,86 @@ impl App {
                 self.push_system("Reviewers not configured. Use /config.");
                 return;
             }
-            let rest = cmd.strip_prefix("/review").unwrap_or("").trim();
+            // Parse from `trimmed` (original case) so a commit ref keeps its case;
+            // flags are matched case-insensitively. `--last` = HEAD, `--commit <ref>`
+            // targets a specific commit (isolated from the working tree).
+            let rest = trimmed
+                .split_once(char::is_whitespace)
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim();
             let mut deep = false;
+            let mut commit: Option<String> = None;
             let mut label_parts: Vec<&str> = Vec::new();
-            for tok in rest.split_whitespace() {
-                match tok {
+            let mut toks = rest.split_whitespace();
+            while let Some(tok) = toks.next() {
+                match tok.to_ascii_lowercase().as_str() {
                     "--deep" | "-d" => deep = true,
+                    "--last" | "--head" => commit = Some("HEAD".to_string()),
+                    "--commit" | "-c" => match toks.next() {
+                        Some(r) => commit = Some(r.to_string()),
+                        None => {
+                            self.push_system(
+                                "Usage: /review --commit <ref>  (e.g. /review --commit HEAD~1)",
+                            );
+                            return;
+                        }
+                    },
                     // Ignore usage-hint placeholders if they leak in (e.g. a pasted
                     // "/review [--deep] [label]") instead of treating them as a label.
-                    t if t.starts_with('[') || t.starts_with('<') => {}
-                    t => label_parts.push(t),
+                    _ if tok.starts_with('[') || tok.starts_with('<') => {}
+                    _ => label_parts.push(tok),
                 }
             }
             // Pre-flight: don't spend a reviewer turn on an empty diff. `/review` is
             // git-based, so a non-git folder (or a clean tree) has nothing to review —
             // say so clearly instead of running a misleading "working tree is clean".
-            match crate::phase::addition_review_readiness(&self.root) {
-                crate::phase::AdditionReviewReadiness::NoGit => {
+            if let Some(reference) = commit.as_deref() {
+                // Commit-targeted: a clean working tree is fine; only the ref matters.
+                if crate::phase::git_head_sha(&self.root).is_none() {
                     self.push_system(
-                        "/review reviews a git diff, but this folder isn't a git repository (or `git` isn't installed / on PATH), so there's nothing to diff. \
-                         Initialize it — `git init`, then commit a baseline — and from then on Anvil can review your changes. (The phase/plan gates are git-based too.)",
+                        "/review --last/--commit needs a git repository with at least one commit, but none was found here. \
+                         `git init` and commit a baseline first. (The phase/plan gates are git-based too.)",
                     );
                     return;
                 }
-                crate::phase::AdditionReviewReadiness::NothingToReview => {
-                    self.push_system(
-                        "Nothing to review — the working tree is clean and there's no recent commit. \
-                         Make the change you want reviewed (or commit it), then run /review.",
-                    );
+                if !crate::phase::commit_exists(&self.root, reference) {
+                    self.push_system(&format!(
+                        "Can't review '{reference}' — it doesn't resolve to a commit here. Try /review --last (HEAD), or /review --commit <sha|HEAD~1>.",
+                    ));
                     return;
                 }
-                crate::phase::AdditionReviewReadiness::Ready => {}
+            } else {
+                match crate::phase::addition_review_readiness(&self.root) {
+                    crate::phase::AdditionReviewReadiness::NoGit => {
+                        self.push_system(
+                            "/review reviews a git diff, but this folder isn't a git repository (or `git` isn't installed / on PATH), so there's nothing to diff. \
+                             Initialize it — `git init`, then commit a baseline — and from then on Anvil can review your changes. (The phase/plan gates are git-based too.)",
+                        );
+                        return;
+                    }
+                    crate::phase::AdditionReviewReadiness::NothingToReview => {
+                        self.push_system(
+                            "Nothing to review — the working tree is clean and there's no recent commit. \
+                             Make the change you want reviewed (or commit it, then /review --last), then run /review.",
+                        );
+                        return;
+                    }
+                    crate::phase::AdditionReviewReadiness::Ready => {}
+                }
             }
             let label = label_parts.join(" ");
             let slug = crate::phase::addition_slug(&self.root, &label);
-            self.start_gate_flow(GateArtifact::Addition { slug, deep });
+            self.start_gate_flow(GateArtifact::Addition { slug, deep, commit });
             return;
         }
 
         // `/debug <description>` (alias `/fix`) — bug-hunt mode. No plan/phase
         // needed: frame the coder with debugging discipline (reproduce → root
-        // cause → minimal fix → regression test → verify) and let it go. The fix
-        // is left UNCOMMITTED on purpose so the existing /review — which gates the
-        // working-tree diff — sees exactly it. Nothing new downstream.
+        // cause → minimal fix → regression test → verify) and let it go. The fix is
+        // committed as ONE focused commit (staging only its own files), so a later
+        // `/review --last` gates exactly that commit — isolated from any other work
+        // sitting in the tree. Nothing new downstream.
         if cmd == "/debug"
             || cmd.starts_with("/debug ")
             || cmd == "/fix"
@@ -2266,20 +2306,18 @@ impl App {
             if desc.is_empty() {
                 self.push_system(
                     "Usage: /debug <describe the bug> — e.g. `/debug clicking Save twice creates two records`. \
-                     The coder reproduces it, finds the root cause, fixes it minimally + adds a regression test, then you run /review.",
+                     The coder reproduces it, finds the root cause, fixes it minimally + adds a regression test, commits it, then you run /review --last.",
                 );
                 return;
             }
-            // /review diffs the WHOLE working tree, so any changes already sitting
-            // uncommitted will be folded into the debug review alongside the fix.
-            // Surface that up front so the user can commit/stash unrelated work and
-            // keep the review focused (a dirty tree is what made an early /review
-            // critique files that had nothing to do with the debug task).
+            // The fix is committed on its own and reviewed via /review --last, so
+            // pre-existing uncommitted work won't be swept in — AS LONG AS the coder
+            // stages only its own files. Surface the dirty tree so that's visible
+            // (and the prompt below tells the coder never to `git add -A`).
             let pending = crate::phase::pending_change_count(&self.root);
             if pending > 0 {
                 self.push_system(&format!(
-                    "Heads up: {pending} file(s) already have uncommitted changes. /review diffs the whole working tree, so it'll include them next to the fix. \
-                     Commit or stash unrelated work first if you want the debug review focused on just this fix.",
+                    "Heads up: {pending} file(s) already have uncommitted changes. The debug fix will be committed on its own (coder stages only its files) and reviewed with /review --last, so they won't be swept in — but don't let it `git add -A`.",
                 ));
             }
             let prompt = format!(
@@ -2293,9 +2331,9 @@ impl App {
                  3. Make the MINIMAL fix that addresses that cause. Don't refactor unrelated code or expand scope.\n\
                  4. Add or update a test that fails before the fix and passes after (a regression guard) — unless the project has no test harness.\n\
                  5. VERIFY: run the project's build/test/lint (see .anvil/decisions.md) and confirm the symptom is gone and nothing else broke.\n\
-                 6. Do NOT `git commit` the fix — leave it in the working tree. /review gates UNCOMMITTED changes, so leaving your fix unstaged is exactly what lets the reviewers see just it; the user commits after the review passes.\n\
+                 6. COMMIT the fix as ONE focused commit: stage ONLY the files you changed (`git add <those exact paths>` — NEVER `git add -A` or `git add .`, so any unrelated work already in the tree is left untouched), then `git commit -m \"fix: …\"` with a conventional message. Keep it to a single commit.\n\
                  \n\
-                 When the fix is in place, verified, and left uncommitted, STOP and tell the user to run /review (add --deep for a second cross-vendor opinion) to gate the change."
+                 When the fix is committed and verified, STOP and tell the user to run /review --last to gate exactly that commit (add --deep for a second cross-vendor opinion)."
             );
             self.start_real_chat(&prompt);
             return;
@@ -2664,7 +2702,7 @@ impl App {
             self.push_system("Context files (coder-maintained, visible): /decisions (prefs + verify commands), /assumptions (unverified hypotheses) — both injected each turn · /scratch (disposable, never injected) · /architecture (code map, on demand).");
             self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → coder fixes → (pause) /continue → R2 → coder fixes → (pause) /continue → summary → /accept-plan.");
             self.push_system("Phase gate: build with the coder → /accept-phase → same R1 → fix → R2 → fix → summary loop on the git diff → /ship-phase. Each pause: /continue or Enter on an empty line.");
-            self.push_system("No plan? /debug <bug> sends the coder root-cause hunting (reproduce → minimal fix → regression test, left UNCOMMITTED); /review [--deep] then gates that working-tree diff (R1, +R2 with --deep). Commit/stash unrelated changes first so the review stays focused. No /ship — you commit after it passes.");
+            self.push_system("No plan? /debug <bug> sends the coder root-cause hunting (reproduce → minimal fix → regression test) and commits it on its own; then /review --last gates exactly that commit (R1, +R2 with --deep) — isolated from any other work in the tree. /review --commit <ref> targets any commit; plain /review still reviews the working tree.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");
             return;
         }
@@ -3795,20 +3833,23 @@ impl App {
             // Addition gate (`/review`): like the phase gate, the coder first writes
             // a short briefing, then R1 critiques the diff. R2 is opt-in (`--deep`),
             // handled later in the R1Fixing step — there's no ship/accept here.
-            GateArtifact::Addition { slug, deep } => {
+            GateArtifact::Addition { slug, deep, commit } => {
                 let slug = slug.clone();
                 let rounds = if *deep {
                     "R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"
                 } else {
                     "R1 → coder fixes → summary"
                 };
+                // Surface exactly what's under review so a wrong target is obvious.
+                let scope =
+                    crate::phase::addition_review_scope_label(&self.root, commit.as_deref());
                 self.gate_flow = Some(GateFlow {
                     artifact: artifact.clone(),
                     step: GateStep::BriefWriting,
                 });
                 self.push_system(&format!(
-                    "── Review gate started on {} ──  coder writes the review briefing → {}.",
-                    label, rounds
+                    "── Review gate started on {} ──  reviewing: {}.  coder writes the review briefing → {}.",
+                    label, scope, rounds
                 ));
                 self.push_system(
                     "→ Coder writing the addition review briefing (what changed & why)…",
@@ -3859,11 +3900,11 @@ impl App {
                         (GateArtifact::Phase(id), Round::R2) => {
                             crate::phase::run_phase_r2_diff(&root, &id)
                         }
-                        (GateArtifact::Addition { slug, .. }, Round::R1) => {
-                            crate::phase::run_addition_r1_diff(&root, &slug)
+                        (GateArtifact::Addition { slug, commit, .. }, Round::R1) => {
+                            crate::phase::run_addition_r1_diff(&root, &slug, commit.as_deref())
                         }
-                        (GateArtifact::Addition { slug, .. }, Round::R2) => {
-                            crate::phase::run_addition_r2_diff(&root, &slug)
+                        (GateArtifact::Addition { slug, commit, .. }, Round::R2) => {
+                            crate::phase::run_addition_r2_diff(&root, &slug, commit.as_deref())
                         }
                     })
                     .await
@@ -3987,10 +4028,10 @@ impl App {
                         "✓ Review gate complete (R1 + R2, fixes applied both rounds) — the work is tempered. When you're happy, /ship-phase {} to quench it.",
                         id
                     ),
-                    GateArtifact::Addition { slug, deep } => {
+                    GateArtifact::Addition { slug, deep, .. } => {
                         let rounds = if *deep { "R1 + R2" } else { "R1" };
                         let mut m = format!(
-                            "✓ Addition review complete ({}, fixes applied) — the work is in your working tree; commit it when you're happy.",
+                            "✓ Addition review complete ({}, fixes applied) — any fixes are in your working tree; commit them when you're happy.",
                             rounds
                         );
                         if !*deep {

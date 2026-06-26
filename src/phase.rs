@@ -1011,7 +1011,7 @@ pub fn addition_briefing_prompt(slug: &str) -> String {
 /// commit when the tree is clean. Unlike [`capture_git_diff`] this ignores any
 /// recorded phase base — an addition isn't a phase. Review/session artifacts are
 /// excluded so the reviewer sees only code.
-fn capture_addition_diff(root: &Path) -> String {
+fn capture_addition_diff(root: &Path, commit: Option<&str>) -> String {
     let git = |args: &[&str]| -> Option<String> {
         std::process::Command::new("git")
             .args(args)
@@ -1021,20 +1021,32 @@ fn capture_addition_diff(root: &Path) -> String {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
     };
-    // 1) Uncommitted changes (the common "I just made a change, review it" case).
-    let mut diff = git(&diff_args(&["diff", "HEAD"])).unwrap_or_default();
-    // 2) Clean tree → fall back to the most recent commit (the addition was committed).
-    if diff.trim().is_empty() {
-        if let Some(d) = git(&diff_args(&["diff", "HEAD~1", "HEAD"])) {
-            if !d.trim().is_empty() {
-                diff = format!("(working tree clean — showing the most recent commit)\n{d}");
+    let mut diff = if let Some(reference) = commit {
+        // Targeted (`/review --last` / `--commit`): exactly this commit's diff
+        // (`<ref>^..<ref>`), independent of the working tree — so a dirty tree can
+        // neither pollute the review nor hide the change being reviewed.
+        let parent = format!("{reference}^");
+        git(&diff_args(&["diff", parent.as_str(), reference]))
+            .filter(|d| !d.trim().is_empty())
+            // A root commit has no parent — show the commit itself.
+            .or_else(|| git(&["show", "--format=", reference]))
+            .unwrap_or_default()
+    } else {
+        // Auto: uncommitted changes (the common "I just made a change" case), else
+        // the most recent commit, plus untracked file contents.
+        let mut d = git(&diff_args(&["diff", "HEAD"])).unwrap_or_default();
+        if d.trim().is_empty() {
+            if let Some(c) = git(&diff_args(&["diff", "HEAD~1", "HEAD"])) {
+                if !c.trim().is_empty() {
+                    d = format!("(working tree clean — showing the most recent commit)\n{c}");
+                }
             }
         }
-    }
-    append_untracked_files(root, &mut diff);
+        append_untracked_files(root, &mut d);
+        d
+    };
     if diff.trim().is_empty() {
-        return "(nothing to review — the working tree is clean and there is no recent commit)"
-            .to_string();
+        return "(nothing to review — no diff for the requested target)".to_string();
     }
     if diff.len() > 120_000 {
         diff.truncate(120_000);
@@ -1043,10 +1055,67 @@ fn capture_addition_diff(root: &Path) -> String {
     diff
 }
 
+/// One-line description of what a `/review` is pointed at — shown in the UI banner
+/// and prepended to the reviewer's content so it's unambiguous which change is
+/// under review (and obvious if it's the wrong one). `commit` = a ref for
+/// `--last`/`--commit`; `None` = the default working-tree / most-recent-commit scope.
+pub fn addition_review_scope_label(root: &Path, commit: Option<&str>) -> String {
+    let git = |args: &[&str]| -> Option<String> {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    if let Some(reference) = commit {
+        let sha = git(&["rev-parse", "--short", reference]).filter(|s| !s.is_empty());
+        let subject = git(&["log", "-1", "--format=%s", reference]).unwrap_or_default();
+        return match sha {
+            Some(s) if !subject.is_empty() => format!("commit {s} — \"{subject}\""),
+            Some(s) => format!("commit {s}"),
+            None => format!("'{reference}' (unknown commit/ref)"),
+        };
+    }
+    let head = git(&["rev-parse", "--short", "HEAD"]).filter(|s| !s.is_empty());
+    let dirty = git(&diff_args(&["diff", "HEAD"]))
+        .map(|d| !d.trim().is_empty())
+        .unwrap_or(false)
+        || git(&["ls-files", "--others", "--exclude-standard"])
+            .map(|l| {
+                l.lines()
+                    .any(|n| !n.trim().is_empty() && !is_review_noise(n.trim()))
+            })
+            .unwrap_or(false);
+    match (dirty, head) {
+        (true, Some(h)) => format!("uncommitted working-tree changes (vs HEAD {h})"),
+        (true, None) => "uncommitted working-tree changes".to_string(),
+        (false, Some(h)) => format!("the most recent commit (HEAD {h})"),
+        (false, None) => "nothing (clean tree, no commits yet)".to_string(),
+    }
+}
+
+/// Does `reference` resolve to a commit here? Pre-flights `/review --commit <ref>`
+/// so a typo gets a clear message instead of an empty, confusing review.
+pub fn commit_exists(root: &Path, reference: &str) -> bool {
+    std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ])
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Compose the reviewer input for an addition: the coder's briefing (intent) + the
 /// diff (ground truth). No plan is involved; the reviewer is told this is a small,
 /// ad-hoc change so findings stay proportionate.
-fn build_addition_diff_content(root: &Path, slug: &str) -> String {
+fn build_addition_diff_content(root: &Path, slug: &str, commit: Option<&str>) -> String {
     let brief = fs::read_to_string(addition_brief_path(root, slug))
         .ok()
         .filter(|b| !b.trim().is_empty())
@@ -1059,22 +1128,24 @@ fn build_addition_diff_content(root: &Path, slug: &str) -> String {
         .unwrap_or_else(|| {
             "(no review briefing was written — review from the diff alone)\n\n".to_string()
         });
-    let diff = capture_addition_diff(root);
+    let scope = addition_review_scope_label(root, commit);
+    let diff = capture_addition_diff(root, commit);
     format!(
-        "This is an ad-hoc ADDITION review (not a planned phase). Review the change below for \
-         correctness, bugs, risks, and obvious cleanups, verifying against the real files with your \
-         tools. Keep findings proportionate to a small addition.\n\n\
-         {brief}--- GIT DIFF (the addition under review) ---\n{diff}\n"
+        "This is an ad-hoc ADDITION review (not a planned phase). You are reviewing: {scope}. \
+         Review the change below for correctness, bugs, risks, and obvious cleanups, verifying \
+         against the real files with your tools. Keep findings proportionate to a small addition.\n\n\
+         {brief}--- GIT DIFF ({scope}) ---\n{diff}\n"
     )
 }
 
-/// R1 of an addition: reviewer-a critiques the current diff. Writes REVIEW_<slug>_R1.md.
-pub fn run_addition_r1_diff(root: &Path, slug: &str) -> Result<String> {
+/// R1 of an addition: reviewer-a critiques the diff (`commit` selects a specific
+/// commit via `--last`/`--commit`, else the default scope). Writes REVIEW_<slug>_R1.md.
+pub fn run_addition_r1_diff(root: &Path, slug: &str, commit: Option<&str>) -> Result<String> {
     load_local_env(root);
     let cfg = load_config(root)?;
     let client = LlmClient::new();
     fs::create_dir_all(reviews_dir(root))?;
-    let content = build_addition_diff_content(root, slug);
+    let content = build_addition_diff_content(root, slug, commit);
     let reviewer_a = cfg
         .roles
         .reviewer_a
@@ -1085,12 +1156,12 @@ pub fn run_addition_r1_diff(root: &Path, slug: &str) -> Result<String> {
 
 /// R2 of an addition (the opt-in `--deep` second opinion): reviewer-b re-critiques
 /// after the R1 fixes. Writes REVIEW_<slug>_R2.md.
-pub fn run_addition_r2_diff(root: &Path, slug: &str) -> Result<String> {
+pub fn run_addition_r2_diff(root: &Path, slug: &str, commit: Option<&str>) -> Result<String> {
     load_local_env(root);
     let cfg = load_config(root)?;
     let client = LlmClient::new();
     fs::create_dir_all(reviews_dir(root))?;
-    let content = build_addition_diff_content(root, slug);
+    let content = build_addition_diff_content(root, slug, commit);
     let reviewer_b = cfg
         .roles
         .reviewer_b
@@ -1550,7 +1621,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         // Without a briefing the reviewer is told so.
-        let without = build_addition_diff_content(root, "x");
+        let without = build_addition_diff_content(root, "x", None);
         assert!(
             without.contains("no review briefing was written"),
             "{without}"
@@ -1562,9 +1633,53 @@ mod tests {
             "# x — Addition Review Briefing\n## Why\nBecause.\n",
         )
         .unwrap();
-        let with = build_addition_diff_content(root, "x");
+        let with = build_addition_diff_content(root, "x", None);
         assert!(with.contains("CODER'S REVIEW BRIEFING"), "{with}");
         assert!(with.contains("Because."), "{with}");
+    }
+
+    #[test]
+    fn review_targets_a_specific_commit_ignoring_dirty_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("base.txt"), "0\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        // The fix: one focused commit.
+        std::fs::write(root.join("fix.txt"), "fixed\n").unwrap();
+        git(&["add", "fix.txt"]);
+        git(&["commit", "-qm", "fix: the real change"]);
+        // Now dirty the tree with unrelated work that must NOT appear.
+        std::fs::write(root.join("unrelated.txt"), "noise\n").unwrap();
+
+        // --last (HEAD) reviews ONLY the fix commit, isolated from the dirty tree.
+        let diff = capture_addition_diff(root, Some("HEAD"));
+        assert!(diff.contains("fix.txt"), "fix present: {diff}");
+        assert!(
+            !diff.contains("unrelated.txt"),
+            "dirty tree must be excluded: {diff}"
+        );
+
+        // The scope label names the commit + subject so the reviewer can't be vague.
+        let scope = addition_review_scope_label(root, Some("HEAD"));
+        assert!(scope.starts_with("commit "), "{scope}");
+        assert!(scope.contains("fix: the real change"), "{scope}");
+
+        // Pre-flight: real ref resolves, garbage doesn't.
+        assert!(commit_exists(root, "HEAD"));
+        assert!(!commit_exists(root, "nope-not-a-ref"));
     }
 
     #[test]

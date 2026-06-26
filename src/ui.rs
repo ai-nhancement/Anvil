@@ -229,7 +229,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/accept-phase [id]", "Phase gate: coder writes review briefing → R1 → coder fixes → (pause) → R2 → coder fixes → (pause) → summary"),
     ("/ship-phase [id]", "Quench the phase — ship it after its reviews (run /accept-phase first)"),
     ("/review [--deep] [label]", "Ad-hoc review of recent work (no plan needed): coder writes a briefing → R1 critiques the diff. Add --deep for a second cross-vendor R2 opinion"),
-    ("/debug <description>", "Bug-hunt mode (no plan needed): describe the bug and the coder reproduces it, finds the root cause, makes the minimal fix + a regression test, and commits — then run /review to gate it (alias /fix)"),
+    ("/debug <description>", "Bug-hunt mode (no plan needed): describe the bug and the coder reproduces it, finds the root cause, makes the minimal fix + a regression test, and leaves it uncommitted — then run /review to gate it (alias /fix)"),
     ("/refresh", "Show the live reality snapshot (stage, phase, plan slice, git) the coder is grounded on"),
     ("/compact", "Clinker the forge: fold the conversation into .anvil/working-memory.md and rake out older turns (alias /clinker)"),
     ("/context", "Show how full the coder's context window is (tokens used / budget / % · whether compaction is imminent)"),
@@ -2238,9 +2238,9 @@ impl App {
 
         // `/debug <description>` (alias `/fix`) — bug-hunt mode. No plan/phase
         // needed: frame the coder with debugging discipline (reproduce → root
-        // cause → minimal fix → regression test → verify → commit) and let it go.
-        // It's an ordinary coder turn, so the resulting diff is gated by /review
-        // (or /accept-phase) like any other ad-hoc change — nothing new downstream.
+        // cause → minimal fix → regression test → verify) and let it go. The fix
+        // is left UNCOMMITTED on purpose so the existing /review — which gates the
+        // working-tree diff — sees exactly it. Nothing new downstream.
         if cmd == "/debug"
             || cmd.starts_with("/debug ")
             || cmd == "/fix"
@@ -2270,6 +2270,18 @@ impl App {
                 );
                 return;
             }
+            // /review diffs the WHOLE working tree, so any changes already sitting
+            // uncommitted will be folded into the debug review alongside the fix.
+            // Surface that up front so the user can commit/stash unrelated work and
+            // keep the review focused (a dirty tree is what made an early /review
+            // critique files that had nothing to do with the debug task).
+            let pending = crate::phase::pending_change_count(&self.root);
+            if pending > 0 {
+                self.push_system(&format!(
+                    "Heads up: {pending} file(s) already have uncommitted changes. /review diffs the whole working tree, so it'll include them next to the fix. \
+                     Commit or stash unrelated work first if you want the debug review focused on just this fix.",
+                ));
+            }
             let prompt = format!(
                 "DEBUG TASK — the user reports a bug. Hunt down the ROOT CAUSE, then fix it.\n\
                  \n\
@@ -2281,9 +2293,9 @@ impl App {
                  3. Make the MINIMAL fix that addresses that cause. Don't refactor unrelated code or expand scope.\n\
                  4. Add or update a test that fails before the fix and passes after (a regression guard) — unless the project has no test harness.\n\
                  5. VERIFY: run the project's build/test/lint (see .anvil/decisions.md) and confirm the symptom is gone and nothing else broke.\n\
-                 6. COMMIT the fix with a conventional message (e.g. `fix: …`) so it's a clean, self-contained diff.\n\
+                 6. Do NOT `git commit` the fix — leave it in the working tree. /review gates UNCOMMITTED changes, so leaving your fix unstaged is exactly what lets the reviewers see just it; the user commits after the review passes.\n\
                  \n\
-                 When it's fixed, committed, and verified, STOP and tell the user to run /review (add --deep for a second cross-vendor opinion) to gate the change."
+                 When the fix is in place, verified, and left uncommitted, STOP and tell the user to run /review (add --deep for a second cross-vendor opinion) to gate the change."
             );
             self.start_real_chat(&prompt);
             return;
@@ -2652,7 +2664,7 @@ impl App {
             self.push_system("Context files (coder-maintained, visible): /decisions (prefs + verify commands), /assumptions (unverified hypotheses) — both injected each turn · /scratch (disposable, never injected) · /architecture (code map, on demand).");
             self.push_system("Plan gate: coder writes plan.md → /lock-plan → R1 → coder fixes → (pause) /continue → R2 → coder fixes → (pause) /continue → summary → /accept-plan.");
             self.push_system("Phase gate: build with the coder → /accept-phase → same R1 → fix → R2 → fix → summary loop on the git diff → /ship-phase. Each pause: /continue or Enter on an empty line.");
-            self.push_system("No plan? /debug <bug> sends the coder root-cause hunting (reproduce → minimal fix → regression test → commit); /review [--deep] then gates any ad-hoc diff (R1, +R2 with --deep). No /ship needed — the fix just stays in the tree.");
+            self.push_system("No plan? /debug <bug> sends the coder root-cause hunting (reproduce → minimal fix → regression test, left UNCOMMITTED); /review [--deep] then gates that working-tree diff (R1, +R2 with --deep). Commit/stash unrelated changes first so the review stays focused. No /ship — you commit after it passes.");
             self.push_system("Ollama VRAM: /ps (or /loaded) shows models currently in VRAM • /unload [model] frees VRAM (all if no model given)");
             return;
         }

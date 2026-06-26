@@ -893,6 +893,32 @@ pub fn addition_review_readiness(root: &Path) -> AdditionReviewReadiness {
     }
 }
 
+/// How many working-tree changes a `/review` would pick up RIGHT NOW — tracked
+/// modifications plus relevant untracked files, ignoring Anvil's own review/session
+/// artifacts. Used to warn before a `/debug` run that an already-dirty tree will be
+/// folded into the review alongside the fix, so the user can commit/stash first.
+pub fn pending_change_count(root: &Path) -> usize {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(root)
+        .output();
+    let Ok(out) = out else {
+        return 0;
+    };
+    if !out.status.success() {
+        return 0;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| {
+            // Porcelain v1 line: "XY <path>"; renames are "R  old -> new".
+            let path = l.get(3..).unwrap_or("").trim();
+            let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
+            !path.is_empty() && !is_review_noise(path)
+        })
+        .count()
+}
+
 /// Path to the coder-written briefing for an addition review (REVIEW_<slug>_BRIEF.md).
 pub fn addition_brief_path(root: &Path, slug: &str) -> std::path::PathBuf {
     reviews_dir(root).join(format!("REVIEW_{}_BRIEF.md", slug))
@@ -1254,6 +1280,38 @@ mod tests {
             "REVIEW_*.md name leaked into diff: {diff3}"
         );
         assert!(!diff3.contains("session.json"), ".anvil leaked: {diff3}");
+    }
+
+    #[test]
+    fn pending_change_count_ignores_review_noise() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        // Clean tree → nothing pending.
+        assert_eq!(pending_change_count(root), 0);
+
+        // One tracked modification + one untracked file count; Anvil's own
+        // REVIEW_*.md and .anvil/ artifacts must NOT (they're review/session noise).
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        std::fs::write(root.join("new.txt"), "x\n").unwrap();
+        std::fs::write(root.join("REVIEW_foo_R1.md"), "noise\n").unwrap();
+        std::fs::create_dir_all(root.join(".anvil")).unwrap();
+        std::fs::write(root.join(".anvil/session.json"), "{}\n").unwrap();
+        assert_eq!(pending_change_count(root), 2);
     }
 
     #[test]

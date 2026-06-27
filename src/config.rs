@@ -216,12 +216,13 @@ fn read_config_file(path: &Path) -> Option<AnvilConfig> {
     toml::from_str(&raw).ok()
 }
 
-/// Overlay a project config onto the global base: providers + model_bindings
-/// extend (project keys win on collision); roles override per-field where the
-/// project sets them. The result is what the rest of Anvil sees.
+/// Overlay a project config onto the global base: providers, model_bindings, and
+/// references extend (project keys win on collision); roles override per-field
+/// where the project sets them. The result is what the rest of Anvil sees.
 fn merge(mut base: AnvilConfig, overlay: AnvilConfig) -> AnvilConfig {
     base.providers.extend(overlay.providers);
     base.model_bindings.extend(overlay.model_bindings);
+    base.references.extend(overlay.references);
     if overlay.roles.coder.is_some() {
         base.roles.coder = overlay.roles.coder;
     }
@@ -608,5 +609,34 @@ mod tests {
     fn resolve_reviewer_unknown_fails() {
         let cfg = config_with_reviewer_named("qwen2.5-coder:32b");
         assert!(cfg.resolve_role_or_binding("does-not-exist").is_err());
+    }
+
+    #[test]
+    fn merge_preserves_project_references_over_global_config() {
+        let mut global = AnvilConfig::default();
+        global.roles.coder = Some("global-coder".to_string());
+        global
+            .references
+            .insert("shared".to_string(), "C:\\Shared".to_string());
+        global
+            .references
+            .insert("aime".to_string(), "C:\\OldAiMe".to_string());
+
+        let mut project = AnvilConfig::default();
+        project
+            .references
+            .insert("aime".to_string(), "C:\\AiMe".to_string());
+
+        let merged = merge(global, project);
+
+        assert_eq!(merged.roles.coder.as_deref(), Some("global-coder"));
+        assert_eq!(
+            merged.references.get("shared").map(String::as_str),
+            Some("C:\\Shared")
+        );
+        assert_eq!(
+            merged.references.get("aime").map(String::as_str),
+            Some("C:\\AiMe")
+        );
     }
 }

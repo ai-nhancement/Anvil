@@ -334,10 +334,7 @@ impl LlmClient {
             tool_config,
         };
 
-        let mut url = format!(
-            "{}/v1beta/{}:streamGenerateContent",
-            base, model_path
-        );
+        let mut url = format!("{}/v1beta/{}:streamGenerateContent", base, model_path);
 
         let mut req_builder = self.http.post(&url);
 
@@ -379,7 +376,8 @@ impl LlmClient {
                                                 let _ = token_tx.send(t);
                                             }
                                             GeminiPart::FunctionCall { function_call } => {
-                                                let tc_id = format!("call_{}", uuid::Uuid::new_v4());
+                                                let tc_id =
+                                                    format!("call_{}", uuid::Uuid::new_v4());
                                                 tool_calls.push(ToolCall {
                                                     id: tc_id,
                                                     name: function_call.name,
@@ -497,7 +495,9 @@ mod tests {
         assert!(parser.next_object().is_none());
 
         parser.push("  {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Hello\"}]}}]}");
-        let obj1 = parser.next_object().expect("Expected to parse first object");
+        let obj1 = parser
+            .next_object()
+            .expect("Expected to parse first object");
         assert_eq!(
             obj1["candidates"][0]["content"]["parts"][0]["text"],
             "Hello"
@@ -506,7 +506,9 @@ mod tests {
         parser.push(
             "\n  ,\n  {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \" world\"}]}}]}",
         );
-        let obj2 = parser.next_object().expect("Expected to parse second object");
+        let obj2 = parser
+            .next_object()
+            .expect("Expected to parse second object");
         assert_eq!(
             obj2["candidates"][0]["content"]["parts"][0]["text"],
             " world"

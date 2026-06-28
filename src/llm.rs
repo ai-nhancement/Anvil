@@ -108,7 +108,7 @@ pub struct AssistantTurn {
 /// High-level client. Cheap to clone (Arc under the hood).
 #[derive(Clone)]
 pub struct LlmClient {
-    http: Arc<Client>,
+    pub(crate) http: Arc<Client>,
 }
 
 impl Default for LlmClient {
@@ -1164,22 +1164,8 @@ impl LlmClient {
                     .await
             }
             "google" | "google_ai_studio" | "gemini" => {
-                // No tool calling for Gemini yet — flatten history to a single user
-                // turn and return the text. The agent loop treats this as terminal.
-                let user = flatten_history_to_text(history);
-                match self.chat_google(conn, model, api_key, system, &user).await {
-                    Ok(full) => {
-                        let _ = token_tx.send(full.clone());
-                        Ok(AssistantTurn {
-                            text: full,
-                            tool_calls: vec![],
-                        })
-                    }
-                    Err(e) => {
-                        let _ = token_tx.send(format!("\n[llm-error] {}", e));
-                        Err(e)
-                    }
-                }
+                self.google_turn_stream(conn, model, api_key, system, history, tools, token_tx)
+                    .await
             }
             other => {
                 let msg = format!("provider type '{}' does not support agent turns yet", other);
@@ -1654,6 +1640,7 @@ fn build_anthropic_messages(history: &[ChatMessage]) -> Vec<Value> {
 
 /// Collapse history into a single text blob (used for providers without a
 /// native multi-turn/tool format, e.g. the Gemini fallback).
+#[allow(dead_code)]
 fn flatten_history_to_text(history: &[ChatMessage]) -> String {
     let mut out = String::new();
     for m in history {

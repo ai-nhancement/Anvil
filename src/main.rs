@@ -20,6 +20,7 @@ mod config;
 mod contracts;
 mod dialect;
 mod git;
+mod google_compat;
 mod llm;
 mod modelsdev;
 mod phase;

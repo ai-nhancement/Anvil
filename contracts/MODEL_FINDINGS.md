@@ -19,6 +19,12 @@ model? The recipe at the bottom tells you how to slot it in.
 | gemma4:e4b | 4B / gemma | **minimal** (`coder_local_base_v4.md`) | **94/100** | 30/30 · 1/5 → **4/5**ᴾ | **coder** (+ reviewer ᴾ) |
 | qwen2.5-coder:7b | 7B / qwen2.5 | — (cannot drive tools) | **0/100** | 14/30 · **5/5** | **reviewer only** (high-precision) |
 | qwen3-coder:30b | 30B / qwen3 | **minimal** (`coder_local_base_v4.md`) | 93/100 | **30/30 · 5/5** | **coder + reviewer** (all-rounder) |
+| gemma4:31b | 31B / gemma | **minimal** (`coder_local_base_v4.md`) | **Passed screening** | 30/30 · 0/5 → **5/5**ᴾ | **coder + reviewer** (strong all-rounder ᴾ) |
+| qwen3.6:35b | 35B / qwen | **minimal** (`coder_local_base_v4.md`) | **Passed screening** (ultra-efficient) | **30/30 · 5/5** | **coder + reviewer** (top-tier all-rounder) |
+| llama4:latest | 70B / llama | — (cannot drive tools) | **0/100** | — | **Not compatible** (emits tool calls as text JSON blocks) |
+| codestral | 22B / mistral | — (cannot drive tools) | **0/100** | 20/30 · 0/5 | **reviewer only** (moderate recall, noisy precision) |
+| command-r | 35B / cohere | **minimal** (`coder_local_base_v4.md`) | 0/100 (failed simple edit) | 15/30 · 0/5 | **not recommended** (struggles with tool execution/precision) |
+| phi4 | 14B / reasoning | — (cannot drive tools) | **0/100** | **30/30** · 0/5 | **reviewer only** (flawless recall, noisy precision) |
 
 *catch = planted bugs flagged (recall); clean = decoys left alone (precision / no false alarms).*
 *ᴾ = under the precision reviewer contract (`reviewer_local_precision.md`); built-in-prompt clean is 1/5. See "Reviewer contracts".*
@@ -76,6 +82,35 @@ would have called e2b and qwen3-30b both "~100%"; the faithful bench shows 1 vs 
 - **Reviewer a perfect 30/30 catch, 5/5 clean.** Catches every planted bug AND never false-alarms.
 - **Role: the all-rounder.** Excellent coder and the best reviewer tested — the natural pick when
   you want one capable local model, or a strong cross-family R1/R2 reviewer.
+
+### gemma4:31b — 31B, gemma → coder + reviewer (high-precision)
+- **Coder (minimal v4).** Passed robust multi-step screenings including `single-line-change` and `fix-failing-test` on the first try. Highly capable agentic coder under minimal scaffolding.
+- **Reviewer 30/30 catch, 0/5 clean under built-in prompt → 5/5 clean under `reviewer_local_precision.md`.** Like its smaller 4B sibling, it over-flags on correct code under the built-in prompt. However, under the precision contract, it achieves a perfect 30/30 catch and 5/5 clean-rate.
+- **Role: coder + reviewer (all-rounder).** Highly capable. Highly recommended to run under the precision contract if used as a reviewer.
+
+### qwen3.6:35b — 35B, qwen → top-tier coder + reviewer
+- **Coder (minimal v4) — fastest / most efficient local coder.** Passed robust screenings on multi-step fixtures like `fix-failing-test` and `multi-file-feature` with extreme efficiency (solving complex debugging loops in as few as 2-3 average steps). 
+- **Reviewer a perfect 30/30 catch, 5/5 clean.** Catches every defect flawlessly and never false-alarms under the built-in prompt.
+- **Role: top-tier all-rounder.** The strongest, most efficient local model tested to date for both coder and reviewer roles.
+
+### llama4:latest — 70B, llama → not compatible
+- **Coder 0/100 — cannot drive tools.** Incompatible under the current Ollama driver because it emits tool calls as text/JSON blocks in message content instead of standard native `tool_calls`. Even under the `full` contract, it fails to drive the agent loop.
+- **Role: Not compatible.** Avoid in both coder and reviewer roles until tool-calling formatting/driver support is updated.
+
+### codestral — 22B, mistral → reviewer only
+- **Coder 0/100 — cannot drive tools.** Ollama reports that `codestral:latest` does not natively support tool-calling via Ollama's API layer (returns 400 Bad Request: "registry.ollama.ai/library/codestral:latest does not support tools"). Cannot drive the coder loop.
+- **Reviewer 20/30 catch, 0/5 clean.** Under both the built-in prompt and precision contract, it scored a moderate 4/6 catch rate and continued to raise false alarms on the clean decoy code (0/1 clean-rate).
+- **Role: reviewer only (moderate).** Moderate recall, but noisy. Use as a secondary or backup reviewer.
+
+### command-r — 35B, cohere → not recommended
+- **Coder 0/100 — struggles with exact edits.** Ollama supports tool calling with `command-r:latest`, but it failed the simple single-line-change fixture due to struggling to accurately reproduce exact strings inside `edit_file` (failed exact match).
+- **Reviewer 15/30 catch, 0/5 clean.** Scored 3-4 of 6 catch-rate with 0/1 clean-rate, struggling to detect critical defects or respect style-precision boundaries.
+- **Role: not recommended.** Struggles to maintain the level of tool-precision and logical discrimination required for Anvil workflows.
+
+### phi4 — 14B, reasoning → reviewer only (flawless recall, noisy precision)
+- **Coder 0/100 — cannot drive tools.** Like Codestral, Ollama reports that `phi4:latest` does not support native tool-calling via Ollama's API layer.
+- **Reviewer flawless 30/30 catch, 0/5 clean.** Across both the built-in and precision contracts, Phi4 scored a perfect **6/6 (100% catch-rate)** on all planted defects, demonstrating incredibly strong analytical reasoning. However, it remains highly opinionated and raised style/nit alarms on clean decoy code (0/1 clean-rate) under both setups.
+- **Role: reviewer only (high-recall/noisy).** An exceptional detector of bugs and logical defects. Best paired with a high-precision reviewer (like Qwen) that can act as a stabilizing second opinion.
 
 ## How this maps to Anvil's two-gate review
 

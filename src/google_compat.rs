@@ -294,10 +294,11 @@ impl LlmClient {
             .unwrap_or("https://generativelanguage.googleapis.com")
             .trim_end_matches('/');
 
-        let url = format!(
-            "{}/v1beta/models/{}:streamGenerateContent?key={}",
-            base, model, api_key
-        );
+        let model_path = if model.starts_with("models/") {
+            model.to_string()
+        } else {
+            format!("models/{}", model)
+        };
 
         let gemini_tools = if !tools.is_empty() {
             let decls = tools.iter().map(translate_tool_definition).collect();
@@ -333,7 +334,21 @@ impl LlmClient {
             tool_config,
         };
 
-        let resp = self.http.post(&url).json(&req).send().await?;
+        let mut url = format!(
+            "{}/v1beta/{}:streamGenerateContent",
+            base, model_path
+        );
+
+        let mut req_builder = self.http.post(&url);
+
+        if api_key.starts_with("AIza") {
+            url.push_str(&format!("?key={}", api_key));
+            req_builder = self.http.post(&url);
+        } else {
+            req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let resp = req_builder.json(&req).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status();

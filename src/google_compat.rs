@@ -338,7 +338,7 @@ impl LlmClient {
 
         let mut req_builder = self.http.post(&url);
 
-        if api_key.starts_with("AIza") {
+        if api_key.starts_with("AIza") || api_key.starts_with("AQ.") {
             url.push_str(&format!("?key={}", api_key));
             req_builder = self.http.post(&url);
         } else {

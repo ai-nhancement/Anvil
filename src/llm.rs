@@ -1006,10 +1006,16 @@ impl LlmClient {
             .unwrap_or("https://generativelanguage.googleapis.com")
             .trim_end_matches('/');
 
+        let model_path = if model.starts_with("models/") {
+            model.to_string()
+        } else {
+            format!("models/{}", model)
+        };
+
         // Gemini uses {model}:generateContent?key=...
         let url = format!(
-            "{}/v1beta/models/{}:generateContent?key={}",
-            base, model, api_key
+            "{}/v1beta/{}:generateContent?key={}",
+            base, model_path, api_key
         );
 
         #[derive(Serialize)]

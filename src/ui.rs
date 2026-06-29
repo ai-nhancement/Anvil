@@ -406,7 +406,13 @@ const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
         true,
     ),
     ("xAI", "xai", "openai_compat", "https://api.x.ai/v1", true),
-    ("Google", "google", "google", "https://generativelanguage.googleapis.com/v1beta/openai", true),
+    (
+        "Google",
+        "google",
+        "google",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        true,
+    ),
     (
         "Groq",
         "groq",
@@ -3089,8 +3095,12 @@ impl App {
                     _ => {}
                 }
             }
-        } else if ptype == "openai_compat" || ptype == "openai" || ptype.starts_with("azure")
-            || ptype == "google" || ptype == "google_ai_studio" || ptype == "gemini"
+        } else if ptype == "openai_compat"
+            || ptype == "openai"
+            || ptype.starts_with("azure")
+            || ptype == "google"
+            || ptype == "google_ai_studio"
+            || ptype == "gemini"
         {
             // Live pull for openai-compat and also Google (which now defaults to Gemini's
             // OpenAI-compat endpoint at /v1beta/openai, which supports /models).
@@ -3100,15 +3110,19 @@ impl App {
                     if !b.is_empty() {
                         // For google types that have a native base (no /openai), skip live /models
                         // since native Gemini doesn't expose the same /models compat.
-                        let looks_native_google = (ptype == "google" || ptype == "google_ai_studio" || ptype == "gemini")
-                            && b.contains("generativelanguage") && !b.contains("/openai");
+                        let looks_native_google =
+                            (ptype == "google" || ptype == "google_ai_studio" || ptype == "gemini")
+                                && b.contains("generativelanguage")
+                                && !b.contains("/openai");
                         if looks_native_google {
                             // fall through to static
                         } else {
                             match self.llm.get_credential(prov_name, conn) {
                                 Ok(key) => {
                                     if let Some(rt) = &self.runtime {
-                                        match rt.block_on(self.llm.list_openai_compat_models(b, &key)) {
+                                        match rt
+                                            .block_on(self.llm.list_openai_compat_models(b, &key))
+                                        {
                                             Ok(m) if !m.is_empty() => return m,
                                             Ok(_) => {
                                                 self.push_system(&format!("[models] '{}' live /models returned no models — using built-in suggestions.", prov_name));
@@ -5079,16 +5093,27 @@ impl App {
                 let kind = effective.to_lowercase();
 
                 // Handle OpenAI ChatGPT subscription / OAuth choice
-                if kind.contains("subscription") || kind.contains("oauth") || kind.contains("chatgpt") || kind.starts_with("0") {
-                    let provider_name = self.config_wizard.as_ref()
+                if kind.contains("subscription")
+                    || kind.contains("oauth")
+                    || kind.contains("chatgpt")
+                    || kind.starts_with("0")
+                {
+                    let provider_name = self
+                        .config_wizard
+                        .as_ref()
                         .and_then(|w| w.provider_name.clone())
                         .unwrap_or_default();
 
                     match crate::oauth::login_openai_subscription() {
                         Ok(creds) => {
                             if !provider_name.is_empty() {
-                                if let Err(e) = crate::oauth::save_oauth_creds(&provider_name, &creds) {
-                                    self.push_system(&format!("Warning: failed to save OAuth credentials: {}", e));
+                                if let Err(e) =
+                                    crate::oauth::save_oauth_creds(&provider_name, &creds)
+                                {
+                                    self.push_system(&format!(
+                                        "Warning: failed to save OAuth credentials: {}",
+                                        e
+                                    ));
                                 }
                             }
                             if let Some(w) = &mut self.config_wizard {
@@ -5101,7 +5126,10 @@ impl App {
                             self.finish_add_provider();
                         }
                         Err(e) => {
-                            self.push_system(&format!("Subscription login failed: {}. You can choose API key instead.", e));
+                            self.push_system(&format!(
+                                "Subscription login failed: {}. You can choose API key instead.",
+                                e
+                            ));
                             self.start_credential_list(); // re-offer the list
                         }
                     }
@@ -5447,7 +5475,10 @@ impl App {
             }
         } else {
             items.push("1. Environment variable (recommended — paste the key once; we auto-set e.g. XAI_API_KEY for this session + print persistence steps)".to_string());
-            items.push("2. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string());
+            items.push(
+                "2. No authentication required (local Ollama, unauthenticated self-hosted, etc.)"
+                    .to_string(),
+            );
             if !keyring_likely_unavailable() {
                 items.push("3. OS keyring (advanced; known to be unreliable on some Windows Credential Manager setups — you may see 'No matching entry')".to_string());
             }
@@ -5474,7 +5505,11 @@ impl App {
 
     fn is_current_wizard_openai(&self) -> bool {
         if let Some(w) = &self.config_wizard {
-            Self::is_openai_provider(w.provider_type.as_deref(), w.base_url.as_deref(), w.provider_name.as_deref())
+            Self::is_openai_provider(
+                w.provider_type.as_deref(),
+                w.base_url.as_deref(),
+                w.provider_name.as_deref(),
+            )
         } else {
             false
         }
@@ -5484,7 +5519,9 @@ impl App {
         let base = base.unwrap_or("");
         let name = name.unwrap_or("").to_lowercase();
         let ptype = ptype.unwrap_or("");
-        (base.contains("api.openai.com") || base.contains("openai.com/v1") || name.contains("openai"))
+        (base.contains("api.openai.com")
+            || base.contains("openai.com/v1")
+            || name.contains("openai"))
             && (ptype == "openai_compat" || ptype == "openai")
     }
 
@@ -5684,7 +5721,10 @@ impl App {
                 if cred_kind.as_deref() == Some("keyring") || cred_kind.as_deref() == Some("env") {
                     api_key.clone().filter(|k| !k.trim().is_empty())
                 } else if cred_kind.as_deref() == Some("oauth") {
-                    crate::oauth::load_oauth_creds(&name).ok().flatten().map(|c| c.access_token)
+                    crate::oauth::load_oauth_creds(&name)
+                        .ok()
+                        .flatten()
+                        .map(|c| c.access_token)
                 } else {
                     None
                 };
@@ -6352,10 +6392,15 @@ impl App {
                     w.list_title = "Choose your AI provider (↑↓ then Enter):".to_string();
                 }
                 WizardStep::CredentialKind => {
-                    let is_openai = Self::is_openai_provider(w.provider_type.as_deref(), w.base_url.as_deref(), w.provider_name.as_deref());
+                    let is_openai = Self::is_openai_provider(
+                        w.provider_type.as_deref(),
+                        w.base_url.as_deref(),
+                        w.provider_name.as_deref(),
+                    );
                     if is_openai {
                         w.list_items = vec![
-                            "1. ChatGPT subscription / OAuth — use your Plus or Pro account".to_string(),
+                            "1. ChatGPT subscription / OAuth — use your Plus or Pro account"
+                                .to_string(),
                             "2. Store in OS keyring".to_string(),
                             "3. Environment variable".to_string(),
                             "4. No authentication required".to_string(),
@@ -6474,7 +6519,11 @@ impl App {
                 }
                 WizardStep::CredentialKind => {
                     if let Some(k) = &w.cred_kind {
-                        let is_openai = Self::is_openai_provider(w.provider_type.as_deref(), w.base_url.as_deref(), w.provider_name.as_deref());
+                        let is_openai = Self::is_openai_provider(
+                            w.provider_type.as_deref(),
+                            w.base_url.as_deref(),
+                            w.provider_name.as_deref(),
+                        );
                         if is_openai {
                             w.list_selected = match k.as_str() {
                                 "oauth" => 0,
@@ -7973,7 +8022,12 @@ fn centered_rect(full: ratatui::layout::Rect, w: u16, h: u16) -> ratatui::layout
     let h = h.min(full.height.saturating_sub(4)).max(5);
     let x = full.x + (full.width.saturating_sub(w)) / 2;
     let y = full.y + (full.height.saturating_sub(h)) / 2;
-    ratatui::layout::Rect { x, y, width: w, height: h }
+    ratatui::layout::Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 fn render_palette_popup(f: &mut Frame, app: &App, full_area: ratatui::layout::Rect) {

@@ -14,7 +14,6 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-
 const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const OPENAI_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -54,9 +53,7 @@ fn code_challenge(verifier: &str) -> String {
 /// Generate a random state for CSRF protection.
 fn generate_state() -> String {
     let mut rng = rand::thread_rng();
-    (0..32)
-        .map(|_| rng.sample(Alphanumeric) as char)
-        .collect()
+    (0..32).map(|_| rng.sample(Alphanumeric) as char).collect()
 }
 
 /// Very small percent-encode for query values (sufficient for our params).
@@ -196,7 +193,9 @@ async fn exchange_code_for_tokens(code: &str, verifier: &str) -> Result<OpenAIOA
 
     let token: TokenResp = resp.json().await.context("invalid token response json")?;
 
-    let expires_at = token.expires_in.map(|secs| chrono::Utc::now().timestamp() + secs);
+    let expires_at = token
+        .expires_in
+        .map(|secs| chrono::Utc::now().timestamp() + secs);
 
     // Try to extract account id from access_token JWT if possible (best effort)
     let account_id = extract_chatgpt_account_id(&token.access_token);
@@ -220,7 +219,10 @@ pub fn refresh_openai_token(creds: &OpenAIOAuthCreds) -> Result<OpenAIOAuthCreds
 }
 
 async fn refresh_openai_token_async(creds: &OpenAIOAuthCreds) -> Result<OpenAIOAuthCreds> {
-    let refresh = creds.refresh_token.as_ref().ok_or_else(|| anyhow!("no refresh token available"))?;
+    let refresh = creds
+        .refresh_token
+        .as_ref()
+        .ok_or_else(|| anyhow!("no refresh token available"))?;
 
     let client = reqwest::Client::new();
 
@@ -257,7 +259,10 @@ async fn refresh_openai_token_async(creds: &OpenAIOAuthCreds) -> Result<OpenAIOA
     let new_expires = r.expires_in.map(|s| chrono::Utc::now().timestamp() + s);
 
     // Preserve account id if we had one
-    let account_id = creds.account_id.clone().or_else(|| extract_chatgpt_account_id(&r.access_token));
+    let account_id = creds
+        .account_id
+        .clone()
+        .or_else(|| extract_chatgpt_account_id(&r.access_token));
 
     Ok(OpenAIOAuthCreds {
         access_token: r.access_token,
@@ -281,7 +286,10 @@ fn extract_chatgpt_account_id(access_token: &str) -> Option<String> {
     while padded.len() % 4 != 0 {
         padded.push('=');
     }
-    let decoded = URL_SAFE_NO_PAD.decode(payload_b64).or_else(|_| base64::engine::general_purpose::STANDARD.decode(&padded)).ok()?;
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(&padded))
+        .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
 
     // The claim used by OpenAI Codex / ChatGPT OAuth
@@ -329,8 +337,7 @@ async fn login_openai_subscription_async() -> Result<OpenAIOAuthCreds> {
     println!("2. After successful login you will be redirected (may show localhost page).");
     println!("3. Copy the FULL redirect URL from the address bar (or just the 'code' value) and paste it here.\n");
 
-    let input: String = inquire::Text::new("Paste the redirect URL or code:")
-        .prompt()?;
+    let input: String = inquire::Text::new("Paste the redirect URL or code:").prompt()?;
 
     let code = parse_auth_code(&input)
         .ok_or_else(|| anyhow!("could not extract authorization code from input"))?;
@@ -354,8 +361,6 @@ pub fn is_oauth_expired(creds: &OpenAIOAuthCreds) -> bool {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +373,9 @@ mod tests {
 
     #[test]
     fn test_parse_raw_code() {
-        assert_eq!(parse_auth_code("  justthecode  "), Some("justthecode".to_string()));
+        assert_eq!(
+            parse_auth_code("  justthecode  "),
+            Some("justthecode".to_string())
+        );
     }
 }

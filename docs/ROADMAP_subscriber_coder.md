@@ -4,13 +4,17 @@ A feasibility study for letting **Claude subscribers** run Anvil's coder on thei
 Pro/Max plan — at **$0 marginal cost** — instead of requiring a metered API key. Goal: stop
 turning away the (large) pool of users who have a Claude subscription but no API billing set up.
 
-This is a **PARKED** study, not a commitment to build. Decision context:
+**Updated version (2026-06-29)** — incorporates the "standalone module" architecture.
+
+This is a **living design doc**. Originally parked after the initial analysis; refreshed with
+a cleaner integration strategy based on a dedicated module boundary.
+
+Decision context:
 [[project-anvil-future-directions]] (idea #3) and [[project-build-own-core-decision]]
 (we keep our own Rust core; this is the *controlled, opt-in* re-entry of an external coder).
 Pairs with [[user-model-setup-preference]] (cloud coder + local reviewers).
 
-Source: read directly against the current tree on 2026-06-20. File:line references below are
-live as of that read.
+Source: original analysis read 2026-06-20; module design updated 2026-06-29 against the live tree.
 
 ---
 
@@ -37,22 +41,25 @@ Anvil costs nothing extra.**
 
 ## 1. Where the seam is (and where it is NOT)
 
-Format: **candidate point → what's there today → verdict.**
+Format: **candidate point → what's there today → verdict.** (analysis still valid in 2026-06 update)
 
-### ✗ NOT at the per-turn call boundary — `src/llm.rs:1147` `chat_turn_stream`
+### ✗ NOT at the per-turn call boundary — `llm.rs` `chat_turn_stream`
 
 The client is already provider-dispatched on `conn.type` (`anthropic` / `openai_compat` /
 `google`). Adding a `claude_code` type *here* is the obvious-but-wrong move. This function's
-contract is **"stream text, return the `tool_calls` the model wants, and Anvil executes them"**
-(consumed at `src/agent.rs:859`). Headless Claude Code runs **its own** tool loop and writes files
-**itself** — it never hands tool calls back for us to run. It cannot satisfy this contract. Dead end.
+contract is **"stream text, return the `tool_calls` the model wants, and Anvil executes them"**.
+Headless Claude Code runs **its own** tool loop and writes files **itself** — it never hands
+tool calls back for us to run. It cannot satisfy this contract. Dead end.
 
-### ✓ At the coder construction point — `src/ui.rs:3036`
+### ✓ At the coder construction / execution site
 
-This is where the coder `Agent` is built and driven (`Agent::new(...)` at 3036, `run_turn` at
-3075). A Claude Code backend branches **here**: when the coder role resolves to a `claude_code`
-provider, *don't* build the native `Agent` — instead spawn `claude -p --output-format stream-json`
-and translate its events onto the channel the TUI already drains.
+This is where the decision is made whether to use the native `Agent` or delegate to the
+Claude Code module. When the coder role resolves to a `claude_code` provider, Anvil does
+**not** build the normal `Agent`. Instead it instantiates the standalone `ClaudeCodeModule`
+and calls a high-level `run_task(...)`.
+
+The module (not Anvil core) is then responsible for spawning `claude -p`, parsing its
+stream-json, and streaming progress back. See the updated design in sections 4 and 7.
 
 ---
 
@@ -112,58 +119,235 @@ use Anvil's grounding. They are inherent to delegating the loop.
 
 ---
 
-## 4. Proposed shape (if built)
+## 4. Proposed shape (if built) — Updated Module-Centric Design
 
-A `CoderBackend` resolved from the coder role's provider type:
+The original thin-adapter idea still holds in spirit, but the **recommended realization is a
+separate standalone module** rather than a small inline branch.
 
-- **`Native`** → today's `Agent` (default; the product identity). Unchanged.
-- **`ClaudeCode`** → a new `src/claude_code.rs`:
-  - spawn `claude -p <brief> --output-format stream-json [--resume <session_id>]` via
-    `tokio::process`
-  - parse the stream-json event lines; map text deltas → token sends, `tool_use`/result events →
-    `[tool-start]` / `[tool-end]` strings on the existing channel
-  - persist the returned `session_id` per project (mirror how `state.json` is stored,
-    `config.rs:175`) for cross-turn continuity
-  - on completion, files are already written to the working tree → the existing
-    `/accept-phase → reviewers → gates` flow proceeds unchanged
+### Core principle
+> Anvil ↔ Module ↔ Claude Code ↔ Module ↔ Anvil  
+> "Let the module be where all the work is done and Anvil talks to the module."
 
-Anvil still owns the **plan** and the **phase brief** (the *what*); Claude Code handles the *how*.
-Everything above the backend line — plan, gates, reviewers, audit of the *committed work* — is
-literally untouched, so "keep Anvil the way it is" stays true at the workflow level.
+### Why a dedicated module (not just "spawn inside the Agent path")
+
+- All Claude-Code-specific complexity is isolated in one place:
+  - Binary discovery and version checks
+  - Child process spawning (`tokio::process`)
+  - Environment hygiene (clear `ANTHROPIC_API_KEY` for the child only; the subscription
+    OAuth lives in `~/.claude/.credentials.json`)
+  - Flag selection and evolution (`--print`, `--output-format stream-json --verbose`,
+    `--permission-mode`, `--no-session-persistence`, `--model`, `--append-system-prompt`, etc.)
+  - Parsing the line-delimited stream-json protocol (`system`/`assistant`/`result`/`rate_limit_event` etc.)
+  - Session ID continuity and resumption
+  - Translation of Claude Code events into Anvil's UI stream (or a richer protocol)
+  - Handling of heavy auto-context, caching behavior, and rate-limit signals observed in practice
+- Anvil core never imports or understands Claude Code internals.
+
+### Where the branch actually happens
+
+- **Not** in `llm.rs` (per-turn contract is wrong).
+- **Not** by forcing the native `Agent` to use a different LLM client.
+- **At the coder execution site** (around `ui.rs` where `Agent::new` + `run_turn` is built for the coder role).
+
+When the resolved coder binding points at a `claude_code` (or `claude_code_cli`) provider:
+
+```text
+if provider.type == "claude_code" {
+    let module = ClaudeCodeModule::new(root, model, ...);
+    module.run_task(high_level_task, tx).await?;
+} else {
+    let agent = Agent::new(...);
+    agent.run_turn(...).await?;
+}
+```
+
+The native `Agent` path is untouched for everyone else.
+
+### Interface the rest of Anvil sees (narrow & high-level)
+
+The module exposes a small surface:
+
+```rust
+pub struct ClaudeCodeModule { ... }
+
+pub struct ClaudeCodeOutcome {
+    pub session_id: Option<String>,
+    pub final_text: String,
+    pub success: bool,
+    // optional: cost_info, files_touched summary, warnings, ...
+}
+
+impl ClaudeCodeModule {
+    /// Primary entry point. Anvil sends a high-level directive.
+    pub async fn run_task(
+        &self,
+        task: &str,                    // e.g. "Read plan.md and implement the next phase..."
+        stream: UnboundedSender<String>,
+    ) -> Result<ClaudeCodeOutcome>;
+}
+```
+
+Anvil owns:
+- The plan (`plan.md`)
+- Phase briefings (`REVIEW_<id>_BRIEF.md`)
+- The overall workflow state machine
+- Git diff capture after the module finishes
+- Both review gates + reviewers (unchanged)
+
+The module owns the execution of the *writing* work using the subscriber's Claude Code login.
+
+### High-level tasks vs per-turn loop
+
+Because Claude Code runs its own agent loop and edits the tree directly, Anvil sends
+coarse-grained tasks such as:
+
+- "Implement the approved plan in plan.md. Make clean, reviewable changes."
+- "Address the findings in REVIEW_<id>_R1.md for the current phase."
+- "Write the phase review briefing for the work just completed."
+
+The module constructs the actual prompt passed to `claude -p`, manages any resume/session
+state, and streams progress back so the TUI feels alive.
+
+### Internal module first, external process possible later
+
+- **Phase 1 (recommended start)**: A self-contained `src/claude_code.rs` (or `src/coders/claude_code.rs`)
+  compiled into the single Anvil binary. Keeps the "one-line install, single static binary"
+  experience.
+- **Future**: The same module can be extracted or re-implemented as a small side process that
+  speaks a stdio/JSON protocol. Anvil would simply spawn `anvil-claude-module --stdio` (or let
+  the user point at any compatible binary). The boundary is already designed for this.
+
+This "standalone module" organization gives clean ownership, easier testing of the adapter
+in isolation, and a natural evolution path without touching Anvil's core agent or LLM layers.
 
 ---
 
-## 5. Effort
+## 5. Effort (updated for module design)
 
-- **MVP** (spawn `claude -p` for the coder, pipe tokens to the TUI, files land in the tree,
-  reviewers/gates run unchanged): a focused **few days**. Bulk = stream-json→tagged-channel
-  translation + session-id continuity. New `src/claude_code.rs` + one branch at `ui.rs:3036` + a
-  config type.
-- **Parity version** (preserve confirmation gating, ledger/audit, grounding equivalence, graceful
-  throttle handling): **substantially more**, and partly **impossible** (ledger/grounding can't be
-  forced onto Claude Code).
+- **MVP** (standalone module + high-level task delegation):
+  - New focused `src/claude_code.rs` containing all CLI interaction, env handling, stream-json
+    parsing, and translation.
+  - One branch point in the coder construction flow (`ui.rs`).
+  - Minimal provider type or special-case handling in config + wizard so users can select
+    "Claude Code (via installed CLI + your subscription)".
+  - High-level task strings from plan/phase flows.
+  - Live streaming to the existing TUI channel.
+  - After completion, normal git-diff + reviewer gates.
+  Estimated: **a few focused days** for a working thin integration.
+
+- The heavy parts inside the module (process mgmt, parsing the observed stream-json shape
+  including `assistant` + final `result` records, correct `--verbose` + permission flags, safe
+  `ANTHROPIC_API_KEY` clearing) are self-contained.
+
+- **Parity / deeper fidelity** (trying to make the Claude Code path feel identical to the native
+  `Agent` with Anvil grounding, ledger, compaction, and confirmation): still largely impossible
+  and not recommended. The module approach makes this explicit and contained.
 
 ---
 
-## 6. Verdict + the decision that gates "worth it"
+## 6. Verdict + the decision that gates "worth it" (updated)
 
-The architecture is **more favorable than expected**: one branch point (`ui.rs:3036`), an
-engine-agnostic gate layer (`phase.rs`), and type-dispatched config (`config.rs`). The wiring is
-easy. The cost is **parity**: the subscriber path gives up the coder-side machinery (grounding,
-ledger, gating) that is arguably part of what makes Anvil *Anvil*.
+The architecture remains favorable, and the **standalone module pattern makes the trade-offs
+even cleaner**.
 
-So the build/no-build hinge is one question:
+Key remaining truths:
+- You will have two different coders (native `Agent` vs. Claude Code via the module).
+- Anvil's grounding, ledger, auto-compaction, and per-command confirmation do not apply during
+  a Claude Code run.
+- Reviewers, plan gate, phase gates, diff capture, and shipped-work audit trail are 100%
+  unaffected and continue to provide Anvil's discipline.
 
-> **Is the subscriber coder allowed to be a different, thinner coder** — Claude Code doing its thing
-> *inside* Anvil's gates, without Anvil's grounding/ledger/gating?
+The new question is even simpler:
 
-- **Yes** → cheap, the MVP is real, the wedge ("$0 for subscribers") is reachable soon. The gates
-  still carry the discipline story; we just don't own the writer's internals for that user.
-- **Must match the native coder** → expensive and partly impossible → not worth it.
+> Can the writing phase be delegated to a well-isolated module that drives the user's existing
+> Claude Code subscription, while Anvil retains ownership of planning and the review gates?
 
-**Recommendation:** if pursued, build the **thin MVP** explicitly framed as "Claude Code coder,
-inside Anvil's gates" — accept the reduced coder-side fidelity as the deliberate trade for $0
-onboarding, and keep `Native` the default. Do **not** chase parity. Revisit only after the MVP
-proves subscribers actually convert.
+- **Yes** (recommended path) → build the dedicated module. It becomes the place "where all the
+  work is done." Anvil talks to the module at a high level. The single-binary experience is
+  preserved initially; an external-process future is possible without redesigning the boundary.
+- **Must keep a single identical coder implementation** → do not pursue the subscriber path.
 
-**Status: PARKED — ideation, awaiting a go-ahead.**
+**Recommendation (updated):** Pursue the **standalone module design**. Frame the feature as
+"Claude Code coder module inside Anvil's workflow." Keep the native `Agent` as the default and
+primary experience. The module gives a clean, maintainable on-ramp for subscribers at $0 marginal
+cost while protecting the integrity of Anvil's review system.
+
+Practical observations from live testing (2026-06-29):
+- `claude auth status` (with `ANTHROPIC_API_KEY` cleared) shows a working claude.ai subscription login.
+- `claude -p ... --output-format stream-json --verbose` is the working non-interactive form.
+- Even trivial prompts cause substantial context loading + cache creation inside Claude Code.
+- Final results come with rich metadata (`result`, `session_id`, usage, `total_cost_usd`).
+- The module must robustly handle these characteristics.
+
+**Status: Updated design — ready for implementation of the module.**
+
+---
+
+## 7. Module Interaction Model (Anvil ↔ Module ↔ Claude Code)
+
+Explicit flow the user requested:
+
+```
+Anvil (plan / phase / chat / gates)
+   │
+   │  high-level task + context (plan.md, brief, state, etc.)
+   ▼
+ClaudeCodeModule  (the standalone module — "where all the work is done")
+   │
+   │  spawn + env hygiene + flags + prompt construction
+   ▼
+claude -p "..." --output-format stream-json --verbose ...
+   │
+   │  line-delimited JSON events (system, assistant, result, rate limits, ...)
+   ▲
+ClaudeCodeModule
+   │  parse • translate • manage session • stream progress
+   │
+   │  outcome (final text, session_id, success, ...)
+   ▼
+Anvil (receives stream for TUI • captures git diff • runs reviewers • ships)
+```
+
+### What lives in the module (complete ownership)
+
+- All direct interaction with the `claude` binary
+- Correct clearing of `ANTHROPIC_API_KEY` for the child process only
+- Optimal non-interactive flags and their evolution
+- Parsing of Claude Code's stream-json (and fallbacks)
+- Session lifecycle (persist `session_id` per project or per phase)
+- Mapping events to Anvil's `UnboundedSender<String>` (or a future richer event type)
+- Error, throttle, and "not logged in" handling with good user messages
+- Any Claude-Code-specific instructions or context injection
+
+### What Anvil continues to own
+
+- The plan artifact and phase briefings
+- The overall state machine (`GateFlow`)
+- Reviewers (R1 + R2) and the two gates
+- Git diff capture and comparison against baselines
+- The immutable audit trail of *accepted* work
+- TUI, slash commands, approvals policy, web search specialists, etc.
+- Configuration surface for choosing the coder backend
+
+### Communication today (same process)
+
+Use the existing narrow streaming channel + a small outcome struct returned from `run_task`.
+
+### Future external module path
+
+The module boundary is deliberately designed so the implementation can later become:
+
+- A separate small Rust binary (`anvil-claude-adapter`)
+- Launched by Anvil when the coder role is bound to a claude_code provider
+- Or even a user-supplied compatible executable
+
+Only the module implementation changes; Anvil's call sites stay the same.
+
+This satisfies the request for a clean "Anvil to module to claude code to module to Anvil" architecture.
+
+---
+
+## Revision History
+
+- **2026-06-20** — Initial feasibility study. Diagnosed auth separation, why delegation through `claude -p` is the only legitimate path, and why it cannot be a normal LLM provider. Proposed thin inline adapter. Marked PARKED.
+- **2026-06-29** — Major update. Introduced the **standalone module** architecture in response to the request for a clean "Anvil ↔ Module ↔ Claude Code" boundary. The module owns all CLI work; Anvil talks to the module at high level. Internal module first, external process path preserved. Updated recommended shape, effort, verdict, and added explicit interaction model. Status changed to ready for implementation of the module.

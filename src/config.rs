@@ -107,7 +107,13 @@ pub struct ProviderConnection {
     ///   http://localhost:11434/v1          (Ollama)
     ///   https://api.groq.com/openai/v1
     ///   https://api.together.xyz/v1
-    ///   https://<your-resource>.openai.azure.com/openai/deployments/<deployment>
+    /// Azure (type = "azure_openai"): set EITHER the bare resource endpoint
+    ///   https://<your-resource>.openai.azure.com   (Anvil builds the
+    ///   /openai/deployments/<model>/... path, using the binding's model as the
+    ///   deployment name — like the AzureOpenAI SDK), OR the full deployment URL
+    ///   https://<your-resource>.openai.azure.com/openai/deployments/<deployment>.
+    ///   In both cases Anvil appends the required `?api-version=` query param
+    ///   (see `extra["api_version"]`, default "2025-03-01-preview").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 
@@ -116,6 +122,9 @@ pub struct ProviderConnection {
     pub credential: CredentialRef,
 
     /// Extra headers or provider-specific hints (rarely needed).
+    /// Azure (type = "azure_openai") honours `extra["api_version"]` — the
+    /// `api-version` query param Azure requires on every request. Defaults to
+    /// "2025-03-01-preview" when unset.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, String>,
 

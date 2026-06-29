@@ -139,7 +139,23 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
             ptype.split_whitespace().next().unwrap().to_string()
         };
 
-        let base_url = if ptype == "openai_compat" || ptype == "azure_openai" {
+        let mut azure_api_version: Option<String> = None;
+        let base_url = if ptype == "azure_openai" {
+            // Azure needs the resource endpoint (we build the /openai/deployments/<model>/...
+            // path) or a full deployment URL, PLUS an api-version query on every request.
+            let b = Text::new(
+                "Azure endpoint (e.g. https://<resource>.openai.azure.com — or a full \
+                 .../openai/deployments/<deployment> URL):",
+            )
+            .prompt()?;
+            let ver = Text::new("Azure API version:")
+                .with_default("2025-03-01-preview")
+                .prompt()?;
+            if !ver.trim().is_empty() {
+                azure_api_version = Some(ver.trim().to_string());
+            }
+            Some(b)
+        } else if ptype == "openai_compat" {
             Some(
                 Text::new("Base URL (press enter for default OpenAI):")
                     .with_default("https://api.openai.com/v1")
@@ -159,7 +175,9 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
 
         // Special path for OpenAI ChatGPT subscription (OAuth) - allows using your ChatGPT Plus/Pro
         // subscription to access advanced models without a separate developer API key (similar to Cline).
-        let is_openai = ptype == "openai_compat" && (name.to_lowercase().contains("openai") || base_url.as_deref().unwrap_or("").contains("api.openai.com"));
+        let is_openai = ptype == "openai_compat"
+            && (name.to_lowercase().contains("openai")
+                || base_url.as_deref().unwrap_or("").contains("api.openai.com"));
 
         let credential = if is_openai {
             let auth_choice = Select::new(
@@ -242,6 +260,9 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
             extra: Default::default(),
             keep_alive: None,
         };
+        if let Some(ver) = azure_api_version {
+            conn.extra.insert("api_version".to_string(), ver);
+        }
         // Sensible default for anyone adding a local Ollama provider through the classic setup wizard too.
         if let Some(b) = &conn.base_url {
             if b.contains("11434") || name.to_lowercase().contains("ollama") {
@@ -265,7 +286,10 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
         // Immediately ask for the key if using keyring **and** we didn't already do OAuth login above.
         // The OAuth path already stored a JSON blob containing the access_token.
         let did_oauth = matches!(cfg.providers[&name].credential, CredentialRef::Keyring)
-            && crate::oauth::load_oauth_creds(&name).ok().flatten().is_some();
+            && crate::oauth::load_oauth_creds(&name)
+                .ok()
+                .flatten()
+                .is_some();
 
         if matches!(cfg.providers[&name].credential, CredentialRef::Keyring) && !did_oauth {
             let key = inquire::Password::new(&format!("API key / token for '{}':", name))

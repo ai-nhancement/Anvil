@@ -201,7 +201,11 @@ impl LlmClient {
 
     /// For OpenAI (including ChatGPT subscription OAuth), return any extra headers that should be sent
     /// (e.g. ChatGPT-Account-Id for advanced models available via subscription).
-    fn openai_extra_headers(&self, conn_name: Option<&str>, conn: &ProviderConnection) -> Vec<(String, String)> {
+    fn openai_extra_headers(
+        &self,
+        conn_name: Option<&str>,
+        conn: &ProviderConnection,
+    ) -> Vec<(String, String)> {
         let mut out = vec![];
 
         // Try to get account id from stored OAuth creds (if we have the connection name)
@@ -216,7 +220,11 @@ impl LlmClient {
         }
 
         // Also support manually putting it in the provider's extra map
-        if let Some(acct) = conn.extra.get("chatgpt_account_id").or_else(|| conn.extra.get("ChatGPT-Account-Id")) {
+        if let Some(acct) = conn
+            .extra
+            .get("chatgpt_account_id")
+            .or_else(|| conn.extra.get("ChatGPT-Account-Id"))
+        {
             if !acct.is_empty() && !out.iter().any(|(k, _)| k == "ChatGPT-Account-Id") {
                 out.push(("ChatGPT-Account-Id".to_string(), acct.clone()));
             }
@@ -319,6 +327,9 @@ impl LlmClient {
 
         if base.contains("azure") {
             rb = rb.header("api-key", api_key);
+            // Azure rejects any request without an api-version query param. We don't have
+            // the connection here, so use the same default the chat path falls back to.
+            rb = rb.query(&[("api-version", "2025-03-01-preview")]);
         }
 
         let resp = match rb.send().await {
@@ -337,7 +348,8 @@ impl LlmClient {
                 // Then, for Google bases, aggressively filter out AI Studio-only / live /
                 // embedding / legacy / experimental models that aren't usable for
                 // Anvil's tool-calling agent flows.
-                let mut ids: Vec<String> = list.data
+                let mut ids: Vec<String> = list
+                    .data
                     .into_iter()
                     .map(|m| m.id.strip_prefix("models/").unwrap_or(&m.id).to_string())
                     .collect();
@@ -375,10 +387,17 @@ impl LlmClient {
                     self.chat_google(conn, model, api_key, system, user).await
                 } else {
                     let mut eff = conn.clone();
-                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
-                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+                    if eff
+                        .base_url
+                        .as_deref()
+                        .map_or(true, |b| b.trim().is_empty())
+                    {
+                        eff.base_url = Some(
+                            "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+                        );
                     }
-                    self.chat_openai_compat(&eff, model, api_key, system, user, false).await
+                    self.chat_openai_compat(&eff, model, api_key, system, user, false)
+                        .await
                 }
             }
             other => {
@@ -422,10 +441,17 @@ impl LlmClient {
                     Ok(full)
                 } else {
                     let mut eff = conn.clone();
-                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
-                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+                    if eff
+                        .base_url
+                        .as_deref()
+                        .map_or(true, |b| b.trim().is_empty())
+                    {
+                        eff.base_url = Some(
+                            "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+                        );
                     }
-                    self.chat_openai_compat(&eff, model, api_key, system, user, true).await
+                    self.chat_openai_compat(&eff, model, api_key, system, user, true)
+                        .await
                 }
             }
             other => {
@@ -473,10 +499,17 @@ impl LlmClient {
                     }
                 } else {
                     let mut eff = conn.clone();
-                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
-                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+                    if eff
+                        .base_url
+                        .as_deref()
+                        .map_or(true, |b| b.trim().is_empty())
+                    {
+                        eff.base_url = Some(
+                            "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+                        );
                     }
-                    self.chat_openai_compat_to_channel(&eff, model, api_key, system, user, token_tx).await
+                    self.chat_openai_compat_to_channel(&eff, model, api_key, system, user, token_tx)
+                        .await
                 }
             }
             other => {
@@ -512,6 +545,44 @@ impl LlmClient {
                  (e.g. https://inference.do-ai.run/v1 for Gradient, https://api.x.ai/v1 for xAI, \
                  https://api.openai.com/v1 for OpenAI). Run /config and set this provider's base URL."
             )),
+        }
+    }
+
+    /// True when this connection targets Azure OpenAI (explicit type or an azure.com base).
+    fn is_azure(conn: &ProviderConnection, base: &str) -> bool {
+        conn.r#type == "azure_openai" || base.to_ascii_lowercase().contains("azure.com")
+    }
+
+    /// Azure OpenAI requires an `api-version` query parameter on EVERY request — without
+    /// it Azure returns 404 "Resource not found". Use the provider's configured
+    /// `extra["api_version"]` if present, else the same sane default AiMe ships with.
+    /// We keep only the version tag (strip any accidental trailing path segments) so a
+    /// pasted value like "2025-03-01-preview/chat/completions" can't corrupt the query.
+    fn azure_api_version(conn: &ProviderConnection) -> String {
+        let raw = conn
+            .extra
+            .get("api_version")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("2025-03-01-preview");
+        raw.split('/').next().unwrap_or(raw).to_string()
+    }
+
+    /// Build the Azure chat/completions URL.
+    /// - If `base` already includes a `/openai/deployments/<name>` segment, just append
+    ///   the endpoint + `api-version` (honours configs that pin the full deployment path).
+    /// - Otherwise treat `base` as the bare resource endpoint and build the canonical
+    ///   Azure path using `model` as the deployment name. This mirrors the AzureOpenAI
+    ///   SDK (used by AiMe), where the `model` argument IS the deployment name.
+    fn azure_chat_url(base: &str, model: &str, api_version: &str) -> String {
+        let base = base.trim_end_matches('/');
+        if base.to_ascii_lowercase().contains("/deployments/") {
+            format!("{}/chat/completions?api-version={}", base, api_version)
+        } else {
+            format!(
+                "{}/openai/deployments/{}/chat/completions?api-version={}",
+                base, model, api_version
+            )
         }
     }
 
@@ -577,7 +648,11 @@ impl LlmClient {
         // requires the bare model name. Strip defensively (harmless for other providers).
         let model = model.strip_prefix("models/").unwrap_or(model);
 
-        let url = format!("{}/chat/completions", base);
+        let url = if Self::is_azure(conn, &base) {
+            Self::azure_chat_url(&base, model, &Self::azure_api_version(conn))
+        } else {
+            format!("{}/chat/completions", base)
+        };
 
         #[derive(Serialize)]
         struct Req<'a> {
@@ -757,7 +832,11 @@ impl LlmClient {
         // requires the bare model name. Strip defensively (harmless for other providers).
         let model = model.strip_prefix("models/").unwrap_or(model);
 
-        let url = format!("{}/chat/completions", base);
+        let url = if Self::is_azure(conn, &base) {
+            Self::azure_chat_url(&base, model, &Self::azure_api_version(conn))
+        } else {
+            format!("{}/chat/completions", base)
+        };
 
         #[derive(Serialize)]
         struct Req<'a> {
@@ -1339,8 +1418,14 @@ impl LlmClient {
                         .await
                 } else {
                     let mut eff = conn.clone();
-                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
-                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+                    if eff
+                        .base_url
+                        .as_deref()
+                        .map_or(true, |b| b.trim().is_empty())
+                    {
+                        eff.base_url = Some(
+                            "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
+                        );
                     }
                     self.openai_turn_stream(&eff, model, api_key, system, history, tools, token_tx)
                         .await
@@ -1371,7 +1456,11 @@ impl LlmClient {
         // requires the bare model name. Strip defensively (harmless for other providers).
         let model = model.strip_prefix("models/").unwrap_or(model);
 
-        let url = format!("{}/chat/completions", base);
+        let url = if Self::is_azure(conn, &base) {
+            Self::azure_chat_url(&base, model, &Self::azure_api_version(conn))
+        } else {
+            format!("{}/chat/completions", base)
+        };
 
         // Build the messages array (system + history) in OpenAI wire form.
         let messages = build_openai_messages(system, history);
@@ -1447,7 +1536,9 @@ impl LlmClient {
                     // Retry 400s for providers that sometimes use them for transient load (e.g. xAI).
                     // For Google, 400s are almost always terminal (auth, bad model/args, quota, etc.),
                     // so fail fast instead of spamming "retrying" three times.
-                    let is_google = conn.r#type == "google" || conn.r#type == "google_ai_studio" || conn.r#type == "gemini";
+                    let is_google = conn.r#type == "google"
+                        || conn.r#type == "google_ai_studio"
+                        || conn.r#type == "gemini";
                     let retryable = status.is_server_error()
                         || status.as_u16() == 408
                         || status.as_u16() == 429
@@ -1508,55 +1599,58 @@ impl LlmClient {
         // index -> (id, name, accumulated-arguments-json-string, extra_content)
         let mut tc_acc: BTreeMap<usize, (String, String, String, Option<Value>)> = BTreeMap::new();
 
-        let handle_line = |line: &str,
-                           text: &mut String,
-                           tc_acc: &mut BTreeMap<usize, (String, String, String, Option<Value>)>|
-         -> bool {
-            // returns true if [DONE] seen
-            if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                    return true;
-                }
-                if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
-                    if let Some(choice) = chunk.choices.into_iter().next() {
-                        if let Some(delta) = choice.delta.content {
-                            if !delta.is_empty() {
-                                text.push_str(&delta);
-                                let _ = token_tx.send(delta);
-                            }
-                        }
-                        if let Some(calls) = choice.delta.tool_calls {
-                            for d in calls {
-                                let entry = tc_acc.entry(d.index).or_insert_with(|| (String::new(), String::new(), String::new(), None));
-                                if let Some(id) = d.id {
-                                    if !id.is_empty() {
-                                        entry.0 = id;
-                                    }
+        let handle_line =
+            |line: &str,
+             text: &mut String,
+             tc_acc: &mut BTreeMap<usize, (String, String, String, Option<Value>)>|
+             -> bool {
+                // returns true if [DONE] seen
+                if let Some(data) = line.strip_prefix("data: ") {
+                    if data == "[DONE]" {
+                        return true;
+                    }
+                    if let Ok(chunk) = serde_json::from_str::<OpenAiStreamChunk>(data) {
+                        if let Some(choice) = chunk.choices.into_iter().next() {
+                            if let Some(delta) = choice.delta.content {
+                                if !delta.is_empty() {
+                                    text.push_str(&delta);
+                                    let _ = token_tx.send(delta);
                                 }
-                                if let Some(f) = d.function {
-                                    if let Some(n) = f.name {
-                                        if !n.is_empty() {
-                                            entry.1 = n;
+                            }
+                            if let Some(calls) = choice.delta.tool_calls {
+                                for d in calls {
+                                    let entry = tc_acc.entry(d.index).or_insert_with(|| {
+                                        (String::new(), String::new(), String::new(), None)
+                                    });
+                                    if let Some(id) = d.id {
+                                        if !id.is_empty() {
+                                            entry.0 = id;
                                         }
                                     }
-                                    if let Some(a) = f.arguments {
-                                        entry.2.push_str(&a);
+                                    if let Some(f) = d.function {
+                                        if let Some(n) = f.name {
+                                            if !n.is_empty() {
+                                                entry.1 = n;
+                                            }
+                                        }
+                                        if let Some(a) = f.arguments {
+                                            entry.2.push_str(&a);
+                                        }
                                     }
-                                }
-                                // Capture extra like thought_signature for Gemini 3.x thinking models.
-                                // It may be at tool call level or we look for common keys.
-                                if entry.3.is_none() && !d.extra.is_empty() {
-                                    let extra_val = Value::Object(d.extra.clone());
-                                    // Normalize under .google if top level, but keep as-is for roundtrip.
-                                    entry.3 = Some(extra_val);
+                                    // Capture extra like thought_signature for Gemini 3.x thinking models.
+                                    // It may be at tool call level or we look for common keys.
+                                    if entry.3.is_none() && !d.extra.is_empty() {
+                                        let extra_val = Value::Object(d.extra.clone());
+                                        // Normalize under .google if top level, but keep as-is for roundtrip.
+                                        entry.3 = Some(extra_val);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            false
-        };
+                false
+            };
 
         let mut done = false;
         while let Some(chunk) = stream.next().await {
@@ -1880,7 +1974,9 @@ fn flatten_history_to_text(history: &[ChatMessage]) -> String {
 
 /// Build final `ToolCall`s from accumulated OpenAI streaming deltas, parsing the
 /// argument strings into JSON (falling back to `{}` if a model emits invalid JSON).
-fn finalize_tool_calls(acc: BTreeMap<usize, (String, String, String, Option<Value>)>) -> Vec<ToolCall> {
+fn finalize_tool_calls(
+    acc: BTreeMap<usize, (String, String, String, Option<Value>)>,
+) -> Vec<ToolCall> {
     acc.into_iter()
         .filter(|(_, (_, name, _, _))| !name.is_empty())
         .map(|(_, (id, name, args, extra))| {
@@ -2102,7 +2198,12 @@ mod tests {
         let mut acc: BTreeMap<usize, (String, String, String, Option<Value>)> = BTreeMap::new();
         acc.insert(
             0,
-            ("id0".into(), "write_file".into(), "{\"path\":\"x\"}".into(), None),
+            (
+                "id0".into(),
+                "write_file".into(),
+                "{\"path\":\"x\"}".into(),
+                None,
+            ),
         );
         acc.insert(1, ("id1".into(), String::new(), "garbage".into(), None)); // no name → dropped
         let calls = finalize_tool_calls(acc);

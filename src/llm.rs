@@ -95,6 +95,11 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
+    /// Provider-specific extra data to round-trip, e.g. Gemini thinking models
+    /// return `thought_signature` here (as `extra_content.google.thought_signature`
+    /// or similar) which must be echoed back on replay to avoid 400s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_content: Option<Value>,
 }
 
 /// The outcome of one assistant turn: any streamed text plus any tool calls
@@ -262,8 +267,13 @@ impl LlmClient {
         let mut rb = self
             .http
             .get(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
             .timeout(std::time::Duration::from_secs(4));
+
+        if base.to_ascii_lowercase().contains("generativelanguage") {
+            rb = rb.query(&[("key", api_key)]);
+        } else {
+            rb = rb.header("Authorization", format!("Bearer {}", api_key));
+        }
 
         if base.contains("azure") {
             rb = rb.header("api-key", api_key);
@@ -306,7 +316,15 @@ impl LlmClient {
                     .await
             }
             "google" | "google_ai_studio" | "gemini" => {
-                self.chat_google(conn, model, api_key, system, user).await
+                if Self::should_use_native_google(conn) {
+                    self.chat_google(conn, model, api_key, system, user).await
+                } else {
+                    let mut eff = conn.clone();
+                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
+                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+                    }
+                    self.chat_openai_compat(&eff, model, api_key, system, user, false).await
+                }
             }
             other => {
                 // Future: "aws_bedrock", "vertex" etc. For now, give a helpful message.
@@ -340,13 +358,20 @@ impl LlmClient {
                     .await
             }
             "google" | "google_ai_studio" | "gemini" => {
-                // Gemini streaming is possible but more complex; fall back to non-stream for now.
-                let full = self.chat_google(conn, model, api_key, system, user).await?;
-                // Best-effort "stream" the whole thing
-                let mut out = stdout();
-                out.write_all(full.as_bytes()).await.ok();
-                out.flush().await.ok();
-                Ok(full)
+                if Self::should_use_native_google(conn) {
+                    // Native Gemini: fall back to non-stream + best effort print
+                    let full = self.chat_google(conn, model, api_key, system, user).await?;
+                    let mut out = stdout();
+                    out.write_all(full.as_bytes()).await.ok();
+                    out.flush().await.ok();
+                    Ok(full)
+                } else {
+                    let mut eff = conn.clone();
+                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
+                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+                    }
+                    self.chat_openai_compat(&eff, model, api_key, system, user, true).await
+                }
             }
             other => {
                 anyhow::bail!(
@@ -380,16 +405,23 @@ impl LlmClient {
                     .await
             }
             "google" | "google_ai_studio" | "gemini" => {
-                // Gemini streaming is more involved; send the whole response as a single chunk.
-                match self.chat_google(conn, model, api_key, system, user).await {
-                    Ok(full) => {
-                        let _ = token_tx.send(full.clone());
-                        Ok(full)
+                if Self::should_use_native_google(conn) {
+                    match self.chat_google(conn, model, api_key, system, user).await {
+                        Ok(full) => {
+                            let _ = token_tx.send(full.clone());
+                            Ok(full)
+                        }
+                        Err(e) => {
+                            let _ = token_tx.send(format!("\n[llm-error] {}", e));
+                            Err(e)
+                        }
                     }
-                    Err(e) => {
-                        let _ = token_tx.send(format!("\n[llm-error] {}", e));
-                        Err(e)
+                } else {
+                    let mut eff = conn.clone();
+                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
+                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
                     }
+                    self.chat_openai_compat_to_channel(&eff, model, api_key, system, user, token_tx).await
                 }
             }
             other => {
@@ -426,6 +458,20 @@ impl LlmClient {
                  https://api.openai.com/v1 for OpenAI). Run /config and set this provider's base URL."
             )),
         }
+    }
+
+    /// For the "google" provider type we prefer Gemini's OpenAI-compatible endpoint
+    /// (https://.../v1beta/openai) because it gives reliable tool calling, streaming,
+    /// error handling, and history management by reusing the main openai path.
+    /// If the configured base looks like a *native* Gemini endpoint (no /openai),
+    /// we fall back to the custom native adapter (for advanced/Vertex use cases).
+    fn should_use_native_google(conn: &ProviderConnection) -> bool {
+        let b = conn.base_url.as_deref().unwrap_or("").trim();
+        if b.is_empty() {
+            return false; // default to the reliable OpenAI-compat path
+        }
+        let lower = b.to_ascii_lowercase();
+        lower.contains("generativelanguage.googleapis.com") && !lower.contains("/openai")
     }
 
     async fn chat_openai_compat(
@@ -488,8 +534,13 @@ impl LlmClient {
         let mut request = self
             .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json");
+
+        if base.to_ascii_lowercase().contains("generativelanguage") {
+            request = request.query(&[("key", api_key)]);
+        } else {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
 
         // Azure sometimes wants api-key header instead of Bearer.
         if conn.r#type == "azure_openai" || base.contains("azure.com") {
@@ -654,8 +705,13 @@ impl LlmClient {
         let mut request = self
             .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json");
+
+        if base.to_ascii_lowercase().contains("generativelanguage") {
+            request = request.query(&[("key", api_key)]);
+        } else {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
 
         if conn.r#type == "azure_openai" || base.contains("azure.com") {
             request = request.header("api-key", api_key);
@@ -989,7 +1045,8 @@ impl LlmClient {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Google Gemini (simple non-stream for v0)
+    // Google Gemini native API (used only when an explicit native base is configured
+    // for the "google" provider type; the default is the OpenAI-compat path above).
     // ──────────────────────────────────────────────────────────────────────────
 
     async fn chat_google(
@@ -1147,8 +1204,9 @@ impl LlmClient {
     /// Provider support:
     /// - openai_compat / openai / azure_openai → OpenAI `tools` + `tool_calls`
     /// - anthropic → Messages API `tool_use` / `tool_result`
-    /// - google / gemini → text-only fallback (no tool calls); the agent loop
-    ///   then simply treats the reply as a final answer.
+    /// - google / gemini → routes to Gemini OpenAI-compatible endpoint by default
+    ///   (https://generativelanguage.../v1beta/openai) for full tool support.
+    ///   Falls back to native adapter only if an explicit native base URL is configured.
     #[allow(clippy::too_many_arguments)] // provider call: conn + model + history + tools + sinks
     pub async fn chat_turn_stream(
         &self,
@@ -1170,8 +1228,17 @@ impl LlmClient {
                     .await
             }
             "google" | "google_ai_studio" | "gemini" => {
-                self.google_turn_stream(conn, model, api_key, system, history, tools, token_tx)
-                    .await
+                if Self::should_use_native_google(conn) {
+                    self.google_turn_stream(conn, model, api_key, system, history, tools, token_tx)
+                        .await
+                } else {
+                    let mut eff = conn.clone();
+                    if eff.base_url.as_deref().map_or(true, |b| b.trim().is_empty()) {
+                        eff.base_url = Some("https://generativelanguage.googleapis.com/v1beta/openai".to_string());
+                    }
+                    self.openai_turn_stream(&eff, model, api_key, system, history, tools, token_tx)
+                        .await
+                }
             }
             other => {
                 let msg = format!("provider type '{}' does not support agent turns yet", other);
@@ -1245,9 +1312,14 @@ impl LlmClient {
             let mut request = self
                 .http
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream");
+            if base.to_ascii_lowercase().contains("generativelanguage") {
+                // Gemini OpenAI-compat accepts the API key as ?key= query param (preferred for AIza keys)
+                request = request.query(&[("key", api_key)]);
+            } else {
+                request = request.header("Authorization", format!("Bearer {}", api_key));
+            }
             if conn.r#type == "azure_openai" || base.contains("azure.com") {
                 request = request.header("api-key", api_key);
             }
@@ -1313,12 +1385,12 @@ impl LlmClient {
         let mut stream = resp.bytes_stream();
         let mut text = String::new();
         let mut buffer = String::new();
-        // index -> (id, name, accumulated-arguments-json-string)
-        let mut tc_acc: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+        // index -> (id, name, accumulated-arguments-json-string, extra_content)
+        let mut tc_acc: BTreeMap<usize, (String, String, String, Option<Value>)> = BTreeMap::new();
 
         let handle_line = |line: &str,
                            text: &mut String,
-                           tc_acc: &mut BTreeMap<usize, (String, String, String)>|
+                           tc_acc: &mut BTreeMap<usize, (String, String, String, Option<Value>)>|
          -> bool {
             // returns true if [DONE] seen
             if let Some(data) = line.strip_prefix("data: ") {
@@ -1335,7 +1407,7 @@ impl LlmClient {
                         }
                         if let Some(calls) = choice.delta.tool_calls {
                             for d in calls {
-                                let entry = tc_acc.entry(d.index).or_default();
+                                let entry = tc_acc.entry(d.index).or_insert_with(|| (String::new(), String::new(), String::new(), None));
                                 if let Some(id) = d.id {
                                     if !id.is_empty() {
                                         entry.0 = id;
@@ -1350,6 +1422,13 @@ impl LlmClient {
                                     if let Some(a) = f.arguments {
                                         entry.2.push_str(&a);
                                     }
+                                }
+                                // Capture extra like thought_signature for Gemini 3.x thinking models.
+                                // It may be at tool call level or we look for common keys.
+                                if entry.3.is_none() && !d.extra.is_empty() {
+                                    let extra_val = Value::Object(d.extra.clone());
+                                    // Normalize under .google if top level, but keep as-is for roundtrip.
+                                    entry.3 = Some(extra_val);
                                 }
                             }
                         }
@@ -1542,6 +1621,7 @@ impl LlmClient {
                     id,
                     name,
                     arguments,
+                    extra_content: None,
                 });
             }
         }
@@ -1570,14 +1650,28 @@ fn build_openai_messages(system: &str, history: &[ChatMessage]) -> Vec<Value> {
                         .tool_calls
                         .iter()
                         .map(|tc| {
-                            json!({
+                            let mut tc_obj = json!({
                                 "id": tc.id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.name,
                                     "arguments": tc.arguments.to_string(),
                                 }
-                            })
+                            });
+                            // Round-trip provider extras (e.g. Gemini thought_signature for 3.x thinking models).
+                            // Merge any keys from extra_content (object) into the tool_call for the wire.
+                            if let Some(extra) = &tc.extra_content {
+                                if let Some(extra_map) = extra.as_object() {
+                                    if let Some(obj) = tc_obj.as_object_mut() {
+                                        for (k, v) in extra_map {
+                                            if !obj.contains_key(k) {
+                                                obj.insert(k.clone(), v.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            tc_obj
                         })
                         .collect();
                     obj.insert("tool_calls".into(), json!(tcs));
@@ -1645,7 +1739,8 @@ fn build_anthropic_messages(history: &[ChatMessage]) -> Vec<Value> {
 }
 
 /// Collapse history into a single text blob (used for providers without a
-/// native multi-turn/tool format, e.g. the Gemini fallback).
+/// native multi-turn/tool format). The google type now uses the OpenAI-compat
+/// path by default so this is rarely needed for Gemini.
 #[allow(dead_code)]
 fn flatten_history_to_text(history: &[ChatMessage]) -> String {
     let mut out = String::new();
@@ -1665,10 +1760,10 @@ fn flatten_history_to_text(history: &[ChatMessage]) -> String {
 
 /// Build final `ToolCall`s from accumulated OpenAI streaming deltas, parsing the
 /// argument strings into JSON (falling back to `{}` if a model emits invalid JSON).
-fn finalize_tool_calls(acc: BTreeMap<usize, (String, String, String)>) -> Vec<ToolCall> {
+fn finalize_tool_calls(acc: BTreeMap<usize, (String, String, String, Option<Value>)>) -> Vec<ToolCall> {
     acc.into_iter()
-        .filter(|(_, (_, name, _))| !name.is_empty())
-        .map(|(_, (id, name, args))| {
+        .filter(|(_, (_, name, _, _))| !name.is_empty())
+        .map(|(_, (id, name, args, extra))| {
             let arguments = if args.trim().is_empty() {
                 json!({})
             } else {
@@ -1678,6 +1773,7 @@ fn finalize_tool_calls(acc: BTreeMap<usize, (String, String, String)>) -> Vec<To
                 id,
                 name,
                 arguments,
+                extra_content: extra,
             }
         })
         .collect()
@@ -1707,6 +1803,7 @@ struct OpenAiDelta {
 /// One element of a streaming `delta.tool_calls` array. The `index` correlates
 /// fragments of the same call across chunks; `id`/`name` arrive early and
 /// `arguments` accumulates as a partial JSON string.
+/// Extra fields (e.g. thought_signature for Gemini) are captured in extra_content.
 #[derive(Deserialize)]
 struct OpenAiToolCallDelta {
     #[serde(default)]
@@ -1715,6 +1812,10 @@ struct OpenAiToolCallDelta {
     id: Option<String>,
     #[serde(default)]
     function: Option<OpenAiFnDelta>,
+    /// Capture provider-specific extras like Gemini's thought_signature.
+    /// It may appear at this level or under function in some responses.
+    #[serde(default, flatten)]
+    extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize)]
@@ -1782,6 +1883,7 @@ mod tests {
                     id: "call_1".into(),
                     name: "read_file".into(),
                     arguments: json!({"path": "README.md"}),
+                    extra_content: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "# Anvil\nhello"),
@@ -1839,11 +1941,13 @@ mod tests {
                         id: "a".into(),
                         name: "read_file".into(),
                         arguments: json!({}),
+                        extra_content: None,
                     },
                     ToolCall {
                         id: "b".into(),
                         name: "list_dir".into(),
                         arguments: json!({}),
+                        extra_content: None,
                     },
                 ],
             ),
@@ -1875,12 +1979,12 @@ mod tests {
 
     #[test]
     fn finalize_skips_nameless_and_parses_args() {
-        let mut acc: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
+        let mut acc: BTreeMap<usize, (String, String, String, Option<Value>)> = BTreeMap::new();
         acc.insert(
             0,
-            ("id0".into(), "write_file".into(), "{\"path\":\"x\"}".into()),
+            ("id0".into(), "write_file".into(), "{\"path\":\"x\"}".into(), None),
         );
-        acc.insert(1, ("id1".into(), String::new(), "garbage".into())); // no name → dropped
+        acc.insert(1, ("id1".into(), String::new(), "garbage".into(), None)); // no name → dropped
         let calls = finalize_tool_calls(acc);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "write_file");

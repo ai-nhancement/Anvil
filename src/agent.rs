@@ -1035,11 +1035,13 @@ mod tests {
             id: "a".into(),
             name: "read_file".into(),
             arguments: serde_json::json!({}),
+            extra_content: None,
         };
         let call_missing = ToolCall {
             id: "b".into(),
             name: "grep".into(),
             arguments: serde_json::json!({}),
+            extra_content: None,
         };
         let msgs = vec![
             ChatMessage::user("go"),
@@ -1113,6 +1115,7 @@ mod tests {
                     id: "r".into(),
                     name: "read_file".into(),
                     arguments: serde_json::json!({"path":"src/ui.rs"}),
+                    extra_content: None,
                 }],
             ),
             ChatMessage::tool_result("r", &big),

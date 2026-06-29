@@ -185,6 +185,7 @@ mod tests {
             id: "t1".into(),
             name: "run_command".into(),
             arguments: json!({"command": "cargo build"}),
+            extra_content: None,
         };
         let out = Dialect::Codex.to_canonical(call);
         // Name preserved → the confirmation gate (keyed on "run_command") still fires.

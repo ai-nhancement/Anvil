@@ -394,7 +394,8 @@ const WIZARD_PURPLE: Color = Color::Rgb(168, 120, 240);
 const SYSTEM_COLOR: Color = Color::Yellow;
 
 /// Known providers: (display_name, suggested_connection_name, provider_type, base_url, needs_api_key)
-/// base_url = "" means the client uses the provider's SDK default (anthropic, google).
+/// base_url = "" means the client uses the provider's SDK default (anthropic).
+/// For Google we now default to the OpenAI-compatible endpoint (reliable tool calling).
 const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
     ("Anthropic", "anthropic", "anthropic", "", true),
     (
@@ -405,7 +406,7 @@ const PROVIDER_PRESETS: &[(&str, &str, &str, &str, bool)] = &[
         true,
     ),
     ("xAI", "xai", "openai_compat", "https://api.x.ai/v1", true),
-    ("Google", "google", "google", "", true),
+    ("Google", "google", "google", "https://generativelanguage.googleapis.com/v1beta/openai", true),
     (
         "Groq",
         "groq",
@@ -3062,11 +3063,12 @@ impl App {
 
     /// For local Ollama (detected by base_url or provider name), fetch the *live* tags via
     /// the same probe the quick setup uses. For any other configured openai_compat / openai /
-    /// azure_openai provider (xAI, Groq, OpenAI, Together, custom gateways, etc.) we call its
+    /// azure_openai (and Google via its OpenAI-compat endpoint) provider we call its
     /// /models endpoint (authenticated via the provider's credential) so the role assignment
     /// and "add model" pickers show the provider's current actual catalog instead of a stale
     /// static list. Always falls back to models_for_connection static suggestions on failure,
-    /// missing base, no runtime, or non-compat provider types (anthropic/google keep their statics).
+    /// missing base, no runtime, or non-compat provider types (anthropic keep their statics;
+    /// pure native Google bases also fall back).
     /// When falling back for a remote provider we emit a visible [system] note so you can see
     /// why the live list wasn't used (bad/missing key, endpoint returned nothing, network, etc.).
     fn live_or_static_models_for_provider(
@@ -3084,28 +3086,39 @@ impl App {
                     _ => {}
                 }
             }
-        } else if ptype == "openai_compat" || ptype == "openai" || ptype.starts_with("azure") {
-            // Live pull for any set-up openai-compat provider (the key case for xAI etc.).
+        } else if ptype == "openai_compat" || ptype == "openai" || ptype.starts_with("azure")
+            || ptype == "google" || ptype == "google_ai_studio" || ptype == "gemini"
+        {
+            // Live pull for openai-compat and also Google (which now defaults to Gemini's
+            // OpenAI-compat endpoint at /v1beta/openai, which supports /models).
             if let Some(cfg) = &self.cfg {
                 if let Some(conn) = cfg.providers.get(prov_name) {
                     let b = conn.base_url.as_deref().unwrap_or(base).trim();
                     if !b.is_empty() {
-                        match self.llm.get_credential(prov_name, conn) {
-                            Ok(key) => {
-                                if let Some(rt) = &self.runtime {
-                                    match rt.block_on(self.llm.list_openai_compat_models(b, &key)) {
-                                        Ok(m) if !m.is_empty() => return m,
-                                        Ok(_) => {
-                                            self.push_system(&format!("[models] '{}' live /models returned no models — using built-in suggestions.", prov_name));
-                                        }
-                                        Err(e) => {
-                                            self.push_system(&format!("[models] Live list error for '{}': {} (using suggestions)", prov_name, e));
+                        // For google types that have a native base (no /openai), skip live /models
+                        // since native Gemini doesn't expose the same /models compat.
+                        let looks_native_google = (ptype == "google" || ptype == "google_ai_studio" || ptype == "gemini")
+                            && b.contains("generativelanguage") && !b.contains("/openai");
+                        if looks_native_google {
+                            // fall through to static
+                        } else {
+                            match self.llm.get_credential(prov_name, conn) {
+                                Ok(key) => {
+                                    if let Some(rt) = &self.runtime {
+                                        match rt.block_on(self.llm.list_openai_compat_models(b, &key)) {
+                                            Ok(m) if !m.is_empty() => return m,
+                                            Ok(_) => {
+                                                self.push_system(&format!("[models] '{}' live /models returned no models — using built-in suggestions.", prov_name));
+                                            }
+                                            Err(e) => {
+                                                self.push_system(&format!("[models] Live list error for '{}': {} (using suggestions)", prov_name, e));
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                self.push_system(&format!("[models] Could not get credential for '{}' ({}). Live model list skipped.", prov_name, e));
+                                Err(e) => {
+                                    self.push_system(&format!("[models] Could not get credential for '{}' ({}). Live model list skipped.", prov_name, e));
+                                }
                             }
                         }
                     } else {

@@ -98,6 +98,8 @@ pub struct ProviderConnection {
     /// "openai_compat" | "anthropic" | "google" | "aws_bedrock" | "azure_openai" | ...
     /// "openai_compat" is the universal path for Ollama, Groq, Together, Fireworks, OpenRouter,
     /// vLLM, LocalAI, Azure, AWS (via gateway), Gradient, Vertex, etc.
+    /// For "google" we default (when no/empty base_url) to Gemini's OpenAI-compatible endpoint
+    /// so that tool calling works reliably for the coder and reviewers.
     pub r#type: String,
 
     /// For openai_compat and some others: the base URL (no trailing slash).

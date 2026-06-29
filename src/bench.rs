@@ -930,6 +930,7 @@ mod tests {
             id: "1".into(),
             name: "run_command".into(),
             arguments: serde_json::json!({"command": "echo hi"}),
+            extra_content: None,
         };
         let out = bench_execute(&rc, tmp.path());
         assert!(
@@ -942,6 +943,7 @@ mod tests {
             id: "2".into(),
             name: "delegate".into(),
             arguments: serde_json::json!({}),
+            extra_content: None,
         };
         assert!(bench_execute(&dg, tmp.path()).starts_with("ERROR"));
     }

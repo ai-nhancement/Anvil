@@ -334,23 +334,33 @@ impl LlmClient {
             tool_config,
         };
 
-        let mut url = format!("{}/v1beta/{}:streamGenerateContent", base, model_path);
+        let endpoint = format!("{}/v1beta/{}:streamGenerateContent", base, model_path);
 
-        let mut req_builder = self.http.post(&url);
+        let mut req_builder = self.http.post(&endpoint);
 
-        if api_key.starts_with("AIza") || api_key.starts_with("AQ.") {
-            url.push_str(&format!("?key={}", api_key));
-            req_builder = self.http.post(&url);
+        // Prefer query key for Google AI Studio / generativelanguage bases (AIza keys).
+        // This matches the legacy chat_google behavior and what works for native Gemini.
+        let use_query_key = api_key.starts_with("AIza")
+            || api_key.starts_with("AQ.")
+            || base.contains("generativelanguage");
+        if use_query_key {
+            req_builder = req_builder.query(&[("key", api_key)]);
         } else {
             req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
         }
 
-        let resp = req_builder.json(&req).send().await?;
+        let resp = req_builder.json(&req).send().await.map_err(|e| {
+            let msg = format!("google request error: {}", e);
+            let _ = token_tx.send(format!("\n[llm-error] {}", msg));
+            e
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("google stream error ({}): {}", status, body);
+            let msg = format!("google stream error ({}): {}", status, body);
+            let _ = token_tx.send(format!("\n[llm-error] {}", msg));
+            anyhow::bail!("{}", msg);
         }
 
         let mut stream = resp.bytes_stream();
@@ -382,6 +392,7 @@ impl LlmClient {
                                                     id: tc_id,
                                                     name: function_call.name,
                                                     arguments: function_call.args,
+                                                    extra_content: None,
                                                 });
                                             }
                                             _ => {}
@@ -430,6 +441,7 @@ mod tests {
                     id: "call_123".to_string(),
                     name: "test_tool".to_string(),
                     arguments: json!({"arg": 1}),
+                    extra_content: None,
                 }],
             ),
             ChatMessage::tool_result("call_123", "tool output here"),

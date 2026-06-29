@@ -1340,6 +1340,7 @@ mod tests {
             id: "t".into(),
             name: name.into(),
             arguments: args,
+            extra_content: None,
         }
     }
 

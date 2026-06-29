@@ -5077,6 +5077,37 @@ impl App {
 
             Some(WizardStep::CredentialKind) => {
                 let kind = effective.to_lowercase();
+
+                // Handle OpenAI ChatGPT subscription / OAuth choice
+                if kind.contains("subscription") || kind.contains("oauth") || kind.contains("chatgpt") || kind.starts_with("0") {
+                    let provider_name = self.config_wizard.as_ref()
+                        .and_then(|w| w.provider_name.clone())
+                        .unwrap_or_default();
+
+                    match crate::oauth::login_openai_subscription() {
+                        Ok(creds) => {
+                            if !provider_name.is_empty() {
+                                if let Err(e) = crate::oauth::save_oauth_creds(&provider_name, &creds) {
+                                    self.push_system(&format!("Warning: failed to save OAuth credentials: {}", e));
+                                }
+                            }
+                            if let Some(w) = &mut self.config_wizard {
+                                w.cred_kind = Some("oauth".to_string());
+                            }
+                            self.push_system("✓ Logged in with OpenAI ChatGPT subscription.");
+                            if let Some(acct) = &creds.account_id {
+                                self.push_system(&format!("  Account captured: {}", acct));
+                            }
+                            self.finish_add_provider();
+                        }
+                        Err(e) => {
+                            self.push_system(&format!("Subscription login failed: {}. You can choose API key instead.", e));
+                            self.start_credential_list(); // re-offer the list
+                        }
+                    }
+                    return;
+                }
+
                 if (kind.contains("keyring") || kind == "3") && keyring_likely_unavailable() {
                     self.push_system("OS keyring needs a desktop secret service (D-Bus) that this headless host lacks. Falling back to an environment variable.");
                 }
@@ -5403,25 +5434,58 @@ impl App {
     }
 
     fn start_credential_list(&mut self) {
-        let mut items = vec![
-            "1. Environment variable (recommended — paste the key once; we auto-set e.g. XAI_API_KEY for this session + print persistence steps)".to_string(),
-            "2. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string(),
-        ];
-        // Only offer the OS keyring where it can actually work. On a headless Linux host
-        // there is no Secret Service, so keyring writes vanish — don't tempt the user with it.
-        if !keyring_likely_unavailable() {
-            items.push("3. OS keyring (advanced; known to be unreliable on some Windows Credential Manager setups — you may see 'No matching entry')".to_string());
+        let is_openai = self.is_current_wizard_openai();
+
+        let mut items = vec![];
+
+        if is_openai {
+            items.push("1. ChatGPT subscription / OAuth — use your Plus or Pro account (no separate developer API key needed for supported models)".to_string());
+            items.push("2. Environment variable (paste a traditional API key)".to_string());
+            items.push("3. No authentication required".to_string());
+            if !keyring_likely_unavailable() {
+                items.push("4. OS keyring (advanced)".to_string());
+            }
+        } else {
+            items.push("1. Environment variable (recommended — paste the key once; we auto-set e.g. XAI_API_KEY for this session + print persistence steps)".to_string());
+            items.push("2. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string());
+            if !keyring_likely_unavailable() {
+                items.push("3. OS keyring (advanced; known to be unreliable on some Windows Credential Manager setups — you may see 'No matching entry')".to_string());
+            }
         }
+
         if let Some(w) = &mut self.config_wizard {
             w.step = WizardStep::CredentialKind;
             w.list_items = items;
             w.list_selected = 0;
-            w.list_title = "How will the API key be provided?".to_string();
+            w.list_title = if is_openai {
+                "How will you authenticate with OpenAI?".to_string()
+            } else {
+                "How will the API key be provided?".to_string()
+            };
         }
         self.push_system("Choose how the credential will be supplied for this provider.");
+        if is_openai {
+            self.push_system("Tip: Option 0 lets you use your existing ChatGPT subscription via browser login (like Cline does).");
+        }
         if keyring_likely_unavailable() {
             self.push_system("(OS keyring is unavailable on this headless host. Use the environment variable option.)");
         }
+    }
+
+    fn is_current_wizard_openai(&self) -> bool {
+        if let Some(w) = &self.config_wizard {
+            Self::is_openai_provider(w.provider_type.as_deref(), w.base_url.as_deref(), w.provider_name.as_deref())
+        } else {
+            false
+        }
+    }
+
+    fn is_openai_provider(ptype: Option<&str>, base: Option<&str>, name: Option<&str>) -> bool {
+        let base = base.unwrap_or("");
+        let name = name.unwrap_or("").to_lowercase();
+        let ptype = ptype.unwrap_or("");
+        (base.contains("api.openai.com") || base.contains("openai.com/v1") || name.contains("openai"))
+            && (ptype == "openai_compat" || ptype == "openai")
     }
 
     fn finish_add_provider(&mut self) {
@@ -5539,6 +5603,10 @@ impl App {
             (CredentialRef::Keyring, None)
         } else if cred_kind.as_deref() == Some("none") {
             (CredentialRef::None, None)
+        } else if cred_kind.as_deref() == Some("oauth") {
+            // OAuth creds (access/refresh + account id) are already stored as JSON blob in keyring by the login flow.
+            // We use Keyring ref so get_credential will extract the access_token and attach ChatGPT-Account-Id header.
+            (CredentialRef::Keyring, None)
         } else {
             (
                 CredentialRef::Env {
@@ -5583,8 +5651,24 @@ impl App {
         } // end the get_or_insert borrow
 
         self.save_current_config();
-        // Reload so subsequent &self.cfg borrows in the probe (and any later wizard steps) are clean.
         self.cfg = load_config(&self.root).ok();
+
+        // For OAuth providers (OpenAI subscription), stash the account id in extra
+        // so header injection works reliably.
+        if cred_kind.as_deref() == Some("oauth") {
+            if let Some(cfg) = &mut self.cfg {
+                if let Ok(Some(creds)) = crate::oauth::load_oauth_creds(&name) {
+                    if let Some(acct) = creds.account_id {
+                        if let Some(p) = cfg.providers.get_mut(&name) {
+                            p.extra.insert("chatgpt_account_id".to_string(), acct);
+                        }
+                    }
+                }
+            }
+            // Re-save so the extra we just added is persisted.
+            self.save_current_config();
+        }
+
         self.push_system(&format!("✓ Provider '{}' saved.", name));
 
         // Proactively try the live /models fetch right after setup so the user gets
@@ -5599,6 +5683,8 @@ impl App {
             let probe_key: Option<String> =
                 if cred_kind.as_deref() == Some("keyring") || cred_kind.as_deref() == Some("env") {
                     api_key.clone().filter(|k| !k.trim().is_empty())
+                } else if cred_kind.as_deref() == Some("oauth") {
+                    crate::oauth::load_oauth_creds(&name).ok().flatten().map(|c| c.access_token)
                 } else {
                     None
                 };
@@ -6266,13 +6352,24 @@ impl App {
                     w.list_title = "Choose your AI provider (↑↓ then Enter):".to_string();
                 }
                 WizardStep::CredentialKind => {
-                    w.list_items = vec![
-                        "1. Store in OS keyring (recommended — secure, works everywhere)".to_string(),
-                        "2. Environment variable (you will set the var yourself)".to_string(),
-                        "3. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string(),
-                    ];
+                    let is_openai = Self::is_openai_provider(w.provider_type.as_deref(), w.base_url.as_deref(), w.provider_name.as_deref());
+                    if is_openai {
+                        w.list_items = vec![
+                            "1. ChatGPT subscription / OAuth — use your Plus or Pro account".to_string(),
+                            "2. Store in OS keyring".to_string(),
+                            "3. Environment variable".to_string(),
+                            "4. No authentication required".to_string(),
+                        ];
+                        w.list_title = "How will you authenticate with OpenAI?".to_string();
+                    } else {
+                        w.list_items = vec![
+                            "1. Store in OS keyring (recommended — secure, works everywhere)".to_string(),
+                            "2. Environment variable (you will set the var yourself)".to_string(),
+                            "3. No authentication required (local Ollama, unauthenticated self-hosted, etc.)".to_string(),
+                        ];
+                        w.list_title = "How will the API key be provided?".to_string();
+                    }
                     w.list_selected = 0;
-                    w.list_title = "How will the API key be provided?".to_string();
                 }
                 WizardStep::BindingProvider => {
                     let cfg = self.cfg.get_or_insert_with(AnvilConfig::default);
@@ -6377,12 +6474,23 @@ impl App {
                 }
                 WizardStep::CredentialKind => {
                     if let Some(k) = &w.cred_kind {
-                        w.list_selected = match k.as_str() {
-                            "keyring" => 0,
-                            "env" => 1,
-                            "none" => 2,
-                            _ => 0,
-                        };
+                        let is_openai = Self::is_openai_provider(w.provider_type.as_deref(), w.base_url.as_deref(), w.provider_name.as_deref());
+                        if is_openai {
+                            w.list_selected = match k.as_str() {
+                                "oauth" => 0,
+                                "keyring" => 1,
+                                "env" => 2,
+                                "none" => 3,
+                                _ => 0,
+                            };
+                        } else {
+                            w.list_selected = match k.as_str() {
+                                "keyring" => 0,
+                                "env" => 1,
+                                "none" => 2,
+                                _ => 0,
+                            };
+                        }
                     }
                 }
                 WizardStep::QuickOllamaModelPick { .. } => {
@@ -7224,12 +7332,14 @@ fn render_main(f: &mut Frame, app: &mut App) {
     render_chat(f, app, chunks[1]);
     render_input_box(f, app, chunks[2]);
 
-    // Overlays rendered last so they float on top
-    render_palette_popup(f, app, chunks[1]);
-    render_confirm_popup(f, app, chunks[1]);
-    render_wizard_popup(f, app, chunks[1]);
-    render_doc_popup(f, app, chunks[1]);
-    render_approvals_popup(f, app, chunks[1]);
+    // Overlays rendered last so they float on top.
+    // Pass the full terminal area so popups are centered on screen (Cline-style)
+    // instead of being glued right above the input line.
+    render_palette_popup(f, app, area);
+    render_confirm_popup(f, app, area);
+    render_wizard_popup(f, app, area);
+    render_doc_popup(f, app, area);
+    render_approvals_popup(f, app, area);
 }
 
 // ─── Header (5-row info panel, top-right column used for per-GPU status) ──────
@@ -7856,7 +7966,17 @@ fn render_input_box(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
 // ─── Floating overlays ────────────────────────────────────────────────────────
 
-fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+/// Returns a rectangle centered within `full` with the desired dimensions,
+/// clamped to leave a small margin and never be too tiny.
+fn centered_rect(full: ratatui::layout::Rect, w: u16, h: u16) -> ratatui::layout::Rect {
+    let w = w.min(full.width.saturating_sub(4)).max(20);
+    let h = h.min(full.height.saturating_sub(4)).max(5);
+    let x = full.x + (full.width.saturating_sub(w)) / 2;
+    let y = full.y + (full.height.saturating_sub(h)) / 2;
+    ratatui::layout::Rect { x, y, width: w, height: h }
+}
+
+fn render_palette_popup(f: &mut Frame, app: &App, full_area: ratatui::layout::Rect) {
     if !app.showing_command_palette {
         return;
     }
@@ -7869,16 +7989,14 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
     // When there are more commands than fit, we use a ListState + render_stateful_widget
     // so that the current selection is always scrolled into the visible window (no more
     // selectable-but-invisible items).
-    let available = chat_area.height.saturating_sub(2).max(5);
-    let max_h = available.min(18);
+    let available = full_area.height.saturating_sub(6).max(8);
+    let max_h = available.min(22);
     let needed = (filtered.len() as u16) + 2;
-    let h = needed.min(max_h).max(3);
-    let popup = ratatui::layout::Rect {
-        x: chat_area.x + 2,
-        y: chat_area.y + chat_area.height.saturating_sub(h),
-        width: chat_area.width.saturating_sub(4),
-        height: h,
-    };
+    let h = needed.min(max_h).max(5);
+
+    // Center the popup on screen (like Cline), not glued to the bottom of chat.
+    let popup_w = full_area.width.saturating_sub(8).min(90).max(50);
+    let popup = centered_rect(full_area, popup_w, h);
 
     f.render_widget(Clear, popup);
 
@@ -7928,7 +8046,7 @@ fn render_palette_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
 }
 
 /// The selectable run_command approval prompt (↑/↓ + Enter), floated over chat.
-fn render_confirm_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+fn render_confirm_popup(f: &mut Frame, app: &App, full_area: ratatui::layout::Rect) {
     let Some(cmd) = &app.awaiting_confirm else {
         return;
     };
@@ -7941,12 +8059,8 @@ fn render_confirm_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
     let selected = app.confirm_selected.min(options.len() - 1);
 
     let h = (options.len() as u16) + 3; // command line + options + borders
-    let popup = ratatui::layout::Rect {
-        x: chat_area.x + 2,
-        y: chat_area.y + chat_area.height.saturating_sub(h),
-        width: chat_area.width.saturating_sub(4),
-        height: h,
-    };
+    let popup_w = 64.min(full_area.width.saturating_sub(4));
+    let popup = centered_rect(full_area, popup_w, h);
     f.render_widget(Clear, popup);
 
     let mut lines: Vec<Line> = vec![Line::from(vec![
@@ -7993,23 +8107,19 @@ fn render_confirm_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Re
     f.render_widget(para, popup);
 }
 
-fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+fn render_wizard_popup(f: &mut Frame, app: &App, full_area: ratatui::layout::Rect) {
     let wizard = match &app.config_wizard {
         Some(w) if !w.list_items.is_empty() => w,
         _ => return,
     };
 
     // Use most of the available height so long lists (providers, model IDs) all fit.
-    let available = chat_area.height.saturating_sub(4).max(4);
+    let available = full_area.height.saturating_sub(6).max(8);
     let needed = (wizard.list_items.len() as u16).saturating_add(2);
     let h = needed.min(available);
 
-    let popup = ratatui::layout::Rect {
-        x: chat_area.x + 2,
-        y: chat_area.y + chat_area.height.saturating_sub(h),
-        width: chat_area.width.saturating_sub(4),
-        height: h,
-    };
+    let popup_w = full_area.width.saturating_sub(6).min(85).max(45);
+    let popup = centered_rect(full_area, popup_w, h);
 
     f.render_widget(Clear, popup);
 
@@ -8101,7 +8211,7 @@ fn render_wizard_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rec
     f.render_stateful_widget(list, popup, &mut state);
 }
 
-fn render_doc_popup(f: &mut Frame, app: &mut App, chat_area: ratatui::layout::Rect) {
+fn render_doc_popup(f: &mut Frame, app: &mut App, full_area: ratatui::layout::Rect) {
     // Pull out the title and pre-render the body lines (owned, 'static) so the
     // immutable borrow of `viewing_doc` ends before we clamp `doc_scroll` below.
     let (title, lines) = match &app.viewing_doc {
@@ -8115,13 +8225,10 @@ fn render_doc_popup(f: &mut Frame, app: &mut App, chat_area: ratatui::layout::Re
         None => return,
     };
 
-    let h = (chat_area.height.saturating_sub(4)).clamp(8, 30);
-    let popup = ratatui::layout::Rect {
-        x: chat_area.x + 3,
-        y: chat_area.y + 2,
-        width: chat_area.width.saturating_sub(6),
-        height: h,
-    };
+    // Center a nice large document viewer (previously was top-aligned inside chat area).
+    let h = full_area.height.saturating_sub(8).clamp(10, 32);
+    let popup_w = full_area.width.saturating_sub(8).min(100).max(50);
+    let popup = centered_rect(full_area, popup_w, h);
 
     f.render_widget(Clear, popup);
 
@@ -8150,20 +8257,16 @@ fn render_doc_popup(f: &mut Frame, app: &mut App, chat_area: ratatui::layout::Re
     f.render_widget(viewer, popup);
 }
 
-fn render_approvals_popup(f: &mut Frame, app: &App, chat_area: ratatui::layout::Rect) {
+fn render_approvals_popup(f: &mut Frame, app: &App, full_area: ratatui::layout::Rect) {
     let Some(ed) = &app.approvals_editor else {
         return;
     };
 
-    let available = chat_area.height.saturating_sub(4).max(6);
+    let available = full_area.height.saturating_sub(6).max(8);
     let needed = (ed.items.len() as u16).saturating_add(3);
     let h = needed.min(available);
-    let popup = ratatui::layout::Rect {
-        x: chat_area.x + 2,
-        y: chat_area.y + chat_area.height.saturating_sub(h),
-        width: chat_area.width.saturating_sub(4),
-        height: h,
-    };
+    let popup_w = full_area.width.saturating_sub(6).min(80).max(40);
+    let popup = centered_rect(full_area, popup_w, h);
     f.render_widget(Clear, popup);
 
     let items: Vec<ListItem> = ed

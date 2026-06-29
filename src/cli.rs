@@ -146,6 +146,9 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
                     .prompt()?,
             )
         } else if ptype == "anthropic" {
+            // Note for Claude users: "Claude subscription" (claude.ai Pro/Team) does not currently provide
+            // an OAuth flow equivalent to OpenAI's ChatGPT subscription. Use a standard API key from
+            // https://console.anthropic.com (Anvil's "anthropic" type is fully supported).
             None // default is fine
         } else {
             Text::new("Base URL (optional):")
@@ -154,23 +157,82 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
                 .filter(|s| !s.trim().is_empty())
         };
 
-        let cred_choice = Select::new(
-            "How will the API key be provided?",
-            vec![
-                "Store in OS keyring (recommended for real providers)",
-                "Environment variable",
-                "No authentication required (local Ollama, unauthenticated self-hosted, etc.)",
-            ],
-        )
-        .prompt()?;
+        // Special path for OpenAI ChatGPT subscription (OAuth) - allows using your ChatGPT Plus/Pro
+        // subscription to access advanced models without a separate developer API key (similar to Cline).
+        let is_openai = ptype == "openai_compat" && (name.to_lowercase().contains("openai") || base_url.as_deref().unwrap_or("").contains("api.openai.com"));
 
-        let credential = if cred_choice.contains("No authentication") {
-            CredentialRef::None
-        } else if cred_choice.contains("keyring") {
-            CredentialRef::Keyring
+        let credential = if is_openai {
+            let auth_choice = Select::new(
+                "How do you want to authenticate with OpenAI?",
+                vec![
+                    "API key (from platform.openai.com)",
+                    "ChatGPT subscription / OAuth (no separate API key - uses your Plus/Pro account)",
+                    "Environment variable",
+                    "No authentication",
+                ],
+            )
+            .prompt()?;
+
+            if auth_choice.contains("ChatGPT subscription") || auth_choice.contains("OAuth") {
+                // Run interactive OAuth login for ChatGPT subscription (Codex-style access)
+                match crate::oauth::login_openai_subscription() {
+                    Ok(creds) => {
+                        // Store the full OAuth blob (access + refresh + account) as JSON in keyring.
+                        // get_credential will extract the access_token.
+                        if let Err(e) = crate::oauth::save_oauth_creds(&name, &creds) {
+                            eprintln!("Warning: failed to save OAuth credentials: {}", e);
+                        }
+                        println!("  {} Logged in with OpenAI subscription", "✓".green());
+                        if let Some(_acct) = &creds.account_id {
+                            // Account ID is also stored in the OAuth blob and extra; printed by caller if desired.
+                        }
+                        // Populate extra so that request builders can attach ChatGPT-Account-Id header
+                        // without needing the name at every call site.
+                        if let Some(_acct) = &creds.account_id {
+                            // We will insert after the conn is created below.
+                            // For now just remember.
+                        }
+                        // Still mark as Keyring so the rest of the system works uniformly.
+                        CredentialRef::Keyring
+                    }
+                    Err(e) => {
+                        eprintln!("OAuth login failed: {}. Falling back to API key entry.", e);
+                        let key = inquire::Password::new(&format!("API key for '{}':", name))
+                            .without_confirmation()
+                            .prompt()?;
+                        let entry_name = format!("provider:{}", name);
+                        let entry = keyring::Entry::new("anvil", &entry_name)?;
+                        entry.set_password(&key)?;
+                        CredentialRef::Keyring
+                    }
+                }
+            } else if auth_choice.contains("No authentication") {
+                CredentialRef::None
+            } else if auth_choice.contains("Environment") {
+                let var = Text::new("Environment variable name:").prompt()?;
+                CredentialRef::Env { var_name: var }
+            } else {
+                CredentialRef::Keyring
+            }
         } else {
-            let var = Text::new("Environment variable name:").prompt()?;
-            CredentialRef::Env { var_name: var }
+            let cred_choice = Select::new(
+                "How will the API key be provided?",
+                vec![
+                    "Store in OS keyring (recommended for real providers)",
+                    "Environment variable",
+                    "No authentication required (local Ollama, unauthenticated self-hosted, etc.)",
+                ],
+            )
+            .prompt()?;
+
+            if cred_choice.contains("No authentication") {
+                CredentialRef::None
+            } else if cred_choice.contains("keyring") {
+                CredentialRef::Keyring
+            } else {
+                let var = Text::new("Environment variable name:").prompt()?;
+                CredentialRef::Env { var_name: var }
+            }
         };
 
         let mut conn = ProviderConnection {
@@ -190,8 +252,22 @@ pub fn cmd_setup(root: &Path) -> Result<()> {
         cfg.providers.insert(name.clone(), conn);
         println!("  {} Added provider connection '{}'", "✓".green(), name);
 
-        // Immediately ask for the key if using keyring
-        if matches!(cfg.providers[&name].credential, CredentialRef::Keyring) {
+        // If we just did an OpenAI OAuth login, make sure the account id is persisted in extra
+        // so that request builders can attach the ChatGPT-Account-Id header without the name.
+        if let Some(oauth_creds) = crate::oauth::load_oauth_creds(&name).ok().flatten() {
+            if let Some(acct) = oauth_creds.account_id {
+                if let Some(p) = cfg.providers.get_mut(&name) {
+                    p.extra.insert("chatgpt_account_id".to_string(), acct);
+                }
+            }
+        }
+
+        // Immediately ask for the key if using keyring **and** we didn't already do OAuth login above.
+        // The OAuth path already stored a JSON blob containing the access_token.
+        let did_oauth = matches!(cfg.providers[&name].credential, CredentialRef::Keyring)
+            && crate::oauth::load_oauth_creds(&name).ok().flatten().is_some();
+
+        if matches!(cfg.providers[&name].credential, CredentialRef::Keyring) && !did_oauth {
             let key = inquire::Password::new(&format!("API key / token for '{}':", name))
                 .without_confirmation()
                 .prompt()?;

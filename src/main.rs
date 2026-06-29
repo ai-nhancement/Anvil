@@ -22,6 +22,7 @@ mod dialect;
 mod git;
 mod google_compat;
 mod llm;
+mod oauth;
 mod modelsdev;
 mod phase;
 mod plan;

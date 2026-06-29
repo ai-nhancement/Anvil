@@ -1,6 +1,6 @@
 [package]
 name = "anvil"
-version = "0.5.32"
+version = "0.5.33"
 edition = "2021"
 license = "Apache-2.0"
 description = "Forge the Workflow — structure for vibe coding. A self-contained AI coding agent wrapped in a two-gate, cross-vendor review workflow. Model-agnostic; one binary."
@@ -51,6 +51,12 @@ anyhow = "1"
 thiserror = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
+
+# OAuth support for OpenAI ChatGPT subscription (Codex / advanced models without separate dev API key)
+# and potential future for other providers like Claude subscription flows.
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
 
 # Scratch dirs for the dialect benchmark (also used in tests)
 tempfile = "3"

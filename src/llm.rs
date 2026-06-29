@@ -24,6 +24,7 @@ use tokio::io::{stdout, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{CredentialRef, ProviderConnection};
+use crate::oauth::load_oauth_creds;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Agentic tool-calling types
@@ -151,12 +152,27 @@ impl LlmClient {
                 let entry_name = format!("provider:{}", conn_name);
                 let entry = keyring::Entry::new("anvil", &entry_name)
                     .map_err(|e| anyhow!("keyring entry error for {}: {}", conn_name, e))?;
-                entry
+                let stored = entry
                     .get_password()
-                    // Trim: pasted keys often carry a trailing newline/space, which
-                    // sends a bad Authorization header and reads as "incorrect API key".
                     .map(|k| k.trim().to_string())
-                    .map_err(|e| anyhow!("failed to read keyring for {}: {}", conn_name, e))
+                    .map_err(|e| anyhow!("failed to read keyring for {}: {}", conn_name, e))?;
+
+                // Support OpenAI ChatGPT subscription OAuth: keyring may contain JSON blob
+                // with access_token (+ refresh). Return the access token for Bearer auth.
+                if let Ok(Some(creds)) = load_oauth_creds(conn_name) {
+                    // Lazy refresh if expired (best effort; errors are non-fatal here)
+                    let mut final_creds = creds;
+                    if crate::oauth::is_oauth_expired(&final_creds) {
+                        if let Ok(new_creds) = crate::oauth::refresh_openai_token(&final_creds) {
+                            let _ = crate::oauth::save_oauth_creds(conn_name, &new_creds);
+                            final_creds = new_creds;
+                        }
+                    }
+                    return Ok(final_creds.access_token);
+                }
+
+                // Trim again for legacy plain keys
+                Ok(stored.trim().to_string())
             }
             CredentialRef::Env { var_name } => {
                 if let Ok(val) = std::env::var(var_name) {
@@ -181,6 +197,32 @@ impl LlmClient {
                 Ok("ollama".to_string())
             }
         }
+    }
+
+    /// For OpenAI (including ChatGPT subscription OAuth), return any extra headers that should be sent
+    /// (e.g. ChatGPT-Account-Id for advanced models available via subscription).
+    fn openai_extra_headers(&self, conn_name: Option<&str>, conn: &ProviderConnection) -> Vec<(String, String)> {
+        let mut out = vec![];
+
+        // Try to get account id from stored OAuth creds (if we have the connection name)
+        if let Some(name) = conn_name {
+            if let Ok(Some(creds)) = crate::oauth::load_oauth_creds(name) {
+                if let Some(acct) = creds.account_id {
+                    if !acct.is_empty() {
+                        out.push(("ChatGPT-Account-Id".to_string(), acct));
+                    }
+                }
+            }
+        }
+
+        // Also support manually putting it in the provider's extra map
+        if let Some(acct) = conn.extra.get("chatgpt_account_id").or_else(|| conn.extra.get("ChatGPT-Account-Id")) {
+            if !acct.is_empty() && !out.iter().any(|(k, _)| k == "ChatGPT-Account-Id") {
+                out.push(("ChatGPT-Account-Id".to_string(), acct.clone()));
+            }
+        }
+
+        out
     }
 
     /// Quick reachability check for default Ollama (http://localhost:11434).
@@ -597,6 +639,11 @@ impl LlmClient {
             request = request.header("api-key", api_key);
         }
 
+        // OpenAI ChatGPT subscription (OAuth) often requires this for newer models.
+        for (k, v) in self.openai_extra_headers(None, conn) {
+            request = request.header(k, v);
+        }
+
         if stream {
             request = request.header("Accept", "text/event-stream");
         }
@@ -770,6 +817,11 @@ impl LlmClient {
         if conn.r#type == "azure_openai" || base.contains("azure.com") {
             request = request.header("api-key", api_key);
         }
+
+        for (k, v) in self.openai_extra_headers(None, conn) {
+            request = request.header(k, v);
+        }
+
         request = request.header("Accept", "text/event-stream");
 
         let resp = match request
@@ -1382,6 +1434,10 @@ impl LlmClient {
             }
             if conn.r#type == "azure_openai" || base.contains("azure.com") {
                 request = request.header("api-key", api_key);
+            }
+
+            for (k, v) in self.openai_extra_headers(None, conn) {
+                request = request.header(k, v);
             }
 
             match request.json(&body).send().await {

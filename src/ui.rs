@@ -655,9 +655,12 @@ fn models_for_connection(provider_type: &str, base_url: Option<&str>) -> &'stati
             "claude-3-opus-20240229",
         ],
         "google" => &[
+            "gemini-2.5-pro",
             "gemini-2.5-pro-preview-06-05",
+            "gemini-2.5-flash",
             "gemini-2.5-flash-preview-05-20",
             "gemini-2.0-flash",
+            "gemini-2.0-flash-thinking",
             "gemini-1.5-pro",
             "gemini-1.5-flash",
         ],

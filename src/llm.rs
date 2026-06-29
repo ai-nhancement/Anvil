@@ -269,7 +269,7 @@ impl LlmClient {
             .get(&url)
             .timeout(std::time::Duration::from_secs(4));
 
-        if base.to_ascii_lowercase().contains("generativelanguage") {
+        if Self::uses_google_query_key(base) {
             rb = rb.query(&[("key", api_key)]);
         } else {
             rb = rb.header("Authorization", format!("Bearer {}", api_key));
@@ -290,7 +290,20 @@ impl LlmClient {
 
         match resp.json::<L>().await {
             Ok(list) => {
-                let ids: Vec<String> = list.data.into_iter().map(|m| m.id).collect();
+                // Google's /openai/models (and native) return "models/gemini-..." ids.
+                // Strip the prefix (required for /chat/completions).
+                // Then, for Google bases, aggressively filter out AI Studio-only / live /
+                // embedding / legacy / experimental models that aren't usable for
+                // Anvil's tool-calling agent flows.
+                let mut ids: Vec<String> = list.data
+                    .into_iter()
+                    .map(|m| m.id.strip_prefix("models/").unwrap_or(&m.id).to_string())
+                    .collect();
+
+                if base.to_ascii_lowercase().contains("generativelanguage") {
+                    ids.retain(|id| Self::is_usable_gemini_model(id));
+                }
+
                 Ok(ids)
             }
             Err(_) => Ok(vec![]),
@@ -474,6 +487,39 @@ impl LlmClient {
         lower.contains("generativelanguage.googleapis.com") && !lower.contains("/openai")
     }
 
+    /// True only for native Gemini REST bases (generativelanguage without /openai).
+    /// The /v1beta/openai compat path must use standard Bearer auth (like any OpenAI client).
+    fn uses_google_query_key(base: &str) -> bool {
+        let lower = base.to_ascii_lowercase();
+        lower.contains("generativelanguage") && !lower.contains("/openai")
+    }
+
+    /// Returns true for Gemini model ids that are generally usable via the
+    /// OpenAI-compat chat endpoint for Anvil's agent/tool-calling workflows.
+    /// Filters out AI Studio-only, Live API, embedding, legacy, experimental,
+    /// and other models that don't work well (or at all) for generate + tools.
+    fn is_usable_gemini_model(id: &str) -> bool {
+        let lower = id.to_ascii_lowercase();
+        if !lower.starts_with("gemini") {
+            return false;
+        }
+        // Drop AI Studio web-only / live / non-chat / unstable models
+        !(lower.contains("live")
+            || lower.contains("aqa")
+            || lower.contains("embedding")
+            || lower.contains("tuned")
+            || lower.contains("bison")
+            || lower.contains("vision")
+            || lower.contains("-image")
+            || lower.contains("audio")
+            || lower.contains("exp")
+            || lower.contains("unicorn")
+            || lower.contains("palm")
+            || lower.starts_with("gemini-1.0")
+            || lower.contains("text-")
+            || lower.contains("learnlm"))
+    }
+
     async fn chat_openai_compat(
         &self,
         conn: &ProviderConnection,
@@ -484,6 +530,10 @@ impl LlmClient {
         stream: bool,
     ) -> Result<String> {
         let base = Self::openai_compat_base(conn)?;
+
+        // Google's OpenAI-compat /models returns "models/..." but /chat/completions
+        // requires the bare model name. Strip defensively (harmless for other providers).
+        let model = model.strip_prefix("models/").unwrap_or(model);
 
         let url = format!("{}/chat/completions", base);
 
@@ -536,7 +586,7 @@ impl LlmClient {
             .post(&url)
             .header("Content-Type", "application/json");
 
-        if base.to_ascii_lowercase().contains("generativelanguage") {
+        if Self::uses_google_query_key(&base) {
             request = request.query(&[("key", api_key)]);
         } else {
             request = request.header("Authorization", format!("Bearer {}", api_key));
@@ -656,6 +706,10 @@ impl LlmClient {
     ) -> Result<String> {
         let base = Self::openai_compat_base(conn)?;
 
+        // Google's OpenAI-compat /models returns "models/..." but /chat/completions
+        // requires the bare model name. Strip defensively (harmless for other providers).
+        let model = model.strip_prefix("models/").unwrap_or(model);
+
         let url = format!("{}/chat/completions", base);
 
         #[derive(Serialize)]
@@ -707,7 +761,7 @@ impl LlmClient {
             .post(&url)
             .header("Content-Type", "application/json");
 
-        if base.to_ascii_lowercase().contains("generativelanguage") {
+        if Self::uses_google_query_key(&base) {
             request = request.query(&[("key", api_key)]);
         } else {
             request = request.header("Authorization", format!("Bearer {}", api_key));
@@ -1260,6 +1314,11 @@ impl LlmClient {
         token_tx: UnboundedSender<String>,
     ) -> Result<AssistantTurn> {
         let base = Self::openai_compat_base(conn)?;
+
+        // Google's OpenAI-compat /models returns "models/..." but /chat/completions
+        // requires the bare model name. Strip defensively (harmless for other providers).
+        let model = model.strip_prefix("models/").unwrap_or(model);
+
         let url = format!("{}/chat/completions", base);
 
         // Build the messages array (system + history) in OpenAI wire form.
@@ -1314,8 +1373,9 @@ impl LlmClient {
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .header("Accept", "text/event-stream");
-            if base.to_ascii_lowercase().contains("generativelanguage") {
-                // Gemini OpenAI-compat accepts the API key as ?key= query param (preferred for AIza keys)
+            if Self::uses_google_query_key(&base) {
+                // Only native Gemini (no /openai) uses ?key= . The OpenAI-compat path
+                // (default for "google" provider) requires a standard Authorization: Bearer header.
                 request = request.query(&[("key", api_key)]);
             } else {
                 request = request.header("Authorization", format!("Bearer {}", api_key));
@@ -1328,10 +1388,14 @@ impl LlmClient {
                 Ok(r) if r.status().is_success() => break r,
                 Ok(r) => {
                     let status = r.status();
+                    // Retry 400s for providers that sometimes use them for transient load (e.g. xAI).
+                    // For Google, 400s are almost always terminal (auth, bad model/args, quota, etc.),
+                    // so fail fast instead of spamming "retrying" three times.
+                    let is_google = conn.r#type == "google" || conn.r#type == "google_ai_studio" || conn.r#type == "gemini";
                     let retryable = status.is_server_error()
-                        || status.as_u16() == 400
                         || status.as_u16() == 408
-                        || status.as_u16() == 429;
+                        || status.as_u16() == 429
+                        || (status.as_u16() == 400 && !is_google);
                     if retryable && attempt < MAX_ATTEMPTS {
                         let _ = token_tx.send(format!(
                             "[note]{} returned {} — retrying ({}/{})…",
